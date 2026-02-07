@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /ip
+Disallow: /admin
+Disallow: /wp-admin
+Disallow: /api/  # Consider if you want API indexed
