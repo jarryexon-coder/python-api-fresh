@@ -1,0 +1,1091 @@
+{
+  "nba": {
+    "league_stats": {
+      "avg_points_per_game": 114.2,
+      "avg_pace": 99.1,
+      "avg_offensive_rating": 115.8,
+      "avg_defensive_rating": 115.0,
+      "three_point_rate": 0.395,
+      "true_shooting_percentage": 0.578,
+      "avg_turnovers": 13.8,
+      "avg_rebounds": 44.2,
+      "avg_assists": 25.6
+    },
+    "team_stats": [
+      {
+        "team": "LAL",
+        "wins": 48,
+        "losses": 20,
+        "win_percentage": 0.701,
+        "points_per_game": 123.1,
+        "points_allowed": 114.6,
+        "offensive_rating": 114.7,
+        "defensive_rating": 114.9,
+        "net_rating": 5.4,
+        "pace": 97.6,
+        "effective_fg_percentage": 0.538,
+        "turnover_percentage": 0.124,
+        "offensive_rebound_percentage": 0.285,
+        "ft_rate": 0.245,
+        "three_point_percentage": 0.394,
+        "home_record": "23-7",
+        "road_record": "19-12",
+        "last_10": "6-4",
+        "streak": "L2",
+        "playoff_probability": 0.6
+      },
+      {
+        "team": "GSW",
+        "wins": 35,
+        "losses": 16,
+        "win_percentage": 0.548,
+        "points_per_game": 118.5,
+        "points_allowed": 118.3,
+        "offensive_rating": 116.9,
+        "defensive_rating": 111.9,
+        "net_rating": 10.7,
+        "pace": 102.7,
+        "effective_fg_percentage": 0.509,
+        "turnover_percentage": 0.138,
+        "offensive_rebound_percentage": 0.294,
+        "ft_rate": 0.224,
+        "three_point_percentage": 0.365,
+        "home_record": "22-11",
+        "road_record": "13-11",
+        "last_10": "8-3",
+        "streak": "W2",
+        "playoff_probability": 0.98
+      },
+      {
+        "team": "BOS",
+        "wins": 52,
+        "losses": 17,
+        "win_percentage": 0.505,
+        "points_per_game": 116.5,
+        "points_allowed": 114.6,
+        "offensive_rating": 124.4,
+        "defensive_rating": 112.8,
+        "net_rating": 13.6,
+        "pace": 95.6,
+        "effective_fg_percentage": 0.537,
+        "turnover_percentage": 0.148,
+        "offensive_rebound_percentage": 0.222,
+        "ft_rate": 0.229,
+        "three_point_percentage": 0.347,
+        "home_record": "17-8",
+        "road_record": "13-18",
+        "last_10": "6-3",
+        "streak": "L1",
+        "playoff_probability": 0.57
+      },
+      {
+        "team": "MIL",
+        "wins": 30,
+        "losses": 20,
+        "win_percentage": 0.463,
+        "points_per_game": 116.2,
+        "points_allowed": 106.8,
+        "offensive_rating": 121.4,
+        "defensive_rating": 117.3,
+        "net_rating": 10.0,
+        "pace": 103.3,
+        "effective_fg_percentage": 0.543,
+        "turnover_percentage": 0.142,
+        "offensive_rebound_percentage": 0.224,
+        "ft_rate": 0.265,
+        "three_point_percentage": 0.342,
+        "home_record": "19-8",
+        "road_record": "19-17",
+        "last_10": "5-2",
+        "streak": "W4",
+        "playoff_probability": 0.76
+      },
+      {
+        "team": "PHX",
+        "wins": 38,
+        "losses": 33,
+        "win_percentage": 0.56,
+        "points_per_game": 123.1,
+        "points_allowed": 106.3,
+        "offensive_rating": 110.7,
+        "defensive_rating": 114.0,
+        "net_rating": 11.8,
+        "pace": 99.3,
+        "effective_fg_percentage": 0.542,
+        "turnover_percentage": 0.158,
+        "offensive_rebound_percentage": 0.204,
+        "ft_rate": 0.239,
+        "three_point_percentage": 0.376,
+        "home_record": "18-14",
+        "road_record": "13-14",
+        "last_10": "5-3",
+        "streak": "W3",
+        "playoff_probability": 0.2
+      },
+      {
+        "team": "DEN",
+        "wins": 28,
+        "losses": 31,
+        "win_percentage": 0.55,
+        "points_per_game": 105.6,
+        "points_allowed": 105.9,
+        "offensive_rating": 111.4,
+        "defensive_rating": 119.1,
+        "net_rating": 4.2,
+        "pace": 103.7,
+        "effective_fg_percentage": 0.521,
+        "turnover_percentage": 0.153,
+        "offensive_rebound_percentage": 0.201,
+        "ft_rate": 0.292,
+        "three_point_percentage": 0.357,
+        "home_record": "21-6",
+        "road_record": "19-17",
+        "last_10": "7-4",
+        "streak": "W2",
+        "playoff_probability": 0.82
+      },
+      {
+        "team": "PHI",
+        "wins": 42,
+        "losses": 34,
+        "win_percentage": 0.612,
+        "points_per_game": 116.1,
+        "points_allowed": 113.6,
+        "offensive_rating": 114.3,
+        "defensive_rating": 116.7,
+        "net_rating": 4.6,
+        "pace": 98.8,
+        "effective_fg_percentage": 0.533,
+        "turnover_percentage": 0.141,
+        "offensive_rebound_percentage": 0.272,
+        "ft_rate": 0.242,
+        "three_point_percentage": 0.359,
+        "home_record": "18-11",
+        "road_record": "17-19",
+        "last_10": "4-5",
+        "streak": "W2",
+        "playoff_probability": 0.33
+      },
+      {
+        "team": "MIA",
+        "wins": 29,
+        "losses": 25,
+        "win_percentage": 0.64,
+        "points_per_game": 107.6,
+        "points_allowed": 108.1,
+        "offensive_rating": 123.5,
+        "defensive_rating": 117.7,
+        "net_rating": -1.2,
+        "pace": 99.3,
+        "effective_fg_percentage": 0.533,
+        "turnover_percentage": 0.126,
+        "offensive_rebound_percentage": 0.224,
+        "ft_rate": 0.231,
+        "three_point_percentage": 0.347,
+        "home_record": "21-6",
+        "road_record": "17-10",
+        "last_10": "4-2",
+        "streak": "W3",
+        "playoff_probability": 0.87
+      },
+      {
+        "team": "LAC",
+        "wins": 29,
+        "losses": 17,
+        "win_percentage": 0.666,
+        "points_per_game": 117.7,
+        "points_allowed": 109.1,
+        "offensive_rating": 116.9,
+        "defensive_rating": 117.6,
+        "net_rating": 10.4,
+        "pace": 99.3,
+        "effective_fg_percentage": 0.563,
+        "turnover_percentage": 0.142,
+        "offensive_rebound_percentage": 0.266,
+        "ft_rate": 0.226,
+        "three_point_percentage": 0.346,
+        "home_record": "19-15",
+        "road_record": "10-20",
+        "last_10": "7-2",
+        "streak": "W4",
+        "playoff_probability": 0.82
+      },
+      {
+        "team": "DAL",
+        "wins": 25,
+        "losses": 17,
+        "win_percentage": 0.715,
+        "points_per_game": 108.2,
+        "points_allowed": 111.7,
+        "offensive_rating": 119.1,
+        "defensive_rating": 119.0,
+        "net_rating": 10.2,
+        "pace": 104.2,
+        "effective_fg_percentage": 0.513,
+        "turnover_percentage": 0.143,
+        "offensive_rebound_percentage": 0.214,
+        "ft_rate": 0.246,
+        "three_point_percentage": 0.358,
+        "home_record": "17-5",
+        "road_record": "19-12",
+        "last_10": "6-5",
+        "streak": "W4",
+        "playoff_probability": 0.59
+      }
+    ],
+    "player_trends": [
+      {
+        "player_id": "player-1000",
+        "name": "Player 1",
+        "trend": "consistent",
+        "metric": "assists",
+        "last_5_games": [
+          38,
+          24,
+          25,
+          38,
+          13
+        ],
+        "avg_last_5": 19.0,
+        "season_avg": 12.5,
+        "change_percentage": 1.4,
+        "analysis": "Struggling with new offensive system",
+        "confidence": 79,
+        "timestamp": "2026-02-06T16:54:04.791103"
+      },
+      {
+        "player_id": "player-1001",
+        "name": "Player 2",
+        "trend": "rising",
+        "metric": "rebounds",
+        "last_5_games": [
+          22,
+          35,
+          26,
+          15,
+          18
+        ],
+        "avg_last_5": 24.2,
+        "season_avg": 14.5,
+        "change_percentage": 12.5,
+        "analysis": "Minutes restriction affecting production",
+        "confidence": 87,
+        "timestamp": "2026-02-06T16:54:04.791111"
+      },
+      {
+        "player_id": "player-1002",
+        "name": "Player 3",
+        "trend": "hot",
+        "metric": "points",
+        "last_5_games": [
+          29,
+          33,
+          37,
+          26,
+          32
+        ],
+        "avg_last_5": 21.4,
+        "season_avg": 23.8,
+        "change_percentage": 19.6,
+        "analysis": "Excellent matchup next game",
+        "confidence": 79,
+        "timestamp": "2026-02-06T16:54:04.791117"
+      },
+      {
+        "player_id": "player-1003",
+        "name": "Player 4",
+        "trend": "hot",
+        "metric": "assists",
+        "last_5_games": [
+          21,
+          37,
+          20,
+          15,
+          32
+        ],
+        "avg_last_5": 29.8,
+        "season_avg": 27.6,
+        "change_percentage": -7.1,
+        "analysis": "Minutes restriction affecting production",
+        "confidence": 65,
+        "timestamp": "2026-02-06T16:54:04.791123"
+      },
+      {
+        "player_id": "player-1004",
+        "name": "Player 5",
+        "trend": "rising",
+        "metric": "points",
+        "last_5_games": [
+          26,
+          10,
+          17,
+          15,
+          23
+        ],
+        "avg_last_5": 26.8,
+        "season_avg": 18.1,
+        "change_percentage": 35.5,
+        "analysis": "Benefiting from increased role",
+        "confidence": 91,
+        "timestamp": "2026-02-06T16:54:04.791128"
+      },
+      {
+        "player_id": "player-1005",
+        "name": "Player 6",
+        "trend": "cold",
+        "metric": "three_pointers",
+        "last_5_games": [
+          35,
+          23,
+          34,
+          39,
+          14
+        ],
+        "avg_last_5": 23.0,
+        "season_avg": 15.6,
+        "change_percentage": -15.0,
+        "analysis": "Struggling with new offensive system",
+        "confidence": 70,
+        "timestamp": "2026-02-06T16:54:04.791133"
+      },
+      {
+        "player_id": "player-1006",
+        "name": "Player 7",
+        "trend": "cold",
+        "metric": "points",
+        "last_5_games": [
+          17,
+          35,
+          31,
+          11,
+          29
+        ],
+        "avg_last_5": 31.2,
+        "season_avg": 18.2,
+        "change_percentage": -17.9,
+        "analysis": "Shooting efficiency has improved significantly",
+        "confidence": 82,
+        "timestamp": "2026-02-06T16:54:04.791138"
+      },
+      {
+        "player_id": "player-1007",
+        "name": "Player 8",
+        "trend": "rising",
+        "metric": "rebounds",
+        "last_5_games": [
+          35,
+          32,
+          15,
+          31,
+          36
+        ],
+        "avg_last_5": 19.6,
+        "season_avg": 20.3,
+        "change_percentage": 20.0,
+        "analysis": "Struggling with new offensive system",
+        "confidence": 85,
+        "timestamp": "2026-02-06T16:54:04.791143"
+      },
+      {
+        "player_id": "player-1008",
+        "name": "Player 9",
+        "trend": "rising",
+        "metric": "rebounds",
+        "last_5_games": [
+          16,
+          21,
+          12,
+          16,
+          22
+        ],
+        "avg_last_5": 30.6,
+        "season_avg": 27.3,
+        "change_percentage": 20.7,
+        "analysis": "Benefiting from increased role",
+        "confidence": 62,
+        "timestamp": "2026-02-06T16:54:04.791149"
+      },
+      {
+        "player_id": "player-1009",
+        "name": "Player 10",
+        "trend": "hot",
+        "metric": "three_pointers",
+        "last_5_games": [
+          34,
+          33,
+          34,
+          14,
+          31
+        ],
+        "avg_last_5": 22.4,
+        "season_avg": 18.5,
+        "change_percentage": 31.9,
+        "analysis": "Minutes restriction affecting production",
+        "confidence": 81,
+        "timestamp": "2026-02-06T16:54:04.791154"
+      },
+      {
+        "player_id": "player-1010",
+        "name": "Player 11",
+        "trend": "declining",
+        "metric": "points",
+        "last_5_games": [
+          33,
+          17,
+          31,
+          20,
+          29
+        ],
+        "avg_last_5": 27.0,
+        "season_avg": 22.1,
+        "change_percentage": -7.7,
+        "analysis": "Excellent matchup next game",
+        "confidence": 93,
+        "timestamp": "2026-02-06T16:54:04.791159"
+      },
+      {
+        "player_id": "player-1011",
+        "name": "Player 12",
+        "trend": "cold",
+        "metric": "assists",
+        "last_5_games": [
+          39,
+          28,
+          14,
+          22,
+          14
+        ],
+        "avg_last_5": 17.6,
+        "season_avg": 16.4,
+        "change_percentage": 16.2,
+        "analysis": "Struggling with new offensive system",
+        "confidence": 93,
+        "timestamp": "2026-02-06T16:54:04.791165"
+      },
+      {
+        "player_id": "player-1012",
+        "name": "Player 13",
+        "trend": "cold",
+        "metric": "assists",
+        "last_5_games": [
+          40,
+          30,
+          36,
+          12,
+          35
+        ],
+        "avg_last_5": 19.6,
+        "season_avg": 20.3,
+        "change_percentage": -19.3,
+        "analysis": "Struggling with new offensive system",
+        "confidence": 86,
+        "timestamp": "2026-02-06T16:54:04.791170"
+      },
+      {
+        "player_id": "player-1013",
+        "name": "Player 14",
+        "trend": "declining",
+        "metric": "assists",
+        "last_5_games": [
+          15,
+          18,
+          26,
+          38,
+          32
+        ],
+        "avg_last_5": 13.6,
+        "season_avg": 19.2,
+        "change_percentage": -14.6,
+        "analysis": "Shooting efficiency has improved significantly",
+        "confidence": 63,
+        "timestamp": "2026-02-06T16:54:04.791175"
+      },
+      {
+        "player_id": "player-1014",
+        "name": "Player 15",
+        "trend": "cold",
+        "metric": "fantasy_points",
+        "last_5_games": [
+          38,
+          21,
+          37,
+          22,
+          18
+        ],
+        "avg_last_5": 26.4,
+        "season_avg": 21.1,
+        "change_percentage": 27.5,
+        "analysis": "Shooting efficiency has improved significantly",
+        "confidence": 88,
+        "timestamp": "2026-02-06T16:54:04.791181"
+      },
+      {
+        "player_id": "player-1015",
+        "name": "Player 16",
+        "trend": "cold",
+        "metric": "assists",
+        "last_5_games": [
+          36,
+          32,
+          13,
+          11,
+          16
+        ],
+        "avg_last_5": 19.8,
+        "season_avg": 19.7,
+        "change_percentage": -1.5,
+        "analysis": "Minutes restriction affecting production",
+        "confidence": 76,
+        "timestamp": "2026-02-06T16:54:04.791186"
+      },
+      {
+        "player_id": "player-1016",
+        "name": "Player 17",
+        "trend": "hot",
+        "metric": "points",
+        "last_5_games": [
+          14,
+          34,
+          24,
+          25,
+          26
+        ],
+        "avg_last_5": 31.0,
+        "season_avg": 22.3,
+        "change_percentage": 15.9,
+        "analysis": "Struggling with new offensive system",
+        "confidence": 60,
+        "timestamp": "2026-02-06T16:54:04.791191"
+      },
+      {
+        "player_id": "player-1017",
+        "name": "Player 18",
+        "trend": "cold",
+        "metric": "assists",
+        "last_5_games": [
+          38,
+          39,
+          17,
+          29,
+          12
+        ],
+        "avg_last_5": 26.0,
+        "season_avg": 22.3,
+        "change_percentage": -3.8,
+        "analysis": "Excellent matchup next game",
+        "confidence": 62,
+        "timestamp": "2026-02-06T16:54:04.791196"
+      },
+      {
+        "player_id": "player-1018",
+        "name": "Player 19",
+        "trend": "consistent",
+        "metric": "fantasy_points",
+        "last_5_games": [
+          40,
+          27,
+          27,
+          17,
+          39
+        ],
+        "avg_last_5": 25.6,
+        "season_avg": 25.5,
+        "change_percentage": -18.7,
+        "analysis": "Minutes restriction affecting production",
+        "confidence": 76,
+        "timestamp": "2026-02-06T16:54:04.791201"
+      },
+      {
+        "player_id": "player-1019",
+        "name": "Player 20",
+        "trend": "declining",
+        "metric": "fantasy_points",
+        "last_5_games": [
+          26,
+          12,
+          32,
+          39,
+          36
+        ],
+        "avg_last_5": 25.6,
+        "season_avg": 18.7,
+        "change_percentage": 17.0,
+        "analysis": "Benefiting from increased role",
+        "confidence": 65,
+        "timestamp": "2026-02-06T16:54:04.791206"
+      }
+    ],
+    "historical_data": []
+  },
+  "nfl": {
+    "league_stats": {
+      "avg_points_per_game": 43.0,
+      "avg_yards_per_game": 338.5,
+      "avg_pass_yards": 225.8,
+      "avg_rush_yards": 112.7,
+      "avg_turnovers": 2.4,
+      "third_down_percentage": 0.388,
+      "red_zone_efficiency": 0.552,
+      "avg_time_of_possession": 30.15
+    },
+    "team_stats": [],
+    "player_trends": [],
+    "historical_data": []
+  },
+  "mlb": {
+    "league_stats": {
+      "avg_runs_per_game": 8.7,
+      "avg_era": 4.33,
+      "avg_ba": 0.248,
+      "avg_obp": 0.32,
+      "avg_slg": 0.414,
+      "avg_hr_per_game": 2.3,
+      "avg_strikeouts_per_game": 16.8,
+      "avg_walks_per_game": 6.5
+    },
+    "team_stats": [],
+    "player_trends": [],
+    "historical_data": []
+  },
+  "nhl": {
+    "league_stats": {
+      "avg_goals_per_game": 6.2,
+      "avg_shots_per_game": 61.5,
+      "avg_pp_percentage": 0.203,
+      "avg_pk_percentage": 0.797,
+      "avg_save_percentage": 0.905,
+      "avg_penalty_minutes": 10.2,
+      "avg_hits_per_game": 42.3,
+      "avg_faceoff_percentage": 0.5
+    },
+    "team_stats": [],
+    "player_trends": [],
+    "historical_data": []
+  },
+  "trends": {
+    "betting_trends": [
+      {
+        "id": "trend-0",
+        "sport": "nhl",
+        "trend": "Over hitting in 70% of division games",
+        "accuracy": 0.562,
+        "sample_size": 70,
+        "timeframe": "last 30 days",
+        "actionability": "low",
+        "last_verified": "2026-02-05T16:54:04.791214"
+      },
+      {
+        "id": "trend-1",
+        "sport": "nfl",
+        "trend": "Home underdogs covering 62% of spreads",
+        "accuracy": 0.716,
+        "sample_size": 115,
+        "timeframe": "last 30 days",
+        "actionability": "high",
+        "last_verified": "2026-01-31T16:54:04.791221"
+      },
+      {
+        "id": "trend-2",
+        "sport": "nfl",
+        "trend": "Over hitting in 70% of division games",
+        "accuracy": 0.616,
+        "sample_size": 99,
+        "timeframe": "this season",
+        "actionability": "high",
+        "last_verified": "2026-02-05T16:54:04.791226"
+      },
+      {
+        "id": "trend-3",
+        "sport": "nhl",
+        "trend": "Over hitting in 70% of division games",
+        "accuracy": 0.569,
+        "sample_size": 101,
+        "timeframe": "this season",
+        "actionability": "low",
+        "last_verified": "2026-02-05T16:54:04.791229"
+      },
+      {
+        "id": "trend-4",
+        "sport": "nfl",
+        "trend": "Back-to-back games affecting totals",
+        "accuracy": 0.576,
+        "sample_size": 172,
+        "timeframe": "last 30 days",
+        "actionability": "high",
+        "last_verified": "2026-02-04T16:54:04.791232"
+      },
+      {
+        "id": "trend-5",
+        "sport": "nhl",
+        "trend": "Back-to-back games affecting totals",
+        "accuracy": 0.687,
+        "sample_size": 155,
+        "timeframe": "last 30 days",
+        "actionability": "high",
+        "last_verified": "2026-02-02T16:54:04.791235"
+      },
+      {
+        "id": "trend-6",
+        "sport": "nfl",
+        "trend": "Primetime favorites struggling ATS",
+        "accuracy": 0.67,
+        "sample_size": 161,
+        "timeframe": "last 2 seasons",
+        "actionability": "high",
+        "last_verified": "2026-02-01T16:54:04.791238"
+      },
+      {
+        "id": "trend-7",
+        "sport": "nba",
+        "trend": "Home underdogs covering 62% of spreads",
+        "accuracy": 0.6,
+        "sample_size": 84,
+        "timeframe": "last 2 seasons",
+        "actionability": "low",
+        "last_verified": "2026-02-03T16:54:04.791241"
+      },
+      {
+        "id": "trend-8",
+        "sport": "nhl",
+        "trend": "Primetime favorites struggling ATS",
+        "accuracy": 0.619,
+        "sample_size": 128,
+        "timeframe": "this season",
+        "actionability": "high",
+        "last_verified": "2026-02-04T16:54:04.791245"
+      },
+      {
+        "id": "trend-9",
+        "sport": "nba",
+        "trend": "Home underdogs covering 62% of spreads",
+        "accuracy": 0.688,
+        "sample_size": 146,
+        "timeframe": "last 2 seasons",
+        "actionability": "high",
+        "last_verified": "2026-02-02T16:54:04.791248"
+      },
+      {
+        "id": "trend-10",
+        "sport": "mlb",
+        "trend": "Over hitting in 70% of division games",
+        "accuracy": 0.652,
+        "sample_size": 58,
+        "timeframe": "last 30 days",
+        "actionability": "low",
+        "last_verified": "2026-02-02T16:54:04.791252"
+      },
+      {
+        "id": "trend-11",
+        "sport": "nfl",
+        "trend": "Cold weather impacting scoring",
+        "accuracy": 0.595,
+        "sample_size": 125,
+        "timeframe": "this season",
+        "actionability": "medium",
+        "last_verified": "2026-01-31T16:54:04.791255"
+      },
+      {
+        "id": "trend-12",
+        "sport": "nba",
+        "trend": "Home underdogs covering 62% of spreads",
+        "accuracy": 0.569,
+        "sample_size": 133,
+        "timeframe": "this season",
+        "actionability": "high",
+        "last_verified": "2026-01-30T16:54:04.791258"
+      },
+      {
+        "id": "trend-13",
+        "sport": "nfl",
+        "trend": "Primetime favorites struggling ATS",
+        "accuracy": 0.646,
+        "sample_size": 154,
+        "timeframe": "last 2 seasons",
+        "actionability": "high",
+        "last_verified": "2026-02-03T16:54:04.791262"
+      },
+      {
+        "id": "trend-14",
+        "sport": "nfl",
+        "trend": "Back-to-back games affecting totals",
+        "accuracy": 0.662,
+        "sample_size": 184,
+        "timeframe": "last 2 seasons",
+        "actionability": "medium",
+        "last_verified": "2026-02-05T16:54:04.791265"
+      }
+    ],
+    "injury_impacts": [
+      {
+        "id": "injury-0",
+        "player": "Star Player 1",
+        "team": "LAL",
+        "injury": "hamstring strain",
+        "status": "probable",
+        "games_missed": 13,
+        "team_performance_with": "11-4",
+        "team_performance_without": "3-10",
+        "point_differential_change": 1.1,
+        "fantasy_impact": "minimal",
+        "return_timeline": "indefinite",
+        "updated": "2026-02-06T16:54:04.791271"
+      },
+      {
+        "id": "injury-1",
+        "player": "Star Player 2",
+        "team": "MIL",
+        "injury": "hamstring strain",
+        "status": "doubtful",
+        "games_missed": 15,
+        "team_performance_with": "11-3",
+        "team_performance_without": "5-12",
+        "point_differential_change": -1.1,
+        "fantasy_impact": "minimal",
+        "return_timeline": "day-to-day",
+        "updated": "2026-02-06T16:54:04.791276"
+      },
+      {
+        "id": "injury-2",
+        "player": "Star Player 3",
+        "team": "MIL",
+        "injury": "ankle sprain",
+        "status": "probable",
+        "games_missed": 15,
+        "team_performance_with": "10-5",
+        "team_performance_without": "4-11",
+        "point_differential_change": 2.3,
+        "fantasy_impact": "minimal",
+        "return_timeline": "day-to-day",
+        "updated": "2026-02-06T16:54:04.791280"
+      },
+      {
+        "id": "injury-3",
+        "player": "Star Player 4",
+        "team": "LAC",
+        "injury": "back tightness",
+        "status": "probable",
+        "games_missed": 1,
+        "team_performance_with": "9-5",
+        "team_performance_without": "6-10",
+        "point_differential_change": -2.2,
+        "fantasy_impact": "moderate",
+        "return_timeline": "1-2 weeks",
+        "updated": "2026-02-06T16:54:04.791285"
+      },
+      {
+        "id": "injury-4",
+        "player": "Star Player 5",
+        "team": "LAC",
+        "injury": "hamstring strain",
+        "status": "questionable",
+        "games_missed": 10,
+        "team_performance_with": "12-3",
+        "team_performance_without": "6-12",
+        "point_differential_change": 5.7,
+        "fantasy_impact": "minimal",
+        "return_timeline": "3-5 games",
+        "updated": "2026-02-06T16:54:04.791289"
+      },
+      {
+        "id": "injury-5",
+        "player": "Star Player 6",
+        "team": "DAL",
+        "injury": "hamstring strain",
+        "status": "probable",
+        "games_missed": 3,
+        "team_performance_with": "12-6",
+        "team_performance_without": "6-12",
+        "point_differential_change": 4.6,
+        "fantasy_impact": "significant",
+        "return_timeline": "1-2 weeks",
+        "updated": "2026-02-06T16:54:04.791293"
+      },
+      {
+        "id": "injury-6",
+        "player": "Star Player 7",
+        "team": "MIA",
+        "injury": "ankle sprain",
+        "status": "doubtful",
+        "games_missed": 10,
+        "team_performance_with": "10-6",
+        "team_performance_without": "6-10",
+        "point_differential_change": -2.8,
+        "fantasy_impact": "moderate",
+        "return_timeline": "3-5 games",
+        "updated": "2026-02-06T16:54:04.791297"
+      },
+      {
+        "id": "injury-7",
+        "player": "Star Player 8",
+        "team": "GSW",
+        "injury": "hamstring strain",
+        "status": "doubtful",
+        "games_missed": 13,
+        "team_performance_with": "9-6",
+        "team_performance_without": "6-11",
+        "point_differential_change": -5.4,
+        "fantasy_impact": "minimal",
+        "return_timeline": "3-5 games",
+        "updated": "2026-02-06T16:54:04.791302"
+      },
+      {
+        "id": "injury-8",
+        "player": "Star Player 9",
+        "team": "PHX",
+        "injury": "hamstring strain",
+        "status": "doubtful",
+        "games_missed": 8,
+        "team_performance_with": "10-5",
+        "team_performance_without": "6-11",
+        "point_differential_change": -7.7,
+        "fantasy_impact": "minimal",
+        "return_timeline": "indefinite",
+        "updated": "2026-02-06T16:54:04.791310"
+      },
+      {
+        "id": "injury-9",
+        "player": "Star Player 10",
+        "team": "MIL",
+        "injury": "back tightness",
+        "status": "probable",
+        "games_missed": 14,
+        "team_performance_with": "10-3",
+        "team_performance_without": "4-8",
+        "point_differential_change": -3.9,
+        "fantasy_impact": "significant",
+        "return_timeline": "day-to-day",
+        "updated": "2026-02-06T16:54:04.791314"
+      }
+    ],
+    "weather_effects": [],
+    "venue_advantages": []
+  },
+  "analytics": {
+    "predictive_models": [],
+    "machine_learning_insights": [],
+    "ai_predictions": [
+      {
+        "id": "ai-pred-0",
+        "game": "GSW vs DEN",
+        "prediction": "High scoring first half",
+        "confidence": 91,
+        "model_used": "random_forest",
+        "key_factors": [
+          "Home court advantage",
+          "Injury reports"
+        ],
+        "expected_value": 0.21,
+        "timestamp": "2026-02-06T16:54:04.791318",
+        "expires": "2026-02-07T16:54:04.791319"
+      },
+      {
+        "id": "ai-pred-1",
+        "game": "BOS vs DEN",
+        "prediction": "Home team wins by 3-7 points",
+        "confidence": 77,
+        "model_used": "gradient_boosting",
+        "key_factors": [
+          "Rest advantage",
+          "Weather conditions"
+        ],
+        "expected_value": 0.08,
+        "timestamp": "2026-02-06T16:54:04.791325",
+        "expires": "2026-02-07T16:54:04.791326"
+      },
+      {
+        "id": "ai-pred-2",
+        "game": "BOS vs MIA",
+        "prediction": "Underdog covers spread",
+        "confidence": 71,
+        "model_used": "gradient_boosting",
+        "key_factors": [
+          "Home court advantage",
+          "Weather conditions"
+        ],
+        "expected_value": 0.25,
+        "timestamp": "2026-02-06T16:54:04.791330",
+        "expires": "2026-02-07T16:54:04.791331"
+      },
+      {
+        "id": "ai-pred-3",
+        "game": "LAL vs MIA",
+        "prediction": "Star player over on points",
+        "confidence": 76,
+        "model_used": "random_forest",
+        "key_factors": [
+          "Matchup history",
+          "Officiating crew"
+        ],
+        "expected_value": 0.21,
+        "timestamp": "2026-02-06T16:54:04.791334",
+        "expires": "2026-02-07T16:54:04.791335"
+      },
+      {
+        "id": "ai-pred-4",
+        "game": "GSW vs MIA",
+        "prediction": "Home team wins by 3-7 points",
+        "confidence": 88,
+        "model_used": "gradient_boosting",
+        "key_factors": [
+          "Rest advantage",
+          "Weather conditions"
+        ],
+        "expected_value": 0.19,
+        "timestamp": "2026-02-06T16:54:04.791339",
+        "expires": "2026-02-07T16:54:04.791340"
+      },
+      {
+        "id": "ai-pred-5",
+        "game": "BOS vs DEN",
+        "prediction": "Underdog covers spread",
+        "confidence": 73,
+        "model_used": "gradient_boosting",
+        "key_factors": [
+          "Rest advantage",
+          "Officiating crew"
+        ],
+        "expected_value": 0.13,
+        "timestamp": "2026-02-06T16:54:04.791344",
+        "expires": "2026-02-07T16:54:04.791345"
+      },
+      {
+        "id": "ai-pred-6",
+        "game": "LAL vs DEN",
+        "prediction": "Star player over on points",
+        "confidence": 90,
+        "model_used": "ensemble",
+        "key_factors": [
+          "Home court advantage",
+          "Officiating crew"
+        ],
+        "expected_value": 0.17,
+        "timestamp": "2026-02-06T16:54:04.791348",
+        "expires": "2026-02-07T16:54:04.791349"
+      },
+      {
+        "id": "ai-pred-7",
+        "game": "LAL vs PHX",
+        "prediction": "Total points over 225.5",
+        "confidence": 70,
+        "model_used": "ensemble",
+        "key_factors": [
+          "Home court advantage",
+          "Injury reports"
+        ],
+        "expected_value": 0.18,
+        "timestamp": "2026-02-06T16:54:04.791352",
+        "expires": "2026-02-07T16:54:04.791353"
+      }
+    ]
+  },
+  "metadata": {
+    "last_updated": "2026-02-06T16:54:04.791004",
+    "data_sources": [
+      "internal",
+      "api_integrations",
+      "web_scraping"
+    ],
+    "version": "2.0.0",
+    "total_records": 63
+  }
+}

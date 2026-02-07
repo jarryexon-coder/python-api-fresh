@@ -7,7 +7,6 @@
   "deploy": {
     "startCommand": "python app.py",
     "restartPolicyType": "ON_FAILURE",
-    "healthcheckPath": "/api/health",
-    "healthcheckTimeout": 60
+    "restartPolicyMaxRetries": 3
   }
 }
