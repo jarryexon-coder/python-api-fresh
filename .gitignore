@@ -4,7 +4,6 @@ venv/
 .env
 *.log
 *.backup
-*.json
 test_*
 debug_*
 *.sh
