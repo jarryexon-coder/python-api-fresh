@@ -1,1 +1,1 @@
-web: gunicorn --workers=4 --bind=0.0.0.0:$PORT app:app
+web: gunicorn --workers=2 --bind=0.0.0.0:$PORT --access-logfile - --error-logfile - --log-level debug app:app
