@@ -480,6 +480,50 @@ def get_players():
             'count': 0
         })
 
+@app.route('/api/news')
+def get_news():
+    sport = request.args.get('sport', 'nba')
+    
+    # You can integrate with a real sports news API here
+    # For example: NewsAPI, ESPN API, or scrape sports sites
+    
+    # For now, return mock data that matches your frontend format
+    return jsonify({
+        "success": True,
+        "news": [
+            {
+                "id": "1",
+                "title": f"{sport.upper()} Trade Rumors Heating Up",
+                "description": "Several teams are discussing potential trades as the deadline approaches.",
+                "content": "League sources indicate multiple teams are active in trade discussions.",
+                "source": {"name": "ESPN"},
+                "publishedAt": "2024-01-15T10:30:00Z",
+                "url": "https://example.com/news/1",
+                "urlToImage": "https://images.unsplash.com/photo-1546519638-68e109498ffc?w=400&h=300&fit=crop",
+                "category": "trades",
+                "sport": sport.upper(),
+                "confidence": 85
+            },
+            {
+                "id": "2",
+                "title": f"{sport.upper()} Player Injury Update",
+                "description": "Star player listed as questionable for upcoming game.",
+                "content": "Team medical staff evaluating injury status.",
+                "source": {"name": "Sports Illustrated"},
+                "publishedAt": "2024-01-15T09:15:00Z",
+                "url": "https://example.com/news/2",
+                "urlToImage": "https://images.unsplash.com/photo-1575361204480-aadea25e6e68?w=400&h=300&fit=crop",
+                "category": "injuries",
+                "sport": sport.upper(),
+                "confidence": 92
+            }
+        ],
+        "count": 2,
+        "source": "python-backend",
+        "timestamp": datetime.now().isoformat(),
+        "sport": sport
+    })
+
 # ========== ESPN SCRAPER ENDPOINT ==========
 @app.route('/api/scrape/espn/nba')
 def scrape_espn_nba():
@@ -1239,32 +1283,50 @@ def generate_fallback_players(sport, limit):
 def get_fantasy_teams():
     sport = request.args.get('sport', 'nba').lower()
     
-    teams = [
-        {
-            'id': '1',
-            'name': 'The Dynasty',
-            'owner': 'Mike Smith',
-            'sport': 'NBA',
-            'league': 'Premier League',
-            'record': '12-3-0',
-            'points': 1850,
-            'rank': 1,
-            'players': ['LeBron James', 'Stephen Curry', 'Nikola Jokic'],  # Strings, not objects
-            'waiverPosition': 3,
-            'movesThisWeek': 2,
-            'lastUpdated': '2024-02-07T10:30:00Z',
-            'projectedPoints': 1920,
-            'winProbability': 0.78,
-            'strengthOfSchedule': 0.65
-        }
-    ]
+    # Check if data is loaded correctly
+    if not fantasy_teams_data:
+        return jsonify({
+            'success': True,
+            'teams': [],
+            'count': 0,
+            'sport': sport,
+            'timestamp': datetime.utcnow().isoformat() + "Z",
+            'message': 'No fantasy teams data loaded'
+        })
+    
+    # Handle both list of strings and list of dicts
+    teams = []
+    for team in fantasy_teams_data[:10]:  # Limit to 10 teams
+        if isinstance(team, dict):
+            # Already a dictionary
+            teams.append({
+                'id': team.get('id', 'unknown'),
+                'name': team.get('name', 'Unknown Team'),
+                'owner': team.get('owner', 'Unknown'),
+                'sport': team.get('sport', sport.upper()),
+                'record': team.get('record', '0-0-0'),
+                'points': team.get('points', 0),
+                'players': team.get('players', [])
+            })
+        elif isinstance(team, str):
+            # Convert string to dictionary
+            teams.append({
+                'id': f'team-{len(teams)}',
+                'name': team,
+                'owner': 'Team Owner',
+                'sport': sport.upper(),
+                'record': f'{random.randint(5, 12)}-{random.randint(3, 10)}-0',
+                'points': random.randint(1500, 2000),
+                'players': ['Player 1', 'Player 2', 'Player 3']
+            })
     
     return jsonify({
         'success': True,
         'count': len(teams),
-        'is_real_data': False,
-        'has_data': True,
-        'teams': teams
+        'teams': teams,
+        'sport': sport,
+        'timestamp': datetime.utcnow().isoformat() + "Z",
+        'has_data': len(teams) > 0
     })
 
 @app.route('/api/stats/database')
