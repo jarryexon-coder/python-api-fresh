@@ -1,12 +1,18 @@
 # test_local.py
-import requests
-import time
+from flask import Flask, jsonify
+import os
 
-print("Testing locally...")
-try:
-    response = requests.get("http://localhost:8000/api/health", timeout=5)
-    print(f"✅ Local health check: {response.status_code}")
-    if response.status_code == 200:
-        print(f"Response: {response.json()}")
-except Exception as e:
-    print(f"❌ Local test failed: {e}")
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return jsonify({'message': 'Test app running'})
+
+@app.route('/api/test')
+def test():
+    return jsonify({'success': True, 'test': 'local'})
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 3002))
+    print(f"Starting test server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=True)

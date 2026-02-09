@@ -7,3 +7,6 @@ venv/
 test_*
 debug_*
 *.sh
+app.minimal-working.backup.*
+.env.production
+python/
