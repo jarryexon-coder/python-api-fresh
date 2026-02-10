@@ -1,10 +1,7 @@
-# Python cache
+# Only ignore cache and env files, NOT data files
 __pycache__/
 *.pyc
-
-# Virtual environment
 venv/
-
-# Environment files
 .env
 .env.production
+*.backup.*

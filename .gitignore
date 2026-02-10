@@ -4,10 +4,9 @@ __pycache__/
 venv/
 env/
 
-# Environment files
+# Environment
 .env
 .env.production
-.env.local
 
 # IDE
 .vscode/
@@ -18,13 +17,16 @@ env/
 # OS
 .DS_Store
 
-# Temporary/backup files
+# Backup files
+*.backup.*
+app.minimal-working.backup.*
 *.backup
+
+# Temporary files
+python
 *.tmp
+*.temp
 
-# Test files
-test_*.py
-debug_*.py
-
-# Keep all JSON files - they're needed for data!
-# (Don't ignore *.json)
+# Test files (optional - keep if you want them tracked)
+# test_*.py
+# debug_*.py

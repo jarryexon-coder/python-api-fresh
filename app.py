@@ -26,6 +26,66 @@ except ImportError:
 
 load_dotenv()
 
+# ========== LOAD DATA FROM JSON FILES ==========
+print("🚀 Loading Fantasy API with REAL DATA from JSON files...")
+
+def safe_load_json(filename, default=None):
+    """Safely load JSON file with comprehensive error handling"""
+    try:
+        if os.path.exists(filename):
+            file_size = os.path.getsize(filename)
+            print(f"📁 Found {filename} ({file_size} bytes)")
+            
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+                
+            if not content.strip():
+                print(f"⚠️  {filename} is empty")
+                return default if default is not None else []
+                
+            data = json.loads(content)
+            
+            if isinstance(data, dict) and 'players' in data:
+                # Handle wrapped response format
+                players = data.get('players', [])
+                print(f"✅ Loaded {filename}: {len(players)} players (wrapped format)")
+                return players
+            elif isinstance(data, list):
+                print(f"✅ Loaded {filename}: {len(data)} items")
+                return data
+            elif isinstance(data, dict):
+                print(f"✅ Loaded {filename}: dict with {len(data)} keys")
+                return data
+            else:
+                print(f"⚠️  {filename} has unexpected format: {type(data)}")
+                return default if default is not None else []
+        else:
+            print(f"❌ {filename} not found")
+            return default if default is not None else []
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON decode error in {filename}: {e}")
+        return default if default is not None else []
+    except Exception as e:
+        print(f"❌ Error loading {filename}: {e}")
+        return default if default is not None else []
+
+# Load all data files
+players_data_list = safe_load_json('players_data.json', [])
+nfl_players_data = safe_load_json('nfl_players_data.json', [])
+mlb_players_data = safe_load_json('mlb_players_data.json', [])
+nhl_players_data = safe_load_json('nhl_players_data.json', [])
+fantasy_teams_data = safe_load_json('fantasy_teams_data.json', [])
+sports_stats_database = safe_load_json('sports_stats_database.json', {})
+
+print("\n📊 DATABASES SUMMARY:")
+print(f"   NBA Players: {len(players_data_list)}")
+print(f"   NFL Players: {len(nfl_players_data)}")
+print(f"   MLB Players: {len(mlb_players_data)}")
+print(f"   NHL Players: {len(nhl_players_data)}")
+print(f"   Fantasy Teams: {len(fantasy_teams_data)}")
+print(f"   Sports Stats: {'Yes' if sports_stats_database else 'No'}")
+print("=" * 50)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -47,8 +107,7 @@ odds_cache = {}
 parlay_cache = {}
 general_cache = {}
 
-# Rate limiting storage
-request_log = defaultdict(list)
+# Rate limiting storage request_log = defaultdict(list)
 
 # Global flag to track if we've already printed startup messages
 _STARTUP_PRINTED = False
@@ -58,7 +117,7 @@ def print_startup_once():
     global _STARTUP_PRINTED
     if not _STARTUP_PRINTED:
         print("🚀 FANTASY API WITH REAL DATA - ALL ENDPOINTS REGISTERED")
-        _STARTUP_PRINTED = True
+        _STARTUP_PRINTED = True 
 
 print(f"🚀 Loading Fantasy API with REAL DATA from JSON files...")
 
@@ -69,7 +128,7 @@ SCRAPER_CONFIG = {
             {
                 'name': 'ESPN',
                 'url': 'https://www.espn.com/nba/scoreboard',
-                'selectors': {
+                'selectors': {  
                     'game_container': 'article.scorecard',
                     'teams': '.ScoreCell__TeamName',
                     'scores': '.ScoreCell__Score',
