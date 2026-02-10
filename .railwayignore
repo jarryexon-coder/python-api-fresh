@@ -1,9 +1,10 @@
-*.json
+# Python cache
 __pycache__/
-venv/
 *.pyc
+
+# Virtual environment
+venv/
+
+# Environment files
 .env
-*.backup
-test_*
-debug_*
-*.sh
+.env.production

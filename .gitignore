@@ -1,12 +1,30 @@
+# Python
 __pycache__/
-venv/
 *.pyc
+venv/
+env/
+
+# Environment files
 .env
-*.log
-*.backup
-test_*
-debug_*
-*.sh
-app.minimal-working.backup.*
 .env.production
-python/
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Temporary/backup files
+*.backup
+*.tmp
+
+# Test files
+test_*.py
+debug_*.py
+
+# Keep all JSON files - they're needed for data!
+# (Don't ignore *.json)
