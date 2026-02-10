@@ -51,6 +51,124 @@ def is_rate_limited(ip, endpoint, limit=60, window=60):
     request_log[ip].append(current_time)
     return False
 
+# ========== SPORTSDATA.IO API FUNCTIONS ==========
+def fetch_sportsdata_players(sport='nba'):
+    """Fetches real player projections and salaries from SportsData.io"""
+    if not SPORTSDATA_API_KEY:
+        print("⚠️ SPORTSDATA_API_KEY not configured")
+        return None
+    
+    headers = {'Ocp-Apim-Subscription-Key': SPORTSDATA_API_KEY}
+    
+    # Example: Fetch current day's projected player game stats for NBA
+    # You may need to adjust the endpoint based on the specific feed you need
+    current_date = datetime.now().strftime('%Y-%m-%d')
+    url = f'https://api.sportsdata.io/v3/{sport}/projections/json/PlayerGameProjectionStatsByDate/{current_date}'
+    
+    try:
+        print(f"🔄 Fetching real data from SportsData.io for {sport} on {current_date}")
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()  # Raises an error for bad status codes
+        data = response.json()
+        print(f"✅ Successfully fetched {len(data)} players from SportsData.io")
+        return data
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching from SportsData.io: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Unexpected error with SportsData.io: {e}")
+        return None
+
+def format_sportsdata_player(api_player, sport='nba'):
+    """Formats a player object from SportsData.io to match your frontend schema."""
+    try:
+        # Calculate value score
+        fantasy_points = api_player.get('FantasyPoints', 0) or api_player.get('fantasy_points', 0)
+        salary = api_player.get('FanDuelSalary', 0) or api_player.get('salary', 0)
+        value = calculate_value(fantasy_points, salary)
+        
+        # Get player name from different possible fields
+        name = (api_player.get('Name') or api_player.get('PlayerName') or 
+                api_player.get('name') or f"Player_{api_player.get('PlayerID', 'unknown')}")
+        
+        # Get position
+        position = api_player.get('Position') or api_player.get('position', 'Unknown')
+        
+        # Get team
+        team = api_player.get('Team') or api_player.get('team', 'Unknown')
+        
+        return {
+            'id': api_player.get('PlayerID') or api_player.get('id', str(uuid.uuid4())[:8]),
+            'name': name,
+            'team': team,
+            'position': position,
+            # Use REAL salaries and projections
+            'fanduel_salary': api_player.get('FanDuelSalary'),
+            'draftkings_salary': api_player.get('DraftKingsSalary'),
+            'salary': api_player.get('FanDuelSalary', 0) or api_player.get('salary', 0),
+            'projection': fantasy_points,
+            'projected_points': fantasy_points,
+            'fantasy_points': fantasy_points,
+            'fantasyScore': fantasy_points,
+            'value': value,
+            'valueScore': value,
+            # Map other stats as needed
+            'points': api_player.get('Points', 0) or api_player.get('points', 0),
+            'rebounds': api_player.get('Rebounds', 0) or api_player.get('rebounds', 0) or api_player.get('reb', 0),
+            'assists': api_player.get('Assists', 0) or api_player.get('assists', 0) or api_player.get('ast', 0),
+            'steals': api_player.get('Steals', 0) or api_player.get('steals', 0),
+            'blocks': api_player.get('BlockedShots', 0) or api_player.get('blocks', 0),
+            'minutes': api_player.get('Minutes', 0) or api_player.get('minutes', 0),
+            'field_goal_percentage': api_player.get('FieldGoalsPercentage', 0),
+            'three_point_percentage': api_player.get('ThreePointersPercentage', 0),
+            'free_throw_percentage': api_player.get('FreeThrowsPercentage', 0),
+            'turnovers': api_player.get('Turnovers', 0),
+            # Important flag for your frontend
+            'is_real_data': True,
+            'data_source': 'SportsData.io Real-Time API',
+            'sport': sport.upper(),
+            'player_image': api_player.get('PhotoUrl') or api_player.get('player_image', ''),
+            'injury_status': api_player.get('InjuryStatus', 'Healthy') or api_player.get('injury_status', 'Healthy'),
+            'game_time': api_player.get('GameDateTime') or api_player.get('game_time', ''),
+            'opponent': api_player.get('Opponent') or api_player.get('opponent', ''),
+            # Projections object for consistency
+            'projections': {
+                'fantasy_points': fantasy_points,
+                'points': api_player.get('Points', 0) or api_player.get('points', 0),
+                'rebounds': api_player.get('Rebounds', 0) or api_player.get('rebounds', 0),
+                'assists': api_player.get('Assists', 0) or api_player.get('assists', 0),
+                'steals': api_player.get('Steals', 0) or api_player.get('steals', 0),
+                'blocks': api_player.get('BlockedShots', 0) or api_player.get('blocks', 0),
+                'value': value,
+                'confidence': api_player.get('ProjectionConfidence', 0.7) or random.uniform(0.6, 0.9)
+            }
+        }
+    except Exception as e:
+        print(f"⚠️ Error formatting SportsData.io player: {e}")
+        # Return a basic formatted player
+        return {
+            'id': api_player.get('PlayerID') or str(uuid.uuid4())[:8],
+            'name': api_player.get('Name') or 'Unknown Player',
+            'team': api_player.get('Team', 'Unknown'),
+            'position': api_player.get('Position', 'Unknown'),
+            'salary': api_player.get('FanDuelSalary', 0),
+            'projection': api_player.get('FantasyPoints', 0),
+            'value': 0,
+            'is_real_data': True,
+            'data_source': 'SportsData.io'
+        }
+
+def calculate_value(fantasy_points, salary):
+    """Calculate value score (fantasy points per $1000 of salary)"""
+    if salary and salary > 0:
+        return round((fantasy_points / (salary / 1000)), 2)
+    return 0
+
+def get_fallback_players(sport):
+    """Fallback function when SportsData.io API fails"""
+    print(f"⚠️ Using fallback data for {sport}")
+    return None
+
 # ========== LOAD DATA FROM JSON FILES ==========
 print("🚀 Loading Fantasy API with REAL DATA from JSON files...")
 
@@ -164,26 +282,6 @@ SCRAPER_CONFIG = {
     }
 }
 
-# ========== WEB SCRAPER CONFIGURATION ==========
-SCRAPER_CONFIG = {
-    'nba': {
-        'sources': [
-            {
-                'name': 'ESPN',
-                'url': 'https://www.espn.com/nba/scoreboard',
-                'selectors': {  
-                    'game_container': 'article.scorecard',
-                    'teams': '.ScoreCell__TeamName',
-                    'scores': '.ScoreCell__Score',
-                    'status': '.ScoreboardScoreCell__Time',
-                    'details': '.ScoreboardScoreCell__Detail'
-                }
-            }
-        ],
-        'cache_time': 2
-    }
-}
-
 # ========== WEB SCRAPER FUNCTIONS ==========
 async def fetch_page(url, headers=None):
     """Fetch a webpage asynchronously"""
@@ -260,18 +358,6 @@ def run_async(coro):
         loop.close()
 
 # ========== UTILITY FUNCTIONS ==========
-def is_rate_limited(ip, endpoint, limit=10, window=60):
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=window)
-    
-    request_log[ip] = [t for t in request_log[ip] if t > window_start]
-    
-    if len(request_log[ip]) >= limit:
-        return True
-    
-    request_log[ip].append(now)
-    return False
-
 def get_cache_key(endpoint, params):
     key_str = f"{endpoint}:{json.dumps(params, sort_keys=True)}"
     return hashlib.md5(key_str.encode()).hexdigest()
@@ -636,13 +722,45 @@ def enhance_player_data(player):
 
 @app.route('/api/players')
 def get_players():
-    """Get players - Returns ALL available players up to limit"""
+    """Get players - Returns ALL available players up to limit, with SportsData.io integration"""
     try:
         sport = flask_request.args.get('sport', 'nba').lower()
-        limit = int(flask_request.args.get('limit', '200'))  # Default to 200 instead of 100
+        limit = int(flask_request.args.get('limit', '200'))
+        use_realtime = flask_request.args.get('realtime', 'true').lower() == 'true'
 
-        print(f"🎯 GET /api/players for FantasyHub: sport={sport}, limit={limit}")
+        print(f"🎯 GET /api/players for FantasyHub: sport={sport}, limit={limit}, realtime={use_realtime}")
 
+        # TRY to get real data from SportsData.io first (if enabled)
+        real_players_data = None
+        if use_realtime and SPORTSDATA_API_KEY:
+            print(f"🔄 Attempting to fetch real-time data from SportsData.io for {sport}")
+            real_players_data = fetch_sportsdata_players(sport)
+        
+        if real_players_data:
+            # Process and return the real API data
+            print(f"✅ Using real-time data from SportsData.io: {len(real_players_data)} players")
+            enhanced_players = []
+            for player in real_players_data[:limit]:
+                formatted_player = format_sportsdata_player(player, sport)
+                if formatted_player:
+                    enhanced_players.append(formatted_player)
+            
+            return jsonify({
+                'success': True,
+                'players': enhanced_players,
+                'count': len(enhanced_players),
+                'data_source': 'SportsData.io Real-Time API',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'sport': sport,
+                'limit_requested': limit,
+                'limit_applied': len(enhanced_players),
+                'message': f'Loaded {len(enhanced_players)} real-time players from SportsData.io',
+                'is_realtime': True
+            })
+        
+        # Fallback to your current JSON data (with improved mock logic if needed)
+        print(f"⚠️ Using fallback JSON data for {sport}")
+        
         # Determine which data source to use based on sport
         if sport == 'nfl':
             data_source = nfl_players_data
@@ -772,7 +890,8 @@ def get_players():
                 
                 'is_real_data': bool(data_source and len(data_source) > 0),
                 'data_source': source_name,
-                'is_enhanced': True  # Flag to indicate this player was enhanced
+                'is_enhanced': True,  # Flag to indicate this player was enhanced
+                'is_realtime': False  # Flag to indicate this is not real-time data
             }
             
             enhanced_players.append(formatted_player)
@@ -789,7 +908,8 @@ def get_players():
             'limit_requested': limit,
             'limit_applied': len(players_to_use),
             'message': f'Loaded and enhanced {len(enhanced_players)} of {total_available} {source_name} players',
-            'enhancement_applied': True
+            'enhancement_applied': True,
+            'is_realtime': False
         })  
         
     except Exception as e:
@@ -1159,6 +1279,7 @@ def health():
         },
         "apis_configured": {
             "odds_api": bool(THE_ODDS_API_KEY),
+            "sportsdata_api": bool(SPORTSDATA_API_KEY),  # Added SportsData.io API status
             "deepseek_ai": bool(DEEPSEEK_API_KEY),
             "news_api": bool(NEWS_API_KEY),
             "nfl_api": bool(NFL_API_KEY),
@@ -1320,8 +1441,38 @@ def get_fantasy_players():
     """Get fantasy players data - FIXED VERSION"""
     sport = flask_request.args.get('sport', 'nba').lower()
     limit = int(flask_request.args.get('limit', '100'))
+    use_realtime = flask_request.args.get('realtime', 'true').lower() == 'true'
     
-    print(f"🎯 GET /api/fantasy/players: sport={sport}, limit={limit}")
+    print(f"🎯 GET /api/fantasy/players: sport={sport}, limit={limit}, realtime={use_realtime}")
+    
+    # TRY to get real data from SportsData.io first (if enabled)
+    if use_realtime and SPORTSDATA_API_KEY:
+        print(f"🔄 Attempting to fetch real-time data from SportsData.io for {sport}")
+        real_players_data = fetch_sportsdata_players(sport)
+        
+        if real_players_data:
+            # Process and return the real API data
+            print(f"✅ Using real-time data from SportsData.io: {len(real_players_data)} players")
+            real_players = []
+            for player in real_players_data[:limit]:
+                formatted_player = format_sportsdata_player(player, sport)
+                if formatted_player:
+                    real_players.append(formatted_player)
+            
+            return jsonify({
+                "success": True,
+                "players": real_players,
+                "count": len(real_players),
+                "sport": sport,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "is_real_data": True,
+                "data_source": "SportsData.io Real-Time API",
+                "is_realtime": True,
+                "message": f"Found {len(real_players)} real-time players from SportsData.io"
+            })
+    
+    # Fallback to JSON data
+    print(f"⚠️ Using fallback JSON data for {sport}")
     
     # Check what data we have
     print(f"📊 Data available: NBA={len(players_data_list)}, NFL={len(nfl_players_data)}, MLB={len(mlb_players_data)}, NHL={len(nhl_players_data)}")
@@ -1427,6 +1578,7 @@ def get_fantasy_players():
                     "confidence": random.uniform(0.6, 0.9)
                 },
                 "is_real_data": True,
+                "is_realtime": False,
                 "player_id": player.get('id', f"unknown-{i}"),
                 "team_full": player.get('team', ''),
                 "opponent": player.get('opponent', ''),
@@ -1446,6 +1598,7 @@ def get_fantasy_players():
         "sport": sport,
         "last_updated": datetime.now(timezone.utc).isoformat(),
         "is_real_data": True,
+        "is_realtime": False,
         "message": f"Found {len(real_players)} players for {sport_title}"
     })
 
@@ -1671,12 +1824,17 @@ def api_info():
         "name": "Python Fantasy Sports API",
         "version": "1.0.0",
         "endpoints": {
-            "players": "/api/fantasy/players?sport={sport}",
+            "players": "/api/fantasy/players?sport={sport}&realtime=true",
             "teams": "/api/fantasy/teams?sport={sport}",
             "health": "/api/health",
             "info": "/api/info"
         },
-        "supported_sports": ["nba", "nfl", "mlb", "nhl"]
+        "supported_sports": ["nba", "nfl", "mlb", "nhl"],
+        "features": {
+            "realtime_data": bool(SPORTSDATA_API_KEY),
+            "sportsdata_api": "SportsData.io integration for real-time player projections",
+            "json_fallback": "Local JSON databases for offline/fallback data"
+        }
     })
 
 @app.route('/api/stats/database')
@@ -4326,8 +4484,8 @@ if __name__ == '__main__':
     print(f"📡 Railway URL: https://python-api-fresh-production.up.railway.app")
     print(f"📈 Available endpoints:")
     print(f"   • /api/health - Enhanced health check with all endpoints")
-    print(f"   • /api/players - Multi-sport player data")
-    print(f"   • /api/fantasy/players - Complete fantasy player data")
+    print(f"   • /api/players - Multi-sport player data with SportsData.io integration")
+    print(f"   • /api/fantasy/players - Complete fantasy player data with real-time option")
     print(f"   • /api/fantasy/teams - Fantasy teams")
     print(f"   • /api/stats/database - Comprehensive stats DB")
     print(f"   • /api/players/trends - Player trends")
@@ -4335,6 +4493,7 @@ if __name__ == '__main__':
     print(f"   • /api/secret/phrases - Secret betting phrases")
     print(f"   • 20+ additional endpoints...")
     print(f"✅ All endpoints now use REAL DATA from your JSON files")
+    print(f"🔗 SportsData.io API: {'✅ Configured' if SPORTSDATA_API_KEY else '❌ Not configured'}")
     print(f"🔒 Security headers enabled: XSS protection, content sniffing, frame denial")
     print(f"⚡ Request size limiting: 1MB max")
     print(f"📊 Rate limits configured:")
