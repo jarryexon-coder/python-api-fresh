@@ -560,16 +560,89 @@ def log_response_info(response):
         print(f"📤 [{flask_request.request_id}] Response: {response.status}")
     return response
 
-# ========== ESSENTIAL ENDPOINTS ==========
+# Add this function before the /api/players endpoint
+def enhance_player_data(player):
+    """Add realistic projections and salaries based on player stats"""
+    if not player:
+        return player
+    
+    # Get base stats
+    points = player.get('points', 0)
+    rebounds = player.get('rebounds', 0)
+    assists = player.get('assists', 0)
+    steals = player.get('steals', 0)
+    blocks = player.get('blocks', 0)
+    
+    # Calculate realistic FanDuel fantasy points
+    # FanDuel scoring: 1pt per point, 1.2pt per rebound, 1.5pt per assist, 
+    # 3pt per steal, 3pt per block, -1pt per turnover
+    turnovers = player.get('stats', {}).get('turnovers', 2.0)
+    
+    fan_duel_fantasy = (
+        points +                     # 1pt per point
+        (rebounds * 1.2) +           # 1.2pts per rebound
+        (assists * 1.5) +            # 1.5pts per assist
+        (steals * 3) +               # 3pts per steal
+        (blocks * 3) -               # 3pts per block
+        turnovers                    # -1pt per turnover
+    )
+    
+    # Add variation for projections (slightly higher/lower)
+    import random
+    projection_variation = random.uniform(0.9, 1.1)
+    projected_fantasy = fan_duel_fantasy * projection_variation
+    
+    # Calculate realistic salary based on performance
+    # NBA stars: $9,000-$12,000, Starters: $6,000-$9,000, Bench: $3,000-$6,000
+    fantasy_tier = fan_duel_fantasy / 40  # Scale factor
+    
+    if fantasy_tier > 1.2:
+        salary = random.randint(10000, 12000)  # Superstar
+    elif fantasy_tier > 0.8:
+        salary = random.randint(7500, 10000)   # Star
+    elif fantasy_tier > 0.5:
+        salary = random.randint(6000, 8000)    # Starter
+    elif fantasy_tier > 0.3:
+        salary = random.randint(4000, 6000)    # Rotation player
+    else:
+        salary = random.randint(3000, 4500)    # Bench
+    
+    # Calculate value (fantasy points per $1000 of salary)
+    value = (fan_duel_fantasy / (salary / 1000)) if salary > 0 else 0
+    
+    # Update player with realistic data
+    player['fantasyScore'] = round(fan_duel_fantasy, 1)
+    player['fantasy_points'] = round(fan_duel_fantasy, 1)
+    player['projected_points'] = round(projected_fantasy, 1)
+    player['projection'] = round(projected_fantasy, 1)
+    player['fanduel_salary'] = salary
+    player['salary'] = salary
+    player['valueScore'] = round(value, 2)
+    player['value'] = round(value, 2)
+    
+    # Add projections object
+    player['projections'] = {
+        'fantasy_points': round(projected_fantasy, 1),
+        'points': round(points * random.uniform(0.9, 1.1), 1),
+        'rebounds': round(rebounds * random.uniform(0.9, 1.1), 1),
+        'assists': round(assists * random.uniform(0.9, 1.1), 1),
+        'steals': round(steals * random.uniform(0.9, 1.1), 1),
+        'blocks': round(blocks * random.uniform(0.9, 1.1), 1),
+        'value': round(value, 2),
+        'confidence': round(random.uniform(0.6, 0.9), 2)
+    }
+    
+    return player
+
 @app.route('/api/players')
 def get_players():
     """Get players - Returns ALL available players up to limit"""
     try:
         sport = flask_request.args.get('sport', 'nba').lower()
         limit = int(flask_request.args.get('limit', '200'))  # Default to 200 instead of 100
-        
+
         print(f"🎯 GET /api/players for FantasyHub: sport={sport}, limit={limit}")
-        
+
         # Determine which data source to use based on sport
         if sport == 'nfl':
             data_source = nfl_players_data
@@ -587,10 +660,10 @@ def get_players():
         # Check what we have
         total_available = len(data_source) if data_source else 0
         print(f"📊 Found {total_available} {source_name} players in database")
-        
+
         # Take ALL players up to limit (or all if limit is large)
         if data_source and len(data_source) > 0:
-            # If limit is 0 or negative, return all players
+            # If limit is 0 or negative, return all players   
             if limit <= 0:
                 players_to_use = data_source
                 print(f"📋 Using ALL {total_available} players (no limit specified)")
@@ -601,127 +674,123 @@ def get_players():
             players_to_use = []
             print("⚠️ No players found in database")
         
-        formatted_players = []
+        # ENHANCE EACH PLAYER WITH REALISTIC DATA
+        enhanced_players = []
         for i, player in enumerate(players_to_use):
-            # Extract player info with safe defaults
+            # Create a copy to enhance
+            player_copy = player.copy() if isinstance(player, dict) else {}
+            
+            # Get basic player info first
             player_name = player.get('name') or player.get('player_name') or f'Player_{i}'
             team = player.get('team', player.get('team_name', 'Unknown'))
             position = player.get('position', player.get('pos', 'Unknown'))
             
-            # Generate fantasy stats from real data if available
-            fantasy_points = player.get('fantasyScore') or player.get('fantasy_points') or random.uniform(25, 70)
-            points = player.get('points') or player.get('pts') or random.uniform(10, 40)
-            rebounds = player.get('rebounds') or player.get('reb') or random.uniform(3, 15)
-            assists = player.get('assists') or player.get('ast') or random.uniform(2, 12)
+            # Ensure we have basic stats for enhancement
+            if 'points' not in player_copy:
+                player_copy['points'] = player.get('points') or player.get('pts') or random.uniform(10, 40)
+            if 'rebounds' not in player_copy:
+                player_copy['rebounds'] = player.get('rebounds') or player.get('reb') or random.uniform(3, 15)
+            if 'assists' not in player_copy:
+                player_copy['assists'] = player.get('assists') or player.get('ast') or random.uniform(2, 12)
+            if 'steals' not in player_copy:
+                player_copy['steals'] = player.get('steals') or player.get('stl') or random.uniform(0.5, 2.5)
+            if 'blocks' not in player_copy:
+                player_copy['blocks'] = player.get('blocks') or player.get('blk') or random.uniform(0.3, 2.0)
             
-            # Get salary from various possible fields
-            salary_fields = ['salary', 'fanduel_salary', 'draftkings_salary', 'dk_salary', 'fd_salary']
-            salary = None
-            for field in salary_fields:
-                if field in player:
-                    salary = player[field]
-                    break
-            if salary is None:
-                salary = random.randint(4000, 15000)
+            # Add stats object if not present
+            if 'stats' not in player_copy:
+                player_copy['stats'] = {
+                    'turnovers': random.uniform(1.5, 4.0),
+                    'field_goal_pct': random.uniform(0.42, 0.55),
+                    'three_point_pct': random.uniform(0.33, 0.43),
+                    'free_throw_pct': random.uniform(0.75, 0.90)
+                }
             
-            # Calculate derived stats
-            projection = fantasy_points * (1 + random.uniform(0.05, 0.15))
-            value = fantasy_points / (salary / 1000) if salary > 0 else 0
+            # Apply enhancement
+            enhanced_player = enhance_player_data(player_copy)
             
-            # Get real stats if available
-            steals = player.get('steals') or player.get('stl') or random.uniform(0.5, 2.5)
-            blocks = player.get('blocks') or player.get('blk') or random.uniform(0.3, 2.0)
-            minutes = player.get('minutes') or player.get('min') or random.uniform(20, 40)
+            # Now format the enhanced player for response
+            player_id = enhanced_player.get('id') or player.get('player_id') or f'player-{i}'
+            age = enhanced_player.get('age') or player.get('age') or random.randint(21, 38)
+            games_played = enhanced_player.get('games_played') or player.get('gp') or random.randint(40, 82)
+            minutes = enhanced_player.get('minutes') or player.get('min') or random.uniform(20, 40)
             
-            # Get additional real data if available
-            player_id = player.get('id') or player.get('player_id') or f'player-{i}'
-            age = player.get('age') or random.randint(21, 38)
-            games_played = player.get('games_played') or player.get('gp') or random.randint(40, 82)
+            # Get fantasy points from enhanced data
+            fantasy_points = enhanced_player.get('fantasy_points', 0)
+            projected_points = enhanced_player.get('projected_points', 0)
+            salary = enhanced_player.get('salary', 0)
+            value = enhanced_player.get('value', 0)
+            
+            # Get projections from enhanced data or create default
+            projections = enhanced_player.get('projections', {})
             
             formatted_player = {
                 'id': player_id,
                 'name': player_name,
                 'team': team,
-                'position': position,
+                'position': position,  
                 'sport': sport.upper(),
                 'age': age,
                 'games_played': games_played,
                 
-                # Fantasy stats
+                # Fantasy stats from enhancement
                 'fantasy_points': round(fantasy_points, 1),
                 'fantasyScore': round(fantasy_points, 1),
-                'projected_points': round(projection, 1),
-                'projection': round(projection, 1),
+                'projected_points': round(projected_points, 1),
+                'projection': round(projected_points, 1),
                 
                 # Real stats
-                'points': round(points, 1),
-                'rebounds': round(rebounds, 1),
-                'assists': round(assists, 1),
-                'steals': round(steals, 1),
-                'blocks': round(blocks, 1),
+                'points': round(enhanced_player.get('points', 0), 1),
+                'rebounds': round(enhanced_player.get('rebounds', 0), 1),
+                'assists': round(enhanced_player.get('assists', 0), 1),
+                'steals': round(enhanced_player.get('steals', 0), 1),
+                'blocks': round(enhanced_player.get('blocks', 0), 1),
                 'minutes': round(minutes, 1),
                 
-                # Salary info
+                # Salary and value from enhancement
                 'salary': salary,
                 'fanduel_salary': salary,
-                'draftkings_salary': int(salary * 0.95),
-                
-                # Fantasy metrics
-                'value': round(value, 2),
                 'valueScore': round(value, 2),
-                'trend': random.choice(['up', 'stable', 'down']),
-                'ownership': round(random.uniform(5, 80), 1),
+                'value': round(value, 2),
                 
-                # Advanced stats (grouped)
+                # Stats object
                 'stats': {
-                    'points': round(points, 1),
-                    'rebounds': round(rebounds, 1),
-                    'assists': round(assists, 1),
-                    'steals': round(steals, 1),
-                    'blocks': round(blocks, 1),
-                    'minutes': round(minutes, 1),
-                    'field_goal_pct': round(random.uniform(0.42, 0.55), 3),
-                    'three_point_pct': round(random.uniform(0.33, 0.43), 3),
-                    'free_throw_pct': round(random.uniform(0.75, 0.90), 3),
-                    'turnovers': round(random.uniform(1.5, 4.0), 1)
+                    'field_goal_pct': round(enhanced_player.get('stats', {}).get('field_goal_pct', random.uniform(0.42, 0.55)), 3),
+                    'three_point_pct': round(enhanced_player.get('stats', {}).get('three_point_pct', random.uniform(0.33, 0.43)), 3),
+                    'free_throw_pct': round(enhanced_player.get('stats', {}).get('free_throw_pct', random.uniform(0.75, 0.90)), 3),
+                    'turnovers': round(enhanced_player.get('stats', {}).get('turnovers', random.uniform(1.5, 4.0)), 1)
                 },
                 
-                'projections': {
-                    'fantasy_points': round(projection, 1),
-                    'points': round(points * 1.05, 1),
-                    'rebounds': round(rebounds * 1.05, 1),
-                    'assists': round(assists * 1.05, 1),
-                    'steals': round(steals * 1.05, 1),
-                    'blocks': round(blocks * 1.05, 1),
-                    'value': round(value, 2),
-                    'confidence': round(random.uniform(0.6, 0.9), 2)
-                },
+                # Projections from enhancement
+                'projections': projections,
                 
                 # Additional info
-                'injury_status': player.get('injury_status', 'Healthy'),
-                'team_color': player.get('team_color', '#1d428a'),
-                'player_image': player.get('image_url', ''),
-                'last_game_stats': player.get('last_game', {}),
+                'injury_status': enhanced_player.get('injury_status', player.get('injury_status', 'Healthy')),
+                'team_color': enhanced_player.get('team_color', player.get('team_color', '#1d428a')),
+                'player_image': enhanced_player.get('player_image', player.get('image_url', '')),
+                'last_game_stats': enhanced_player.get('last_game_stats', player.get('last_game', {})),
                 
                 'is_real_data': bool(data_source and len(data_source) > 0),
-                'data_source': source_name
+                'data_source': source_name,
+                'is_enhanced': True  # Flag to indicate this player was enhanced
             }
             
-            formatted_players.append(formatted_player)
+            enhanced_players.append(formatted_player)
         
-        print(f"✅ Successfully formatted {len(formatted_players)} players")
+        print(f"✅ Successfully enhanced and formatted {len(enhanced_players)} players")
         
         return jsonify({
             'success': True,
-            'players': formatted_players,
-            'count': len(formatted_players),
+            'players': enhanced_players,
+            'count': len(enhanced_players),
             'total_available': total_available,
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'sport': sport,
             'limit_requested': limit,
             'limit_applied': len(players_to_use),
-            'message': f'Loaded {len(formatted_players)} of {total_available} {source_name} players'
-        })
+            'message': f'Loaded and enhanced {len(enhanced_players)} of {total_available} {source_name} players',
+            'enhancement_applied': True
+        })  
         
     except Exception as e:
         print(f"❌ Error in /api/players: {e}")
