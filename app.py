@@ -26,6 +26,31 @@ except ImportError:
 
 load_dotenv()
 
+# ========== RATE LIMITING ==========
+import time
+from collections import defaultdict
+
+# Initialize request_log for rate limiting
+request_log = defaultdict(list)  # Add this line!
+
+def is_rate_limited(ip, endpoint, limit=60, window=60):
+    """Check if IP is rate limited for an endpoint"""
+    global request_log  # Add this line!
+    
+    current_time = time.time()
+    window_start = current_time - window
+    
+    # Clean up old entries
+    request_log[ip] = [t for t in request_log[ip] if t > window_start]
+    
+    # Check if over limit
+    if len(request_log[ip]) >= limit:
+        return True
+    
+    # Add current request
+    request_log[ip].append(current_time)
+    return False
+
 # ========== LOAD DATA FROM JSON FILES ==========
 print("🚀 Loading Fantasy API with REAL DATA from JSON files...")
 
@@ -119,7 +144,25 @@ def print_startup_once():
         print("🚀 FANTASY API WITH REAL DATA - ALL ENDPOINTS REGISTERED")
         _STARTUP_PRINTED = True 
 
-print(f"🚀 Loading Fantasy API with REAL DATA from JSON files...")
+# ========== WEB SCRAPER CONFIGURATION ==========
+SCRAPER_CONFIG = {
+    'nba': {
+        'sources': [
+            {
+                'name': 'ESPN',
+                'url': 'https://www.espn.com/nba/scoreboard',
+                'selectors': {  
+                    'game_container': 'article.scorecard',
+                    'teams': '.ScoreCell__TeamName',
+                    'scores': '.ScoreCell__Score',
+                    'status': '.ScoreboardScoreCell__Time',
+                    'details': '.ScoreboardScoreCell__Detail'
+                }
+            }
+        ],
+        'cache_time': 2
+    }
+}
 
 # ========== WEB SCRAPER CONFIGURATION ==========
 SCRAPER_CONFIG = {
