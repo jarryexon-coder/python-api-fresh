@@ -398,7 +398,7 @@ def generate_mock_games(sport):
     
     return mock_games
 
-# ========== LOAD DATABASES ==========
+# ========== LOAD DATABASES ==========  
 def load_json_data(filename, default=None):
     """Load data from JSON files, handle both list and dict formats"""
     try:
@@ -409,17 +409,17 @@ def load_json_data(filename, default=None):
                 return data
     except Exception as e:
         print(f"❌ Error loading {filename}: {e}")
-    
-    if default is None:
+        
+    if default is None:   
         return [] if 'players' in filename or 'teams' in filename else {}
     return default
 
-# Load all databases
+# Load all databases 
 players_data = load_json_data('players_data.json', {})
 nfl_players_data = load_json_data('nfl_players_data.json', [])
 mlb_players_data = load_json_data('mlb_players_data.json', [])
 nhl_players_data = load_json_data('nhl_players_data.json', [])
-fantasy_teams_data = load_json_data('fantasy_teams_data.json', [])
+fantasy_teams_data_raw = load_json_data('fantasy_teams_data.json', {})  # Changed name
 sports_stats_database = load_json_data('sports_stats_database.json', {})
 
 # Handle players_data which might be wrapped in a dict
@@ -430,6 +430,26 @@ if isinstance(players_data, dict) and 'players' in players_data:
 else:
     players_data_list = players_data if isinstance(players_data, list) else []
     players_metadata = {}
+
+# Handle fantasy_teams_data which might be wrapped in a dict
+if isinstance(fantasy_teams_data_raw, dict):
+    print(f"📊 Checking fantasy_teams_data structure...")
+    # Try common keys that might contain teams list
+    if 'teams' in fantasy_teams_data_raw and isinstance(fantasy_teams_data_raw['teams'], list):
+        fantasy_teams_data = fantasy_teams_data_raw['teams']
+        print(f"✅ Extracted {len(fantasy_teams_data)} teams from 'teams' key")
+    elif 'data' in fantasy_teams_data_raw and isinstance(fantasy_teams_data_raw['data'], list):
+        fantasy_teams_data = fantasy_teams_data_raw['data']
+        print(f"✅ Extracted {len(fantasy_teams_data)} teams from 'data' key")
+    elif 'response' in fantasy_teams_data_raw and isinstance(fantasy_teams_data_raw['response'], list):
+        fantasy_teams_data = fantasy_teams_data_raw['response']
+        print(f"✅ Extracted {len(fantasy_teams_data)} teams from 'response' key")
+    else:
+        print(f"⚠️ Could not find teams list in dict. Keys: {list(fantasy_teams_data_raw.keys())}")
+        fantasy_teams_data = []
+else:
+    fantasy_teams_data = fantasy_teams_data_raw if isinstance(fantasy_teams_data_raw, list) else []
+    print(f"✅ Fantasy teams data is already a list with {len(fantasy_teams_data)} items")
 
 # Combine all players
 all_players_data = []
@@ -447,8 +467,8 @@ print(f"   NFL Players: {len(nfl_players_data)}")
 print(f"   MLB Players: {len(mlb_players_data)}")
 print(f"   NHL Players: {len(nhl_players_data)}")
 print(f"   Total Players: {len(all_players_data)}")
-print(f"   Fantasy Teams: {len(fantasy_teams_data)}")
-print(f"   Stats Database: {'✅ Loaded' if sports_stats_database else '❌ Empty'}")
+print(f"   Fantasy Teams: {len(fantasy_teams_data)}")  # Updated this line
+print(f"   Stats Database: {'✅ Loaded' if sports_stats_database else '❌ Not available'}")
 
 # ========== MIDDLEWARE ==========
 # Security headers middleware
@@ -1174,6 +1194,57 @@ def get_scraped_news():
             'count': 0
         })
 
+@app.route('/api/debug/fantasy-structure')
+def debug_fantasy_structure():
+    """Debug the structure of fantasy_teams_data.json"""
+    try:
+        # Read the raw file
+        if os.path.exists('fantasy_teams_data.json'):
+            with open('fantasy_teams_data.json', 'r') as f:
+                raw_data = json.load(f)
+            
+            # Analyze structure
+            result = {
+                'file_exists': True,
+                'file_size': os.path.getsize('fantasy_teams_data.json'),
+                'raw_data_type': type(raw_data).__name__,
+                'raw_data_keys': list(raw_data.keys()) if isinstance(raw_data, dict) else 'N/A',
+                'loaded_fantasy_teams_data': {
+                    'type': type(fantasy_teams_data).__name__,
+                    'length': len(fantasy_teams_data) if hasattr(fantasy_teams_data, '__len__') else 'N/A',
+                    'first_item': fantasy_teams_data[0] if isinstance(fantasy_teams_data, list) and len(fantasy_teams_data) > 0 else 'N/A'
+                }
+            }
+            
+            # Show sample if it's a dict
+            if isinstance(raw_data, dict):
+                for key in ['teams', 'data', 'response', 'items']:
+                    if key in raw_data:
+                        value = raw_data[key]
+                        result[f'{key}_info'] = {
+                            'type': type(value).__name__,
+                            'length': len(value) if hasattr(value, '__len__') else 'N/A',
+                            'sample': value[0] if isinstance(value, list) and len(value) > 0 else 'N/A'
+                        }
+            
+            return jsonify({
+                'success': True,
+                'debug': result,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'File not found',
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        })
+
 # ========== SPORTS DATABASE ENDPOINTS ==========
 @app.route('/api/fantasy/players')
 def get_fantasy_players():
@@ -1352,15 +1423,15 @@ def debug_teams_raw():
 
 @app.route('/api/fantasy/teams')
 def get_fantasy_teams():
-    """Get fantasy teams data - IMPROVED VERSION"""
+    """Get fantasy teams data - FIXED for dict format"""
     try:
         sport = flask_request.args.get('sport', 'nba').lower()
-        
+
         print(f"🎯 GET /api/fantasy/teams: sport={sport}")
         print(f"📊 Fantasy teams data type: {type(fantasy_teams_data)}")
         print(f"📊 Fantasy teams data length: {len(fantasy_teams_data) if isinstance(fantasy_teams_data, list) else 'Not a list'}")
         
-        # Check if we have real data
+        # Check if we have real data 
         has_real_data = False
         real_teams = []
         
@@ -1369,10 +1440,13 @@ def get_fantasy_teams():
             
             # Show first item for debugging
             if len(fantasy_teams_data) > 0:
-                print(f"📝 First item: {fantasy_teams_data[0]}")
                 print(f"📝 First item type: {type(fantasy_teams_data[0])}")
+                print(f"📝 First item keys: {list(fantasy_teams_data[0].keys()) if isinstance(fantasy_teams_data[0], dict) else 'Not a dict'}")
             
             for i, item in enumerate(fantasy_teams_data):
+                if i >= 10:  # Limit to 10 teams
+                    break
+                    
                 # Skip if not a dict
                 if not isinstance(item, dict):
                     print(f"⚠️ Item {i} is not a dict: {type(item)}")
@@ -1382,12 +1456,14 @@ def get_fantasy_teams():
                 team_sport = item.get('sport', '').lower()
                 team_name = item.get('name', f'Team {i}')
                 
-                # Debug print
-                print(f"🔍 Checking team {i}: {team_name} (sport: {team_sport})")
+                # Debug print first few items
+                if i < 3:
+                    print(f"🔍 Checking team {i}: {team_name} (sport: {team_sport})")
                 
                 # Check sport filter
                 if sport != 'all' and team_sport != sport:
-                    print(f"   Skipping - sport mismatch: {team_sport} != {sport}")
+                    if i < 3:  # Only log first few for debugging
+                        print(f"   Skipping - sport mismatch: {team_sport} != {sport}")
                     continue
                 
                 # Build team object
@@ -1416,14 +1492,16 @@ def get_fantasy_teams():
                 
                 real_teams.append(real_team)
                 has_real_data = True
-                print(f"   ✅ Added team: {real_team['name']}")
+                
+                if i < 3:  # Only log first few
+                    print(f"   ✅ Added team: {real_team['name']}")
         
         # Return real data if we found any
         if has_real_data and len(real_teams) > 0:
             print(f"✅ Returning {len(real_teams)} REAL fantasy teams")
             return jsonify({
                 "success": True,
-                "teams": real_teams[:10],  # Limit to 10
+                "teams": real_teams,
                 "count": len(real_teams),
                 "sport": sport,
                 "last_updated": datetime.now(timezone.utc).isoformat(),
@@ -1431,162 +1509,9 @@ def get_fantasy_teams():
                 "message": f"Found {len(real_teams)} fantasy teams for {sport}"
             })
         
-        # Fallback: Generate teams
+        # Fallback: Generate teams (your existing fallback code here)
         print(f"🔄 No real data found, generating fallback teams for {sport}")
-        
-        fallback_teams = [
-            {
-                "id": "team-1",
-                "name": "Lakers Legends",
-                "owner": "John Doe",
-                "sport": "NBA",
-                "league": "Premium League",
-                "record": "45-25",
-                "points": 12500,
-                "rank": 1,
-                "players": ["LeBron James", "Anthony Davis", "Stephen Curry"],
-                "waiver_position": 3,
-                "moves_this_week": 2,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 12850,
-                "win_probability": 0.75,
-                "strength_of_schedule": 0.65,
-                "is_real_data": False
-            },
-            {
-                "id": "team-2",
-                "name": "Warriors Dynasty",
-                "owner": "Jane Smith",
-                "sport": "NBA",
-                "league": "Expert League",
-                "record": "42-28",
-                "points": 12100,
-                "rank": 2,
-                "players": ["Kevin Durant", "Klay Thompson", "Draymond Green"],
-                "waiver_position": 5,
-                "moves_this_week": 1,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 12400,
-                "win_probability": 0.68,
-                "strength_of_schedule": 0.72,
-                "is_real_data": False
-            },
-            {
-                "id": "team-3",
-                "name": "Celtics Pride",
-                "owner": "Mike Johnson",
-                "sport": "NBA",
-                "league": "Pro League",
-                "record": "48-22",
-                "points": 13000,
-                "rank": 3,
-                "players": ["Jayson Tatum", "Jaylen Brown", "Marcus Smart"],
-                "waiver_position": 2,
-                "moves_this_week": 0,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 13200,
-                "win_probability": 0.82,
-                "strength_of_schedule": 0.58,
-                "is_real_data": False
-            },
-            {
-                "id": "team-4",
-                "name": "Bucks Dynasty",
-                "owner": "Sarah Wilson",
-                "sport": "NBA",
-                "league": "Champions League",
-                "record": "50-20",
-                "points": 13500,
-                "rank": 4,
-                "players": ["Giannis Antetokounmpo", "Khris Middleton", "Jrue Holiday"],
-                "waiver_position": 1,
-                "moves_this_week": 1,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 13800,
-                "win_probability": 0.85,
-                "strength_of_schedule": 0.55,
-                "is_real_data": False
-            },
-            {
-                "id": "team-5",
-                "name": "Suns Rising",
-                "owner": "Alex Chen",
-                "sport": "NBA",
-                "league": "Elite League",
-                "record": "44-26",
-                "points": 11900,
-                "rank": 5,
-                "players": ["Devin Booker", "Chris Paul", "Deandre Ayton"],
-                "waiver_position": 4,
-                "moves_this_week": 2,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 12200,
-                "win_probability": 0.70,
-                "strength_of_schedule": 0.68,
-                "is_real_data": False
-            }
-        ]
-        
-        # Add NFL teams too
-        nfl_fallback = [
-            {
-                "id": "nfl-team-1",
-                "name": "Chiefs Kingdom",
-                "owner": "Tom Brady",
-                "sport": "NFL",
-                "league": "Sunday League",
-                "record": "12-5",
-                "points": 1850,
-                "rank": 1,
-                "players": ["Patrick Mahomes", "Travis Kelce", "Tyreek Hill"],
-                "waiver_position": 2,
-                "moves_this_week": 1,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 1900,
-                "win_probability": 0.80,
-                "strength_of_schedule": 0.60,
-                "is_real_data": False
-            },
-            {
-                "id": "nfl-team-2",
-                "name": "Eagles Flyers",
-                "owner": "Nick Sirianni",
-                "sport": "NFL",
-                "league": "NFC East",
-                "record": "11-6",
-                "points": 1750,
-                "rank": 2,
-                "players": ["Jalen Hurts", "A.J. Brown", "DeVonta Smith"],
-                "waiver_position": 3,
-                "moves_this_week": 2,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "projected_points": 1800,
-                "win_probability": 0.75,
-                "strength_of_schedule": 0.65,
-                "is_real_data": False
-            }
-        ]
-        
-        # Combine all fallback teams
-        all_fallback = fallback_teams + nfl_fallback
-        
-        # Filter by sport
-        if sport != 'all':
-            filtered_teams = [team for team in all_fallback if team['sport'].lower() == sport]
-        else:
-            filtered_teams = all_fallback
-        
-        print(f"✅ Returning {len(filtered_teams)} FALLBACK fantasy teams")
-        
-        return jsonify({
-            "success": True,
-            "teams": filtered_teams,
-            "count": len(filtered_teams),
-            "sport": sport,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-            "is_real_data": False,
-            "message": f"Using fallback data: {len(filtered_teams)} teams for {sport}"
-        })
+        # ... [keep your existing fallback teams code]
         
     except Exception as e:
         print(f"❌ ERROR in /api/fantasy/teams: {str(e)}")
@@ -1597,21 +1522,19 @@ def get_fantasy_teams():
         sport_param = sport if 'sport' in locals() else 'nba'
         return jsonify({
             "success": True,
-            "teams": [
-                {
-                    "id": "error-team-1",
-                    "name": "Sample Team",
-                    "owner": "Admin",
-                    "sport": sport_param.upper(),
-                    "league": "Default League",
-                    "record": "0-0",
-                    "points": 0,
-                    "rank": 1,
-                    "players": ["Sample Player 1", "Sample Player 2"],
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                    "is_real_data": False
-                }
-            ],
+            "teams": [{
+                "id": "error-team-1",
+                "name": "Sample Team",
+                "owner": "Admin",
+                "sport": sport_param.upper(),
+                "league": "Default League",
+                "record": "0-0",
+                "points": 0,
+                "rank": 1,
+                "players": ["Sample Player 1", "Sample Player 2"],
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "is_real_data": False
+            }],
             "count": 1,
             "sport": sport_param,
             "last_updated": datetime.now(timezone.utc).isoformat(),
