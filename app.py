@@ -1628,30 +1628,6 @@ def debug_fantasy_teams():
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
-@app.route('/api/debug/fantasy-teams')
-def debug_fantasy_teams():
-    """Debug endpoint to check fantasy teams data"""
-    try:
-        return jsonify({
-            "success": True,
-            "fantasy_teams_data_info": {
-                "type": type(fantasy_teams_data).__name__,
-                "length": len(fantasy_teams_data) if isinstance(fantasy_teams_data, list) else "Not a list",
-                "first_item": fantasy_teams_data[0] if isinstance(fantasy_teams_data, list) and len(fantasy_teams_data) > 0 else "No items",
-                "first_item_type": type(fantasy_teams_data[0]).__name__ if isinstance(fantasy_teams_data, list) and len(fantasy_teams_data) > 0 else "N/A",
-                "file_exists": os.path.exists('fantasy_teams_data.json'),
-                "file_size": os.path.getsize('fantasy_teams_data.json') if os.path.exists('fantasy_teams_data.json') else 0
-            },
-            "sample_teams": fantasy_teams_data[:3] if isinstance(fantasy_teams_data, list) and len(fantasy_teams_data) > 0 else [],
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "fantasy_teams_data": str(fantasy_teams_data)[:500] if fantasy_teams_data else "No data"
-        })
-
 @app.route('/api/info')
 def api_info():
     """API information endpoint"""
