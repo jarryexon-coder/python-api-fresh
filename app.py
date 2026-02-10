@@ -27,52 +27,80 @@ except ImportError:
 load_dotenv()
 
 # =============================================
-# API CONFIGURATION - MULTI-SOURCE WITH RETRY
+# FIXED API KEY CONFIGURATION
 # =============================================
 
 import os
 
-# Get from environment variables (Railway injects these)
+# Get ALL possible API key names (for compatibility)
 SPORTSDATA_NBA_API_KEY = os.environ.get('SPORTSDATA_NBA_API_KEY')
 SPORTSDATA_NHL_API_KEY = os.environ.get('SPORTSDATA_NHL_API_KEY')
-ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
+
+# The Odds API - CHECK MULTIPLE POSSIBLE NAMES
+ODDS_API_KEY = os.environ.get('THE_ODDS_API_KEY') or os.environ.get('ODDS_API_KEY') or os.environ.get('THEODDS_API_KEY')
+
+# Backward compatibility
+THE_ODDS_API_KEY = ODDS_API_KEY  # Make sure this is set!
+
+# Other APIs
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY_PLAYER_PROPS')
 DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
 NEWS_API_KEY = os.environ.get('NEWS_API_KEY')
 
-# Validate
-if not SPORTSDATA_NBA_API_KEY:
-    print("❌ WARNING: SPORTSDATA_NBA_API_KEY not set in environment!")
-    
-if not ODDS_API_KEY:
-    print("❌ WARNING: ODDS_API_KEY not set in environment!")
+# =============================================
+# VALIDATION WITH DEBUGGING
+# =============================================
 
-# API Configuration
+print("\n🔍 API KEY CONFIGURATION CHECK:")
+print("=" * 40)
+
+# Check SportsData
+if SPORTSDATA_NBA_API_KEY:
+    print(f"✅ SPORTSDATA_NBA_API_KEY: Set ({len(SPORTSDATA_NBA_API_KEY)} chars)")
+else:
+    print("❌ SPORTSDATA_NBA_API_KEY: NOT SET")
+
+# Check The Odds API (check all possible names)
+env_keys = dict(os.environ)
+odds_keys_found = [k for k in env_keys if 'ODDS' in k.upper() or 'THEODDS' in k.upper()]
+print(f"\n🔍 Looking for Odds API keys... Found: {odds_keys_found}")
+
+if ODDS_API_KEY:
+    print(f"✅ ODDS_API_KEY: Set ({len(ODDS_API_KEY)} chars)")
+    print(f"   Value starts with: {ODDS_API_KEY[:10]}...")
+    print(f"   THE_ODDS_API_KEY also set: {bool(THE_ODDS_API_KEY)}")
+else:
+    print("❌ ODDS_API_KEY: NOT SET - Check Railway Variables!")
+    print("   Expected one of: THE_ODDS_API_KEY, ODDS_API_KEY, THEODDS_API_KEY")
+
+print("=" * 40)
+
+# =============================================
+# FIXED API CONFIG
+# =============================================
+
 API_CONFIG = {
     'sportsdata_nba': {
         'key': SPORTSDATA_NBA_API_KEY,
         'base_url': 'https://api.sportsdata.io/v3/nba',
         'working': bool(SPORTSDATA_NBA_API_KEY)
     },
-    'sportsdata_nhl': {
-        'key': SPORTSDATA_NHL_API_KEY,
-        'base_url': 'https://api.sportsdata.io/v3/nhl',
-        'working': bool(SPORTSDATA_NHL_API_KEY)
-    },
     'odds_api': {
         'key': ODDS_API_KEY,
         'base_url': 'https://api.the-odds-api.com/v4',
-        'working': bool(ODDS_API_KEY)
-    },
-    'rapidapi': {
-        'key': RAPIDAPI_KEY,
-        'headers': {
-            'x-rapidapi-key': RAPIDAPI_KEY,
-            'x-rapidapi-host': 'api-nba-v1.p.rapidapi.com'
-        },
-        'working': bool(RAPIDAPI_KEY)
+        'working': bool(ODDS_API_KEY) and ODDS_API_KEY != "your_odds_api_key_here"
     }
 }
+
+print(f"\n📊 API STATUS:")
+print(f"   SportsData NBA: {'✅ WORKING' if API_CONFIG['sportsdata_nba']['working'] else '❌ NOT CONFIGURED'}")
+print(f"   The Odds API: {'✅ WORKING' if API_CONFIG['odds_api']['working'] else '❌ NOT CONFIGURED'}")
+
+if not API_CONFIG['odds_api']['working']:
+    print("\n🚨 URGENT: The Odds API is not configured!")
+    print("   Go to Railway → Variables and add:")
+    print("   THE_ODDS_API_KEY=your_actual_key_here")
+    print("\n   Get a free key from: https://the-odds-api.com/")
 
 # =============================================
 # API UTILITY FUNCTIONS WITH RETRY LOGIC
