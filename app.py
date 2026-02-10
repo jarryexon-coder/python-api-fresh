@@ -3039,6 +3039,189 @@ def get_nfl_games_enhanced():
             'count': 0
         })
 
+# ========== ODDS API FUNCTIONS (ADD THIS NEW SECTION) ==========
+
+def fetch_live_odds(sport):
+    """Fetch live odds from The Odds API"""
+    try:
+        # Map sport names to The Odds API sport keys
+        sport_map = {
+            'nba': 'basketball_nba',
+            'nfl': 'americanfootball_nfl',
+            'mlb': 'baseball_mlb',
+            'nhl': 'icehockey_nhl',
+            'college-football': 'americanfootball_ncaaf',
+            'college-basketball': 'basketball_ncaab'
+        }
+        
+        odds_sport = sport_map.get(sport.lower(), sport)
+        
+        # Check if Odds API is configured
+        if not THE_ODDS_API_KEY or THE_ODDS_API_KEY == "your_odds_api_key_here":
+            print("⚠️ The Odds API not configured or using placeholder key")
+            return []
+        
+        print(f"💰 Fetching live odds from The Odds API for {odds_sport}...")
+        
+        # Build URL and parameters
+        url = f"https://api.the-odds-api.com/v4/sports/{odds_sport}/odds"
+        params = {
+            'apiKey': THE_ODDS_API_KEY,
+            'regions': 'us',
+            'markets': 'h2h,totals,spreads',
+            'oddsFormat': 'american'
+        }
+        
+        # Make the API request
+        response = requests.get(url, params=params, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ Successfully fetched {len(data)} games from The Odds API")
+            
+            # Process the odds data
+            processed_odds = []
+            for game in data:
+                try:
+                    processed_game = process_odds_game(game)
+                    if processed_game:
+                        processed_odds.append(processed_game)
+                except Exception as e:
+                    print(f"⚠️ Error processing game {game.get('id', 'unknown')}: {e}")
+                    continue
+            
+            return processed_odds
+            
+        else:
+            print(f"⚠️ The Odds API returned status {response.status_code}: {response.text[:200]}")
+            return []
+            
+    except requests.exceptions.Timeout:
+        print("⚠️ The Odds API request timed out")
+        return []
+    except Exception as e:
+        print(f"❌ Error fetching odds from The Odds API: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def process_odds_game(game_data):
+    """Process a single game from The Odds API"""
+    try:
+        # Extract game information
+        home_team = game_data.get('home_team', '')
+        away_team = game_data.get('away_team', '')
+        commence_time = game_data.get('commence_time', '')
+        
+        # Process bookmakers
+        bookmakers = []
+        for bookmaker in game_data.get('bookmakers', []):
+            bookmaker_data = {
+                'key': bookmaker.get('key', ''),
+                'title': bookmaker.get('title', ''),
+                'markets': []
+            }
+            
+            # Process markets
+            for market in bookmaker.get('markets', []):
+                market_data = {
+                    'key': market.get('key', ''),
+                    'outcomes': market.get('outcomes', [])
+                }
+                bookmaker_data['markets'].append(market_data)
+            
+            bookmakers.append(bookmaker_data)
+        
+        # Extract player props if available
+        player_props = extract_player_props(game_data)
+        
+        return {
+            'id': game_data.get('id', ''),
+            'sport_key': game_data.get('sport_key', ''),
+            'home_team': home_team,
+            'away_team': away_team,
+            'commence_time': commence_time,
+            'bookmakers': bookmakers,
+            'player_props': player_props
+        }
+        
+    except Exception as e:
+        print(f"Error processing game: {e}")
+        return None
+
+def extract_player_props(game_data):
+    """Extract player prop bets from game data"""
+    player_props = []
+    
+    for bookmaker in game_data.get('bookmakers', []):
+        for market in bookmaker.get('markets', []):
+            if market.get('key', '').startswith('player_'):
+                for outcome in market.get('outcomes', []):
+                    player_name = outcome.get('description', '')
+                    if player_name:
+                        prop_data = {
+                            'player': player_name,
+                            'market': market.get('key', ''),
+                            'name': outcome.get('name', ''),
+                            'price': outcome.get('price', 0),
+                            'point': outcome.get('point', 0),
+                            'bookmaker': bookmaker.get('key', '')
+                        }
+                        player_props.append(prop_data)
+    
+    return player_props
+
+def find_player_odds(player_name, stat_type, odds_data):
+    """Find live odds for a specific player from The Odds API data"""
+    if not odds_data:
+        return None
+    
+    # Map stat types to The Odds API market keys
+    market_map = {
+        'points': 'player_points',
+        'rebounds': 'player_rebounds',
+        'assists': 'player_assists'
+    }
+    
+    target_market = market_map.get(stat_type.lower())
+    if not target_market:
+        return None
+    
+    # Search through all games and bookmakers
+    for game in odds_data:
+        for bookmaker in game.get('bookmakers', []):
+            for market in bookmaker.get('markets', []):
+                if market['key'] == target_market:
+                    for outcome in market.get('outcomes', []):
+                        outcome_player = outcome.get('description', '').strip()
+                        # Try to match player names (case insensitive, partial match)
+                        if player_name.lower() in outcome_player.lower() or outcome_player.lower() in player_name.lower():
+                            over_price = None
+                            under_price = None
+                            
+                            if outcome.get('name', '').lower() == 'over':
+                                over_price = outcome.get('price')
+                            elif outcome.get('name', '').lower() == 'under':
+                                under_price = outcome.get('price')
+                            
+                            # Look for the opposite outcome
+                            for other_outcome in market.get('outcomes', []):
+                                if (other_outcome.get('description', '').strip().lower() == outcome_player.lower() and 
+                                    other_outcome.get('name', '').lower() != outcome.get('name', '').lower()):
+                                    if other_outcome.get('name', '').lower() == 'over':
+                                        over_price = other_outcome.get('price')
+                                    elif other_outcome.get('name', '').lower() == 'under':
+                                        under_price = other_outcome.get('price')
+                            
+                            return {
+                                'over': over_price,
+                                'under': under_price,
+                                'point': outcome.get('point', 0),
+                                'bookmaker': bookmaker.get('key', '')
+                            }
+    
+    return None
+
 # ========== PREDICTIONS ENDPOINT WITH NEW MULTI-SOURCE ==========
 @app.route('/api/prizepicks/selections')
 def get_prizepicks_selections():
@@ -3070,11 +3253,25 @@ def get_prizepicks_selections():
         # Fetch player projections
         projections = fetch_player_projections(sport)
         
-        # Fetch live odds
+        # Fetch live odds from The Odds API (USING NEW FUNCTION)
         odds_data = fetch_live_odds(sport)
         
+        print(f"📊 API Status: Games={len(games)}, Projections={len(projections)}, Odds={len(odds_data)}")
+        
         # =============================================
-        # 3. PROCESS NBA DATA
+        # 3. DEBUG: Check Odds API status
+        # =============================================
+        if not odds_data:
+            if THE_ODDS_API_KEY:
+                if THE_ODDS_API_KEY == "your_odds_api_key_here":
+                    print("⚠️ WARNING: Using placeholder Odds API key - update with real key!")
+                else:
+                    print("⚠️ The Odds API returned empty data - check sport mapping or API key")
+            else:
+                print("⚠️ The Odds API key not configured")
+        
+        # =============================================
+        # 4. PROCESS NBA DATA
         # =============================================
         if sport == 'nba' and games and projections:
             print(f"📊 Processing {len(games)} games and {len(projections)} projections...")
@@ -3112,21 +3309,21 @@ def get_prizepicks_selections():
                         continue
         
         # =============================================
-        # 4. FALLBACK FOR OTHER SPORTS OR API FAILURES
+        # 5. FALLBACK FOR OTHER SPORTS OR API FAILURES
         # =============================================
         if not all_selections:
             print(f"⚠️ No selections from live APIs, using intelligent fallback...")
             all_selections = generate_intelligent_fallback(sport)
         
         # =============================================
-        # 5. ADD AI INSIGHTS (DeepSeek API - Working ✅)
+        # 6. ADD AI INSIGHTS (DeepSeek API - Working ✅)
         # =============================================
         if all_selections and sport == 'nba':
             print("🤖 Adding AI insights from DeepSeek...")
             all_selections = add_ai_insights(all_selections)
         
         # =============================================
-        # 6. CACHE AND RETURN RESULTS
+        # 7. CACHE AND RETURN RESULTS
         # =============================================
         response_data = {
             'success': True,
@@ -3194,7 +3391,7 @@ def create_selection_from_projection(player_proj, game, odds_data, sport):
     projection_diff = round(projection - line, 1)
     edge_percentage = ((projection - line) / line * 100) if line > 0 else 0
     
-    # Find live odds for this player
+    # Find live odds for this player (USING NEW FUNCTION)
     live_odds = find_player_odds(player_name, stat_type, odds_data)
     
     # Use live odds if available, otherwise generate realistic ones
@@ -3251,34 +3448,6 @@ def create_selection_from_projection(player_proj, game, odds_data, sport):
         'injury_status': injury_status,
         'value_side': 'over' if projection > line else 'under'
     }
-
-def find_player_odds(player_name, stat_type, odds_data):
-    """Find live odds for a specific player"""
-    if not odds_data:
-        return None
-    
-    # Map stat types to market keys
-    market_map = {
-        'points': 'player_points',
-        'rebounds': 'player_rebounds',
-        'assists': 'player_assists'
-    }
-    
-    target_market = market_map.get(stat_type.lower())
-    if not target_market:
-        return None
-    
-    for game_odds in odds_data:
-        for bookmaker in game_odds.get('bookmakers', []):
-            for market in bookmaker.get('markets', []):
-                if market['key'] == target_market:
-                    for outcome in market.get('outcomes', []):
-                        if player_name.lower() in outcome.get('description', '').lower():
-                            return {
-                                'over': outcome.get('price') if outcome.get('name') == 'Over' else None,
-                                'under': outcome.get('price') if outcome.get('name') == 'Under' else None
-                            }
-    return None
 
 # ========== EXISTING ENDPOINTS CONTINUE ==========
 @app.route('/api/sports-wire')
@@ -4608,6 +4777,210 @@ def advanced_scrape():
             'error': str(e),
             'data': []
         })
+
+# =============================================
+# ODDS API ENDPOINTS (ADD THESE)
+# =============================================
+
+@app.route('/api/debug/odds-config')
+def debug_odds_config():
+    """Debug endpoint to check Odds API configuration"""
+    import os
+    
+    # Get all environment variables with 'ODDS' in the name
+    env_vars = {}
+    for key, value in os.environ.items():
+        if 'ODDS' in key.upper() or 'API' in key.upper():
+            # Hide full key for security, just show first few chars
+            if 'KEY' in key.upper():
+                env_vars[key] = f"{value[:8]}... (length: {len(value)})"
+            else:
+                env_vars[key] = value
+    
+    # Test the key if it exists
+    test_result = None
+    if THE_ODDS_API_KEY:
+        try:
+            # Simple test request to The Odds API
+            test_url = "https://api.the-odds-api.com/v4/sports"
+            params = {
+                'apiKey': THE_ODDS_API_KEY
+            }
+            test_response = requests.get(test_url, params=params, timeout=5)
+            test_result = {
+                'status': test_response.status_code,
+                'success': test_response.status_code == 200,
+                'message': test_response.reason,
+                'count': len(test_response.json()) if test_response.status_code == 200 else 0
+            }
+        except Exception as e:
+            test_result = {'error': str(e), 'type': type(e).__name__}
+    
+    return jsonify({
+        'success': True,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'environment_variables': env_vars,
+        'the_odds_api_key_set': bool(THE_ODDS_API_KEY),
+        'the_odds_api_key_starts_with': THE_ODDS_API_KEY[:8] if THE_ODDS_API_KEY else None,
+        'test_result': test_result,
+        'flask_endpoints': {
+            'prizepicks': '/api/prizepicks/selections (WORKING)',
+            'odds': '/api/odds (MISSING - add this)',
+            'debug': '/api/debug/odds-config (you are here)'
+        }
+    })
+
+@app.route('/api/test/odds-direct')
+def test_odds_direct():
+    """Test The Odds API directly"""
+    if not THE_ODDS_API_KEY:
+        return jsonify({'error': 'No Odds API key configured', 'success': False}), 400
+    
+    try:
+        # Test NBA odds
+        url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+        params = {
+            'apiKey': THE_ODDS_API_KEY,
+            'regions': 'us',
+            'markets': 'h2h,spreads,totals',
+            'oddsFormat': 'american'
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return jsonify({
+                'success': True,
+                'status_code': response.status_code,
+                'count': len(data),
+                'sample_game': data[0] if data else None,
+                'markets_available': list(set([market['key'] for game in data[:3] for market in game.get('bookmakers', [{}])[0].get('markets', [])])) if data else [],
+                'key_used': f"{THE_ODDS_API_KEY[:8]}...",
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'status_code': response.status_code,
+                'error': response.text,
+                'key_used': f"{THE_ODDS_API_KEY[:8]}..."
+            }), response.status_code
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e), 'type': type(e).__name__}), 500
+
+@app.route('/api/odds')
+@app.route('/api/odds/<sport>')
+def get_odds(sport=None):
+    """Get odds for sports - main Odds API endpoint"""
+    try:
+        # Default to NBA if no sport specified
+        if not sport:
+            sport = request.args.get('sport', 'basketball_nba')
+        
+        # Map your sport names to Odds API sport keys
+        sport_mapping = {
+            'nba': 'basketball_nba',
+            'nfl': 'americanfootball_nfl',
+            'mlb': 'baseball_mlb',
+            'nhl': 'icehockey_nhl',
+            'basketball_nba': 'basketball_nba',
+            'americanfootball_nfl': 'americanfootball_nfl',
+            'baseball_mlb': 'baseball_mlb',
+            'icehockey_nhl': 'icehockey_nhl'
+        }
+        
+        api_sport = sport_mapping.get(sport.lower(), sport)
+        
+        if not THE_ODDS_API_KEY:
+            return jsonify({
+                'success': False,
+                'error': 'Odds API not configured',
+                'message': 'THE_ODDS_API_KEY environment variable is not set'
+            }), 400
+        
+        print(f"💰 Fetching odds for {api_sport} from The Odds API...")
+        
+        url = f"https://api.the-odds-api.com/v4/sports/{api_sport}/odds"
+        params = {
+            'apiKey': THE_ODDS_API_KEY,
+            'regions': request.args.get('regions', 'us'),
+            'markets': request.args.get('markets', 'h2h,spreads,totals'),
+            'oddsFormat': request.args.get('oddsFormat', 'american'),
+            'bookmakers': request.args.get('bookmakers', '')
+        }
+        
+        # Remove empty params
+        params = {k: v for k, v in params.items() if v}
+        
+        response = requests.get(url, params=params, timeout=15)
+        
+        print(f"📊 Odds API Response: {response.status_code}")
+        
+        if response.status_code == 200:
+            odds_data = response.json()
+            return jsonify({
+                'success': True,
+                'sport': api_sport,
+                'count': len(odds_data),
+                'data': odds_data,
+                'source': 'the-odds-api',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'params_used': params,
+                'key_used': f"{THE_ODDS_API_KEY[:8]}..."
+            })
+        else:
+            error_msg = f"The Odds API returned {response.status_code}: {response.text[:200]}"
+            print(f"❌ {error_msg}")
+            return jsonify({
+                'success': False,
+                'error': error_msg,
+                'status_code': response.status_code,
+                'sport': api_sport
+            }), response.status_code
+            
+    except requests.exceptions.Timeout:
+        error_msg = "The Odds API request timed out"
+        print(f"❌ {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 504
+    except Exception as e:
+        error_msg = f"Error fetching odds: {str(e)}"
+        print(f"❌ {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 500
+
+@app.route('/api/odds/sports')
+def get_available_sports():
+    """Get list of available sports from The Odds API"""
+    if not THE_ODDS_API_KEY:
+        return jsonify({'success': False, 'error': 'Odds API not configured'}), 400
+    
+    try:
+        url = "https://api.the-odds-api.com/v4/sports"
+        params = {
+            'apiKey': THE_ODDS_API_KEY,
+            'all': 'true'
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            sports_data = response.json()
+            return jsonify({
+                'success': True,
+                'count': len(sports_data),
+                'sports': sports_data,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'status_code': response.status_code,
+                'error': response.text
+            }), response.status_code
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ========== DATA DEBUG ENDPOINTS ==========
 @app.route('/api/debug/data-structure')
