@@ -1840,6 +1840,63 @@ def get_scraped_news():
             'count': 0
         })
 
+@app.route('/api/debug/load-status')
+def debug_load_status():
+    """Debug endpoint to see what data is loaded"""
+    import os
+    
+    files_to_check = [
+        'players_data_comprehensive.json',
+        'nfl_players_data_comprehensive.json',
+        'mlb_players_data_comprehensive.json',
+        'nhl_players_data_comprehensive.json'
+    ]
+    
+    status = {}
+    for filename in files_to_check:
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    status[filename] = {
+                        'exists': True,
+                        'type': 'list',
+                        'count': len(data)
+                    }
+                elif isinstance(data, dict):
+                    status[filename] = {
+                        'exists': True,
+                        'type': 'dict',
+                        'keys': list(data.keys())
+                    }
+                else:
+                    status[filename] = {
+                        'exists': True,
+                        'type': type(data).__name__
+                    }
+        except FileNotFoundError:
+            status[filename] = {'exists': False}
+        except json.JSONDecodeError:
+            status[filename] = {'exists': True, 'error': 'Invalid JSON'}
+        except Exception as e:
+            status[filename] = {'exists': True, 'error': str(e)}
+    
+    # Also check what's in memory
+    memory_status = {
+        'players_data_list_count': len(players_data_list) if 'players_data_list' in globals() else 'Not loaded',
+        'nfl_players_data_count': len(nfl_players_data) if 'nfl_players_data' in globals() else 'Not loaded',
+        'mlb_players_data_count': len(mlb_players_data) if 'mlb_players_data' in globals() else 'Not loaded',
+        'nhl_players_data_count': len(nhl_players_data) if 'nhl_players_data' in globals() else 'Not loaded'
+    }
+    
+    return jsonify({
+        'success': True,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'file_status': status,
+        'memory_status': memory_status,
+        'app_py_loaded_files': 'Check lines near top of app.py'
+    })
+
 @app.route('/api/debug/fantasy-structure')
 def debug_fantasy_structure():
     """Debug the structure of fantasy_teams_data_comprehensive.json"""
