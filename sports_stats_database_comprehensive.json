@@ -1,0 +1,106 @@
+{
+  "metadata": {
+    "created": "2026-02-11T00:00:34.268832",
+    "version": "2.0",
+    "sports": [
+      "nba",
+      "nfl",
+      "mlb",
+      "nhl"
+    ],
+    "total_players": 0
+  },
+  "nba": {
+    "total_players": 398,
+    "average_fp": 42.5,
+    "max_fp": 68.9,
+    "min_fp": 18.3,
+    "accuracy_stats": {
+      "average_accuracy": 87.4,
+      "correct_rate": 0.55,
+      "partially_correct_rate": 0.3,
+      "incorrect_rate": 0.15
+    },
+    "positions": [
+      "PG",
+      "SG",
+      "SF",
+      "PF",
+      "C"
+    ],
+    "teams": 30
+  },
+  "nfl": {
+    "total_players": 150,
+    "average_fp": 18.7,
+    "max_fp": 35.2,
+    "min_fp": 4.8,
+    "accuracy_stats": {
+      "average_accuracy": 82.1,
+      "correct_rate": 0.5,
+      "partially_correct_rate": 0.3,
+      "incorrect_rate": 0.2
+    },
+    "positions": [
+      "QB",
+      "RB",
+      "WR",
+      "TE",
+      "K",
+      "DEF"
+    ],
+    "teams": 32
+  },
+  "mlb": {
+    "total_players": 120,
+    "average_fp": 15.3,
+    "max_fp": 25.8,
+    "min_fp": 6.2,
+    "accuracy_stats": {
+      "average_accuracy": 84.6,
+      "correct_rate": 0.55,
+      "partially_correct_rate": 0.3,
+      "incorrect_rate": 0.15
+    },
+    "positions": [
+      "SP",
+      "RP",
+      "C",
+      "1B",
+      "2B",
+      "3B",
+      "SS",
+      "LF",
+      "CF",
+      "RF",
+      "DH"
+    ],
+    "teams": 30
+  },
+  "nhl": {
+    "total_players": 100,
+    "average_fp": 12.8,
+    "max_fp": 20.4,
+    "min_fp": 3.9,
+    "accuracy_stats": {
+      "average_accuracy": 81.9,
+      "correct_rate": 0.5,
+      "partially_correct_rate": 0.3,
+      "incorrect_rate": 0.2
+    },
+    "positions": [
+      "C",
+      "LW",
+      "RW",
+      "D",
+      "G"
+    ],
+    "teams": 32
+  },
+  "trends": {
+    "most_accurate_sport": "nba",
+    "highest_variance": "nfl",
+    "most_stable": "mlb",
+    "update_frequency": "daily"
+  }
+}
