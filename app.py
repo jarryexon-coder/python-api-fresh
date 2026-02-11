@@ -2411,7 +2411,7 @@ def get_analytics():
         
         # Use real data to generate analytics
         if sport == 'nba':
-            data_source = players_data_list[:50]
+            data_source = players_data_list[:100]
             # Generate some mock games from player data
             games = []
             for i in range(0, min(len(data_source), 10), 2):
@@ -2668,13 +2668,13 @@ def get_predictions():
         if sport in ['nba', 'nfl', 'mlb', 'nhl']:
             # Get players for the sport
             if sport == 'nba':
-                data_source = players_data_list[:5]
+                data_source = players_data_list[:70]
             elif sport == 'nfl':
-                data_source = nfl_players_data[:5]
+                data_source = nfl_players_data[:30]
             elif sport == 'mlb':
-                data_source = mlb_players_data[:5]
+                data_source = mlb_players_data[:40]
             else:
-                data_source = nhl_players_data[:5]
+                data_source = nhl_players_data[:40]
             
             for i, player in enumerate(data_source):
                 player_name = player.get('name') or player.get('playerName')
@@ -3572,15 +3572,15 @@ def get_sports_wire():
         
         # Generate news from real player data
         if sport == 'nba':
-            data_source = players_data_list[:10]
+            data_source = players_data_list[:150]
         elif sport == 'nfl':
-            data_source = nfl_players_data[:10]
+            data_source = nfl_players_data[:50]
         elif sport == 'mlb':
-            data_source = mlb_players_data[:10]
+            data_source = mlb_players_data[:50]
         elif sport == 'nhl':
-            data_source = nhl_players_data[:10]
+            data_source = nhl_players_data[:50]
         else:
-            data_source = all_players_data[:10]
+            data_source = all_players_data[:100]
         
         real_news = []
         
@@ -3948,15 +3948,15 @@ def get_history():
         
         # Get recent players for history
         if sport == 'nba':
-            data_source = players_data_list[:20]
+            data_source = players_data_list[:70]
         elif sport == 'nfl':
-            data_source = nfl_players_data[:20]
+            data_source = nfl_players_data[:40]
         else:
-            data_source = all_players_data[:20]
+            data_source = all_players_data[:70]
         
         real_history = []
         
-        for i, player in enumerate(data_source[:8]):  # Limit to 8 history items
+        for i, player in enumerate(data_source[:20]):  # Limit to 8 history items
             player_name = player.get('name') or player.get('playerName')
             if not player_name:
                 continue
@@ -4024,15 +4024,15 @@ def get_player_props():
         
         # Generate props from real player data
         if sport == 'nba':
-            data_source = players_data_list[:15]
+            data_source = players_data_list[:60]
         elif sport == 'nfl':
-            data_source = nfl_players_data[:15]
+            data_source = nfl_players_data[:30]
         elif sport == 'mlb':
-            data_source = mlb_players_data[:15]
+            data_source = mlb_players_data[:60]
         elif sport == 'nhl':
-            data_source = nhl_players_data[:15]
+            data_source = nhl_players_data[:60]
         else:
-            data_source = all_players_data[:15]
+            data_source = all_players_data[:150]
         
         real_props = []
         
@@ -4916,15 +4916,15 @@ def get_predictions_outcome():
         
         # Generate outcomes from player data
         if sport == 'nba':
-            data_source = players_data_list[:10]
+            data_source = players_data_list[:100]
         elif sport == 'nfl':
-            data_source = nfl_players_data[:10]
+            data_source = nfl_players_data[:50]
         elif sport == 'mlb':
-            data_source = mlb_players_data[:10]
+            data_source = mlb_players_data[:50]
         elif sport == 'nhl':
-            data_source = nhl_players_data[:10]
+            data_source = nhl_players_data[:50]
         else:
-            data_source = all_players_data[:10]
+            data_source = all_players_data[:150]
         
         for i, player in enumerate(data_source):
             player_name = player.get('name') or player.get('playerName')
@@ -4971,7 +4971,7 @@ def get_predictions_outcome():
         
         response_data = {
             'success': True,
-            'outcomes': outcomes[:20],
+            'outcomes': outcomes,
             'count': len(outcomes),
             'sport': sport,
             'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -5342,15 +5342,15 @@ def debug_player_sample(sport):
     """Get sample player data for debugging"""
     try:
         if sport == 'nba':
-            data = players_data_list[:5]
+            data = players_data_list[:50]
         elif sport == 'nfl':
-            data = nfl_players_data[:5]
+            data = nfl_players_data[:50]
         elif sport == 'mlb':
-            data = mlb_players_data[:5]
+            data = mlb_players_data[:50]
         elif sport == 'nhl':
-            data = nhl_players_data[:5]
+            data = nhl_players_data[:50]
         else:
-            data = all_players_data[:5]
+            data = all_players_data[:50]
         
         return jsonify({
             'success': True,
