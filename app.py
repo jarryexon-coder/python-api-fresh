@@ -649,10 +649,10 @@ def safe_load_json(filename, default=None):
         return default if default is not None else []
 
 # Load ALL comprehensive data
-players_data_list = safe_load_json('players_data_comprehensive.json', [])
-nfl_players_data = safe_load_json('nfl_players_data_comprehensive.json', [])
-mlb_players_data = safe_load_json('mlb_players_data_comprehensive.json', [])
-nhl_players_data = safe_load_json('nhl_players_data_comprehensive.json', [])
+players_data_list = safe_load_json('players_data_comprehensive_fixed.json', [])
+nfl_players_data = safe_load_json('nfl_players_data_comprehensive_fixed.json', [])
+mlb_players_data = safe_load_json('mlb_players_data_comprehensive_fixed.json', [])
+nhl_players_data = safe_load_json('nhl_players_data_comprehensive_fixed.json', [])
 fantasy_teams_data = safe_load_json('fantasy_teams_data_comprehensive.json', [])
 sports_stats_database = safe_load_json('sports_stats_database_comprehensive.json', {})
 
@@ -936,16 +936,16 @@ def load_json_data(filename, default=None):
     return default
 
 # Load all databases 
-players_data = load_json_data('players_data_comprehensive.json', {})
-nfl_players_data = load_json_data('nfl_players_data_comprehensive.json', [])
-mlb_players_data = load_json_data('mlb_players_data_comprehensive.json', [])
-nhl_players_data = load_json_data('nhl_players_data_comprehensive.json', [])
+players_data = load_json_data('players_data_comprehensive_fixed.json', {})
+nfl_players_data = load_json_data('nfl_players_data_comprehensive_fixed.json', [])
+mlb_players_data = load_json_data('mlb_players_data_comprehensive_fixed.json', [])
+nhl_players_data = load_json_data('nhl_players_data_comprehensive_fixed.json', [])
 fantasy_teams_data_raw = load_json_data('fantasy_teams_data_comprehensive.json', {})  # Changed name
 sports_stats_database = load_json_data('sports_stats_database_comprehensive.json', {})
 
 # Handle players_data which might be wrapped in a dict
 if isinstance(players_data, dict) and 'players' in players_data:
-    print(f"📊 Extracting players list from players_data_comprehensive.json")
+    print(f"📊 Extracting players list from players_data_comprehensive_fixed.json")
     players_data_list = players_data.get('players', [])
     players_metadata = {}
 else:
@@ -980,7 +980,7 @@ all_players_data.extend(mlb_players_data)
 all_players_data.extend(nhl_players_data)
 
 print(f"📊 REAL DATABASES LOADED:")
-print(f"   NBA Players file size: {os.path.getsize('players_data_comprehensive.json')} bytes")
+print(f"   NBA Players file size: {os.path.getsize('players_data_comprehensive_fixed.json')} bytes")
 print(f"   First NBA player: {players_data_list[0] if players_data_list else 'None'}")
 print(f"   Total players in list: {len(players_data_list)}")
 print(f"   NBA Players: {len(players_data_list)}")
@@ -1846,10 +1846,10 @@ def debug_load_status():
     import os
     
     files_to_check = [
-        'players_data_comprehensive.json',
-        'nfl_players_data_comprehensive.json',
-        'mlb_players_data_comprehensive.json',
-        'nhl_players_data_comprehensive.json'
+        'players_data_comprehensive_fixed.json',
+        'nfl_players_data_comprehensive_fixed.json',
+        'mlb_players_data_comprehensive_fixed.json',
+        'nhl_players_data_comprehensive_fixed.json'
     ]
     
     status = {}
