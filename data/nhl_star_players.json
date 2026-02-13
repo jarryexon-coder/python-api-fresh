@@ -1,0 +1,92 @@
+{
+  "season": "2025-26",
+  "as_of": "2026-02-11",
+  "players": {
+    "Connor McDavid": {
+      "team": "EDM",
+      "position": "C",
+      "points_per_game": 1.62,
+      "shots_per_game": 4.8,
+      "assists_per_game": 1.1,
+      "confidence": 92,
+      "hot_streak": true,
+      "streak_days": 10,
+      "props": {
+        "points_line": 1.5,
+        "shots_line": 4.5,
+        "assists_line": 1.5
+      }
+    },
+    "Auston Matthews": {
+      "team": "TOR",
+      "position": "C",
+      "goals_per_game": 0.68,
+      "shots_per_game": 5.2,
+      "points_per_game": 1.28,
+      "confidence": 88,
+      "hot_streak": true,
+      "streak_days": 7,
+      "props": {
+        "goals_line": 0.5,
+        "shots_line": 4.5,
+        "points_line": 1.5
+      }
+    },
+    "Nathan MacKinnon": {
+      "team": "COL",
+      "position": "C",
+      "points_per_game": 1.54,
+      "shots_per_game": 4.9,
+      "assists_per_game": 1.0,
+      "confidence": 86,
+      "hot_streak": false,
+      "props": {
+        "points_line": 1.5,
+        "shots_line": 4.5,
+        "assists_line": 0.5
+      }
+    },
+    "Leon Draisaitl": {
+      "team": "EDM",
+      "position": "C",
+      "points_per_game": 1.48,
+      "goals_per_game": 0.52,
+      "assists_per_game": 0.96,
+      "confidence": 84,
+      "props": {
+        "points_line": 1.5,
+        "goals_line": 0.5,
+        "assists_line": 0.5
+      }
+    },
+    "David Pastrnak": {
+      "team": "BOS",
+      "position": "RW",
+      "goals_per_game": 0.58,
+      "shots_per_game": 5.1,
+      "points_per_game": 1.22,
+      "confidence": 82,
+      "props": {
+        "goals_line": 0.5,
+        "shots_line": 4.5,
+        "points_line": 1.5
+      }
+    }
+  },
+  "goaltenders": {
+    "Connor Hellebuyck": {
+      "team": "WPG",
+      "save_percentage": 0.924,
+      "goals_against_avg": 2.32,
+      "shutout_pct": 0.08,
+      "confidence": 88
+    },
+    "Igor Shesterkin": {
+      "team": "NYR",
+      "save_percentage": 0.918,
+      "goals_against_avg": 2.48,
+      "shutout_pct": 0.06,
+      "confidence": 84
+    }
+  }
+}

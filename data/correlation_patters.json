@@ -1,0 +1,77 @@
+{
+  "version": "2026.1",
+  "last_updated": "2026-02-11",
+  "patterns": [
+    {
+      "id": "qb_wr_td",
+      "name": "QB-WR Touchdown Connection",
+      "markets": ["passing_touchdowns", "receiving_touchdowns"],
+      "bonus": 0.15,
+      "sports": ["nfl"],
+      "description": "When a QB throws a TD to a specific WR, both props hit simultaneously",
+      "confidence": 0.92
+    },
+    {
+      "id": "star_player_win",
+      "name": "Star Player + Team Win",
+      "markets": ["player_points", "player_goals", "moneyline"],
+      "bonus": 0.10,
+      "sports": ["nba", "nhl", "nfl"],
+      "description": "Star player performs well when team wins",
+      "confidence": 0.78
+    },
+    {
+      "id": "pitcher_strikeouts_team_total",
+      "name": "Strikeout Pitcher + Team Total",
+      "markets": ["strikeouts", "team_total_over"],
+      "bonus": 0.12,
+      "sports": ["mlb"],
+      "description": "Ace pitchers often lead to lower team totals against",
+      "confidence": 0.71
+    },
+    {
+      "id": "goalie_shutout",
+      "name": "Goalie Shutout + Moneyline",
+      "markets": ["shutout", "moneyline"],
+      "bonus": 0.18,
+      "sports": ["nhl"],
+      "description": "Shutout almost guarantees team win",
+      "confidence": 0.95
+    },
+    {
+      "id": "points_rebounds_assists",
+      "name": "PRA Correlations",
+      "markets": ["points", "rebounds", "assists"],
+      "bonus": 0.08,
+      "sports": ["nba"],
+      "description": "All-around stat stuffers tend to hit multiple props",
+      "confidence": 0.69
+    },
+    {
+      "id": "running_back_rush_rec",
+      "name": "RB Rush + Rec Yards",
+      "markets": ["rushing_yards", "receiving_yards"],
+      "bonus": 0.09,
+      "sports": ["nfl"],
+      "description": "Dual-threat RBs contribute in both phases",
+      "confidence": 0.73
+    },
+    {
+      "id": "hitter_hits_runs",
+      "name": "Hits + Runs Scored",
+      "markets": ["hits", "runs_scored"],
+      "bonus": 0.11,
+      "sports": ["mlb"],
+      "description": "Hitters who get on base are likely to score",
+      "confidence": 0.76
+    }
+  ],
+  "anti_correlation": [
+    {
+      "id": "qb_rb_td",
+      "markets": ["passing_td", "rushing_td"],
+      "penalty": -0.08,
+      "description": "QB rushing TDs reduce passing TD opportunities"
+    }
+  ]
+}

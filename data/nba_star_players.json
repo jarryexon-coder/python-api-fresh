@@ -1,0 +1,107 @@
+{
+  "season": "2025-26",
+  "as_of": "2026-02-11",
+  "mvp_race": {
+    "Shai Gilgeous-Alexander": {
+      "team": "OKC",
+      "position": "G",
+      "ppg": 32.4,
+      "apg": 6.2,
+      "rpg": 5.1,
+      "spg": 2.3,
+      "fantasy_avg": 52.8,
+      "confidence": 94,
+      "mvp_odds": "+150",
+      "props": {
+        "points_line": 30.5,
+        "assists_line": 5.5,
+        "steals_line": 1.5
+      }
+    },
+    "Jayson Tatum": {
+      "team": "BOS",
+      "position": "F",
+      "ppg": 29.8,
+      "rpg": 8.7,
+      "apg": 5.2,
+      "fantasy_avg": 48.6,
+      "confidence": 88,
+      "mvp_odds": "+300",
+      "props": {
+        "points_line": 27.5,
+        "rebounds_line": 8.5,
+        "assists_line": 4.5
+      }
+    },
+    "Anthony Edwards": {
+      "team": "MIN",
+      "position": "G",
+      "ppg": 32.4,
+      "rpg": 5.8,
+      "apg": 5.1,
+      "fantasy_avg": 49.2,
+      "confidence": 86,
+      "mvp_odds": "+400",
+      "props": {
+        "points_line": 30.5,
+        "threes_line": 3.5,
+        "assists_line": 4.5
+      }
+    }
+  },
+  "rookie_class_2025": {
+    "Cooper Flagg": {
+      "team": "WAS",
+      "position": "F",
+      "ppg": 18.5,
+      "rpg": 7.8,
+      "apg": 3.4,
+      "bpg": 1.8,
+      "fantasy_avg": 34.2,
+      "roty_odds": "-150",
+      "confidence": 82,
+      "props": {
+        "points_line": 16.5,
+        "points_rebounds_line": 26.5,
+        "blocks_line": 1.5
+      }
+    },
+    "Ace Bailey": {
+      "team": "UTAH",
+      "position": "F",
+      "ppg": 17.2,
+      "rpg": 6.9,
+      "apg": 2.1,
+      "fantasy_avg": 31.8,
+      "roty_odds": "+250",
+      "confidence": 78
+    },
+    "Dylan Harper": {
+      "team": "DET",
+      "position": "G",
+      "ppg": 15.8,
+      "apg": 5.1,
+      "rpg": 3.2,
+      "fantasy_avg": 29.4,
+      "roty_odds": "+400",
+      "confidence": 75
+    }
+  },
+  "dpoy_race": {
+    "Victor Wembanyama": {
+      "team": "SAS",
+      "position": "C",
+      "bpg": 3.8,
+      "spg": 1.2,
+      "rpg": 13.1,
+      "fantasy_avg": 46.5,
+      "confidence": 90,
+      "dpoy_odds": "-200",
+      "props": {
+        "blocks_line": 3.5,
+        "rebounds_line": 12.5,
+        "points_line": 22.5
+      }
+    }
+  }
+}

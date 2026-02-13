@@ -1,0 +1,20 @@
+{
+  "season": "2025-26",
+  "as_of": "2026-02-11",
+  "teams": {
+    "WAS": {"name": "Washington Wizards", "record": "18-35"},
+    "UTAH": {"name": "Utah Jazz", "record": "24-29"},
+    "DET": {"name": "Detroit Pistons", "record": "27-26"},
+    "LAL": {"name": "Los Angeles Lakers", "record": "36-18"},
+    "BOS": {"name": "Boston Celtics", "record": "44-10"},
+    "OKC": {"name": "Oklahoma City Thunder", "record": "48-6"}
+  },
+  "rookie_class_2025": [
+    {
+      "name": "Cooper Flagg",
+      "team": "WAS",
+      "stats": {"ppg": 18.5, "rpg": 7.8, "apg": 3.4},
+      "roty_odds": -150
+    }
+  ]
+}
