@@ -1,0 +1,202 @@
+[
+  {
+    "name": "Novak Djokovic",
+    "country": "Serbia",
+    "ranking": 1,
+    "age": 37,
+    "tour": "ATP",
+    "points": 11245,
+    "hand": "Right",
+    "titles": 98
+  },
+  {
+    "name": "Carlos Alcaraz",
+    "country": "Spain",
+    "ranking": 2,
+    "age": 21,
+    "tour": "ATP",
+    "points": 8845,
+    "hand": "Right",
+    "titles": 13
+  },
+  {
+    "name": "Jannik Sinner",
+    "country": "Italy",
+    "ranking": 3,
+    "age": 22,
+    "tour": "ATP",
+    "points": 8270,
+    "hand": "Right",
+    "titles": 12
+  },
+  {
+    "name": "Daniil Medvedev",
+    "country": "Russia",
+    "ranking": 4,
+    "age": 28,
+    "tour": "ATP",
+    "points": 7215,
+    "hand": "Right",
+    "titles": 20
+  },
+  {
+    "name": "Alexander Zverev",
+    "country": "Germany",
+    "ranking": 5,
+    "age": 27,
+    "tour": "ATP",
+    "points": 6795,
+    "hand": "Right",
+    "titles": 22
+  },
+  {
+    "name": "Andrey Rublev",
+    "country": "Russia",
+    "ranking": 6,
+    "age": 26,
+    "tour": "ATP",
+    "points": 4970,
+    "hand": "Right",
+    "titles": 15
+  },
+  {
+    "name": "Casper Ruud",
+    "country": "Norway",
+    "ranking": 7,
+    "age": 25,
+    "tour": "ATP",
+    "points": 4560,
+    "hand": "Right",
+    "titles": 10
+  },
+  {
+    "name": "Hubert Hurkacz",
+    "country": "Poland",
+    "ranking": 8,
+    "age": 27,
+    "tour": "ATP",
+    "points": 3985,
+    "hand": "Right",
+    "titles": 8
+  },
+  {
+    "name": "Stefanos Tsitsipas",
+    "country": "Greece",
+    "ranking": 9,
+    "age": 25,
+    "tour": "ATP",
+    "points": 3700,
+    "hand": "Right",
+    "titles": 10
+  },
+  {
+    "name": "Taylor Fritz",
+    "country": "USA",
+    "ranking": 10,
+    "age": 26,
+    "tour": "ATP",
+    "points": 3520,
+    "hand": "Right",
+    "titles": 7
+  },
+  {
+    "name": "Iga Swiatek",
+    "country": "Poland",
+    "ranking": 1,
+    "age": 23,
+    "tour": "WTA",
+    "points": 10115,
+    "hand": "Right",
+    "titles": 19
+  },
+  {
+    "name": "Aryna Sabalenka",
+    "country": "Belarus",
+    "ranking": 2,
+    "age": 26,
+    "tour": "WTA",
+    "points": 9045,
+    "hand": "Right",
+    "titles": 14
+  },
+  {
+    "name": "Coco Gauff",
+    "country": "USA",
+    "ranking": 3,
+    "age": 20,
+    "tour": "WTA",
+    "points": 7440,
+    "hand": "Right",
+    "titles": 7
+  },
+  {
+    "name": "Elena Rybakina",
+    "country": "Kazakhstan",
+    "ranking": 4,
+    "age": 24,
+    "tour": "WTA",
+    "points": 6476,
+    "hand": "Right",
+    "titles": 8
+  },
+  {
+    "name": "Jessica Pegula",
+    "country": "USA",
+    "ranking": 5,
+    "age": 30,
+    "tour": "WTA",
+    "points": 5555,
+    "hand": "Right",
+    "titles": 4
+  },
+  {
+    "name": "Ons Jabeur",
+    "country": "Tunisia",
+    "ranking": 6,
+    "age": 29,
+    "tour": "WTA",
+    "points": 4755,
+    "hand": "Right",
+    "titles": 5
+  },
+  {
+    "name": "Marketa Vondrousova",
+    "country": "Czechia",
+    "ranking": 7,
+    "age": 24,
+    "tour": "WTA",
+    "points": 4215,
+    "hand": "Left",
+    "titles": 2
+  },
+  {
+    "name": "Maria Sakkari",
+    "country": "Greece",
+    "ranking": 8,
+    "age": 28,
+    "tour": "WTA",
+    "points": 3925,
+    "hand": "Right",
+    "titles": 2
+  },
+  {
+    "name": "Karolina Muchova",
+    "country": "Czechia",
+    "ranking": 9,
+    "age": 27,
+    "tour": "WTA",
+    "points": 3650,
+    "hand": "Right",
+    "titles": 1
+  },
+  {
+    "name": "Barbora Krejcikova",
+    "country": "Czechia",
+    "ranking": 10,
+    "age": 28,
+    "tour": "WTA",
+    "points": 3460,
+    "hand": "Right",
+    "titles": 8
+  }
+]

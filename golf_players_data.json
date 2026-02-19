@@ -1,0 +1,202 @@
+[
+  {
+    "name": "Scottie Scheffler",
+    "country": "USA",
+    "ranking": 1,
+    "age": 27,
+    "tour": "PGA",
+    "world_ranking_points": 12.45,
+    "wins": 9,
+    "major_wins": 2
+  },
+  {
+    "name": "Rory McIlroy",
+    "country": "NIR",
+    "ranking": 2,
+    "age": 35,
+    "tour": "PGA",
+    "world_ranking_points": 9.87,
+    "wins": 24,
+    "major_wins": 4
+  },
+  {
+    "name": "Jon Rahm",
+    "country": "ESP",
+    "ranking": 3,
+    "age": 29,
+    "tour": "PGA",
+    "world_ranking_points": 8.92,
+    "wins": 20,
+    "major_wins": 2
+  },
+  {
+    "name": "Ludvig Åberg",
+    "country": "SWE",
+    "ranking": 4,
+    "age": 24,
+    "tour": "PGA",
+    "world_ranking_points": 7.65,
+    "wins": 2,
+    "major_wins": 0
+  },
+  {
+    "name": "Xander Schauffele",
+    "country": "USA",
+    "ranking": 5,
+    "age": 30,
+    "tour": "PGA",
+    "world_ranking_points": 7.23,
+    "wins": 8,
+    "major_wins": 1
+  },
+  {
+    "name": "Viktor Hovland",
+    "country": "NOR",
+    "ranking": 6,
+    "age": 26,
+    "tour": "PGA",
+    "world_ranking_points": 6.54,
+    "wins": 7,
+    "major_wins": 0
+  },
+  {
+    "name": "Patrick Cantlay",
+    "country": "USA",
+    "ranking": 7,
+    "age": 32,
+    "tour": "PGA",
+    "world_ranking_points": 6.12,
+    "wins": 8,
+    "major_wins": 0
+  },
+  {
+    "name": "Max Homa",
+    "country": "USA",
+    "ranking": 8,
+    "age": 33,
+    "tour": "PGA",
+    "world_ranking_points": 5.98,
+    "wins": 7,
+    "major_wins": 0
+  },
+  {
+    "name": "Matt Fitzpatrick",
+    "country": "ENG",
+    "ranking": 9,
+    "age": 29,
+    "tour": "PGA",
+    "world_ranking_points": 5.45,
+    "wins": 9,
+    "major_wins": 1
+  },
+  {
+    "name": "Brian Harman",
+    "country": "USA",
+    "ranking": 10,
+    "age": 37,
+    "tour": "PGA",
+    "world_ranking_points": 5.12,
+    "wins": 4,
+    "major_wins": 1
+  },
+  {
+    "name": "Nelly Korda",
+    "country": "USA",
+    "ranking": 1,
+    "age": 25,
+    "tour": "LPGA",
+    "world_ranking_points": 9.87,
+    "wins": 10,
+    "major_wins": 2
+  },
+  {
+    "name": "Lilia Vu",
+    "country": "USA",
+    "ranking": 2,
+    "age": 26,
+    "tour": "LPGA",
+    "world_ranking_points": 8.54,
+    "wins": 5,
+    "major_wins": 2
+  },
+  {
+    "name": "Jin Young Ko",
+    "country": "KOR",
+    "ranking": 3,
+    "age": 28,
+    "tour": "LPGA",
+    "world_ranking_points": 7.98,
+    "wins": 15,
+    "major_wins": 2
+  },
+  {
+    "name": "Celine Boutier",
+    "country": "FRA",
+    "ranking": 4,
+    "age": 30,
+    "tour": "LPGA",
+    "world_ranking_points": 7.45,
+    "wins": 6,
+    "major_wins": 1
+  },
+  {
+    "name": "Ruoning Yin",
+    "country": "CHN",
+    "ranking": 5,
+    "age": 21,
+    "tour": "LPGA",
+    "world_ranking_points": 6.89,
+    "wins": 3,
+    "major_wins": 1
+  },
+  {
+    "name": "Minjee Lee",
+    "country": "AUS",
+    "ranking": 6,
+    "age": 27,
+    "tour": "LPGA",
+    "world_ranking_points": 6.54,
+    "wins": 11,
+    "major_wins": 2
+  },
+  {
+    "name": "Hyo Joo Kim",
+    "country": "KOR",
+    "ranking": 7,
+    "age": 28,
+    "tour": "LPGA",
+    "world_ranking_points": 6.23,
+    "wins": 12,
+    "major_wins": 1
+  },
+  {
+    "name": "Charley Hull",
+    "country": "ENG",
+    "ranking": 8,
+    "age": 28,
+    "tour": "LPGA",
+    "world_ranking_points": 5.98,
+    "wins": 3,
+    "major_wins": 0
+  },
+  {
+    "name": "Atthaya Thitikul",
+    "country": "THA",
+    "ranking": 9,
+    "age": 21,
+    "tour": "LPGA",
+    "world_ranking_points": 5.67,
+    "wins": 2,
+    "major_wins": 0
+  },
+  {
+    "name": "Brooke Henderson",
+    "country": "CAN",
+    "ranking": 10,
+    "age": 26,
+    "tour": "LPGA",
+    "world_ranking_points": 5.34,
+    "wins": 13,
+    "major_wins": 2
+  }
+]

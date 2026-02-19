@@ -1,0 +1,6 @@
+setup.py
+fantasy_sports_api_2026.egg-info/PKG-INFO
+fantasy_sports_api_2026.egg-info/SOURCES.txt
+fantasy_sports_api_2026.egg-info/dependency_links.txt
+fantasy_sports_api_2026.egg-info/requires.txt
+fantasy_sports_api_2026.egg-info/top_level.txt

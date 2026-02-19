@@ -45,7 +45,6 @@ BALLDONTLIE_BASE_URL = "https://api.balldontlie.io"
 BALLDONTLIE_HEADERS = {"Authorization": BALLDONTLIE_API_KEY}
 
 def make_request(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
-    """Generic request handler for Balldontlie API."""
     if not BALLDONTLIE_API_KEY:
         print("❌ BALLDONTLIE_API_KEY not set – cannot make request")
         return None
@@ -55,7 +54,7 @@ def make_request(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]
         resp = requests.get(url, headers=BALLDONTLIE_HEADERS, params=params, timeout=10)
         print(f"📡 Response status: {resp.status_code}")
         if resp.status_code != 200:
-            print(f"⚠️ Response body: {resp.text[:200]}")
+            print(f"⚠️ Response body: {resp.text[:500]}")  # print first 500 chars
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -191,19 +190,18 @@ def fetch_player_info(player_id: int) -> Optional[Dict]:
     return None
 
 def fetch_active_players(per_page: int = 100) -> Optional[List[Dict]]:
-    """
-    Fetch a list of active NBA players.
-    """
     cache_key = f"active_players:{per_page}"
     cached = get_cached(cache_key)
     if cached:
+        print("📦 Using cached active players")
         return cached
-
     response = make_request('/v1/players', params={'per_page': per_page})
     if response and 'data' in response:
         players = response['data']
+        print(f"✅ Fetched {len(players)} active players from Balldontlie")
         set_cache(cache_key, players)
         return players
+    print("❌ fetch_active_players: No data or 'data' key missing")
     return None
 
 def fetch_todays_games(date: Optional[str] = None) -> Optional[List[Dict]]:
