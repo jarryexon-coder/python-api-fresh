@@ -5426,6 +5426,15 @@ def api_response(success, data=None, message="", **kwargs):
 # ==============================================================================
 # 13. ROUTES / ENDPOINTS
 # ==============================================================================
+@app.route('/api/test/balldontlie')
+def test_balldontlie():
+    """Test Balldontlie fetch directly."""
+    from balldontlie_fetchers import fetch_active_players
+    players = fetch_active_players(per_page=5)
+    if players:
+        return jsonify({"success": True, "count": len(players)})
+    else:
+        return jsonify({"success": False, "error": "No players returned"})
 
 @app.route('/')
 def root():
