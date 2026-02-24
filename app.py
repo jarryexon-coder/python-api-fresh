@@ -185,6 +185,25 @@ def route_cache_set(key, data, ttl=120):
         'timestamp': time.time(),
         'ttl': ttl
     }
+
+def fallback_trends_logic(player_name, sport):
+    """Generate mock trends for fallback."""
+    return {
+        'trends': [
+            {
+                'player': player_name or 'LeBron James',
+                'metric': 'Fantasy Points',
+                'trend': 'up',
+                'last_5_games': [45, 52, 38, 41, 48],
+                'average': 42.5,
+                'last_5_average': 44.8,
+                'change': '+5.4%',
+                'analysis': 'Player is on an upward trend.',
+                'confidence': 75
+            }
+        ]
+    }
+
 # ==============================================================================
 # BALLDONTLIE REQUEST HELPER
 # ==============================================================================
@@ -5721,6 +5740,37 @@ def api_info():
 # ------------------------------------------------------------------------------
 # Players & Fantasy endpoints
 # ------------------------------------------------------------------------------
+@app.route('/api/parlay/correlated/<parlay_id>')
+def get_correlated_parlay(parlay_id):
+    # For now, return a mock parlay
+    return jsonify({
+        'id': parlay_id,
+        'name': 'Correlated Parlay',
+        'legs': [
+            {'description': 'Leg 1', 'odds': '-110'},
+            {'description': 'Leg 2', 'odds': '-115'}
+        ],
+        'total_odds': '+265',
+        'correlation_factor': 0.85,
+        'analysis': 'These legs have positive correlation.'
+    })
+
+@app.route('/api/kalshi/predictions')
+def get_kalshi_predictions():
+    # Return mock data for now
+    return jsonify({
+        'success': True,
+        'predictions': [
+            {
+                'id': 'kalshi-1',
+                'title': 'Lakers to win?',
+                'yes_price': 0.65,
+                'no_price': 0.35,
+                'expires': '2026-03-01'
+            }
+        ]
+    })
+
 @app.route('/api/players')
 def get_players():
     """Get players – returns real or enhanced mock data with realistic stats."""
@@ -7549,7 +7599,7 @@ def get_advanced_analytics():
     Generate advanced analytics including player prop picks.
     Priority order:
       1. Static NBA data if available (fast, pre‑computed)
-      2. Live data from Balldontlie (for NBA, if static not present)
+      2. Live data from Balldontlie (for NBA, with timeouts)
       3. Mock data as fallback (ensures response is never empty)
     """
     try:
@@ -7560,10 +7610,9 @@ def get_advanced_analytics():
         # ----- 1. STATIC NBA DATA (fastest) -----
         if sport == 'nba' and NBA_PLAYERS_2026:
             print("📦 Using static NBA data for advanced analytics", flush=True)
-            # Assume generate_static_advanced_analytics returns a list of picks
             selections = generate_static_advanced_analytics(sport, limit)
             random.shuffle(selections)
-            # If we have enough, return immediately
+            # If we have enough, return immediately (fast path)
             if len(selections) >= limit:
                 return jsonify({
                     'success': True,
@@ -7573,14 +7622,17 @@ def get_advanced_analytics():
                     'timestamp': datetime.now(timezone.utc).isoformat()
                 })
 
-        # ----- 2. LIVE DATA FROM BALLDONTLIE (if static not used or insufficient) -----
+        # ----- 2. LIVE DATA FROM BALLDONTLIE (with timeouts) -----
         if sport == 'nba' and BALLDONTLIE_API_KEY and len(selections) < limit:
-            print("🏀 Generating advanced analytics from Balldontlie", flush=True)
+            print("🏀 Generating advanced analytics from Balldontlie (with timeouts)", flush=True)
             try:
-                players = fetch_active_players(per_page=100)
+                # Fetch players with a timeout – assume fetch_active_players accepts timeout
+                players = fetch_active_players(per_page=100, timeout=5)
                 if players:
-                    player_ids = [p['id'] for p in players[:50]]
-                    season_avgs = fetch_player_season_averages(player_ids) or []
+                    # Process only first 20 players to keep response fast
+                    player_ids = [p['id'] for p in players[:20]]
+                    # Fetch season averages with timeout
+                    season_avgs = fetch_player_season_averages(player_ids, timeout=5) or []
                     avg_map = {a['player_id']: a for a in season_avgs}
 
                     stat_types = [
@@ -7591,7 +7643,7 @@ def get_advanced_analytics():
                         {'stat': 'Blocks', 'base_key': 'blk'},
                     ]
 
-                    for p in players[:50]:
+                    for p in players[:20]:
                         pid = p['id']
                         sa = avg_map.get(pid, {})
                         if not sa:
@@ -7644,13 +7696,12 @@ def get_advanced_analytics():
                                 'timestamp': datetime.now(timezone.utc).isoformat()
                             })
             except Exception as e:
-                print(f"⚠️ Balldontlie fetch failed: {e}", flush=True)
+                print(f"⚠️ Balldontlie fetch failed (timeout or error): {e}", flush=True)
                 # Continue to fallback – do not raise
 
         # ----- 3. FALLBACK TO MOCK DATA (if not enough picks) -----
         if len(selections) < limit:
             print("📦 Falling back to mock advanced analytics", flush=True)
-            # Reuse the existing mock generation (extracted into a function for clarity)
             mock_picks = generate_mock_advanced_analytics(sport, limit - len(selections))
             selections.extend(mock_picks)
 
@@ -8041,7 +8092,6 @@ def get_odds(sport=None):
                     odds = fetch_game_odds(game_id)
                     if odds:
                         for odd in odds:
-                            # Transform to match The Odds API format roughly
                             odds_list.append({
                                 'id': odd.get('id'),
                                 'sport_key': 'basketball_nba',
@@ -8066,12 +8116,14 @@ def get_odds(sport=None):
                         'message': 'Balldontlie fallback odds'
                     })
 
-        # If all else fails, return empty
+        # If all else fails, return empty but with 200 status (changed from 404)
         return jsonify({
             'success': False,
             'error': 'No odds available from any source',
-            'data': []
-        }), 404
+            'data': [],
+            'source': 'none',
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 200  # ✅ Changed to 200 to avoid frontend 404 logging
 
     except requests.exceptions.Timeout:
         return jsonify({'success': False, 'error': 'Request timeout'}), 504
@@ -8261,16 +8313,34 @@ def get_nba_alternate_lines():
 # ------------------------------------------------------------------------------
 @app.route('/api/prizepicks/selections')
 def prizepicks_selections():
-    sport = flask_request.args.get('sport', 'nba')
+    """Return PrizePicks selections (proxies to Node microservice, with mock fallback)."""
+    sport = flask_request.args.get('sport', 'nba').lower()
+    limit = int(flask_request.args.get('limit', 20))
+    
     try:
         result = call_node_microservice('/api/prizepicks/selections', {'sport': sport})
         if result is None:
-            # Microservice unreachable
-            return jsonify({'success': False, 'error': 'PrizePicks service unavailable'}), 503
+            # Microservice unreachable – return mock data
+            selections = generate_mock_advanced_analytics(sport, limit)
+            return jsonify({
+                'success': True,
+                'selections': selections,
+                'count': len(selections),
+                'message': 'PrizePicks service unavailable – using mock data',
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
         return jsonify(result)
     except Exception as e:
         print(f"❌ PrizePicks proxy error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        # Return mock data on any exception
+        selections = generate_mock_advanced_analytics(sport, limit)
+        return jsonify({
+            'success': True,
+            'selections': selections,
+            'count': len(selections),
+            'message': f'Error contacting PrizePicks service: {str(e)} – using mock data',
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        })
 
 @app.route('/api/ fantasyhub/players')
 def fantasyhub_players():

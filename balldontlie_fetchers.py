@@ -41,17 +41,19 @@ else:
 BALLDONTLIE_BASE_URL = "https://api.balldontlie.io"
 BALLDONTLIE_HEADERS = {"Authorization": BALLDONTLIE_API_KEY}
 
-def make_request(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
+def make_request(endpoint: str, params: Optional[Dict] = None, timeout: Optional[int] = None) -> Optional[Dict]:
     if not BALLDONTLIE_API_KEY:
         print("❌ BALLDONTLIE_API_KEY not set")
         return None
     url = f"{BALLDONTLIE_BASE_URL}{endpoint}"
     try:
         print(f"📡 Making Balldontlie request to {endpoint} with params {params}", flush=True)
-        resp = requests.get(url, headers=BALLDONTLIE_HEADERS, params=params, timeout=10)
+        # Use provided timeout or fallback to 10 seconds
+        timeout_val = timeout if timeout is not None else 10
+        resp = requests.get(url, headers=BALLDONTLIE_HEADERS, params=params, timeout=timeout_val)
         print(f"📡 Response status: {resp.status_code}", flush=True)
         if resp.status_code != 200:
-            print(f"⚠️ Response body: {resp.text[:200]}", flush=True)  # log first 200 chars
+            print(f"⚠️ Response body: {resp.text[:200]}", flush=True)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -59,7 +61,7 @@ def make_request(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]
         return None
 
 # ========== PLAYER FETCHING ==========
-def fetch_active_players(per_page: int = 100, cache: bool = True) -> Optional[List[Dict]]:
+def fetch_active_players(per_page: int = 100, cache: bool = True, timeout: Optional[int] = None) -> Optional[List[Dict]]:
     """Fetch active NBA players from Balldontlie. Results cached for 1 hour."""
     cache_key = f"active_players:{per_page}"
     if cache:
@@ -69,11 +71,65 @@ def fetch_active_players(per_page: int = 100, cache: bool = True) -> Optional[Li
             return cached
 
     params = {'per_page': per_page, 'cursor': 0}
-    data = make_request("/v1/players", params)
+    # Pass timeout down to make_request
+    data = make_request("/v1/players", params, timeout=timeout)
     players = data.get('data') if data else None
     if players and cache:
         set_cache(cache_key, players)
     return players
+
+def fetch_all_active_players() -> List[Dict]:
+    """Fetch ALL active NBA players using pagination (v1)."""
+    all_players = []
+    cursor = 0
+    page = 1
+    while True:
+        print(f"📡 Fetching players page {page} with cursor {cursor}", flush=True)
+        params = {'per_page': 100, 'cursor': cursor}
+        response = make_request('/v1/players', params)
+        if not response or 'data' not in response:
+            break
+        players = response['data']
+        if not players:
+            break
+        all_players.extend(players)
+        # Get next cursor from meta
+        meta = response.get('meta', {})
+        next_cursor = meta.get('next_cursor')
+        if next_cursor is None:
+            break
+        cursor = next_cursor
+        page += 1
+        time.sleep(0.2)  # be nice to rate limits
+    print(f"✅ Fetched total {len(all_players)} players", flush=True)
+    return all_players
+
+def fetch_player_season_averages(
+    player_ids: List[int],
+    season: int = 2025,
+    timeout: Optional[int] = None
+) -> Dict[int, Dict]:
+    """
+    Fetch season averages for a list of player IDs.
+    Returns dict mapping player_id -> average stats.
+    """
+    if not player_ids:
+        return {}
+    
+    avg_map = {}
+    for pid in player_ids:
+        # Single-player request
+        params = {'season': season, 'player_id': pid}
+        response = make_request('/v1/season_averages', params, timeout=timeout)
+       
+        if response and 'data' in response and response['data']:
+            avg_map[pid] = response['data'][0]
+        
+        # Small delay to respect rate limits (60 per minute = 1 per second)
+        time.sleep(0.2)
+        
+    print(f"✅ Fetched season averages for {len(avg_map)} players", flush=True)
+    return avg_map
 
 def fetch_all_active_players() -> List[Dict]:
     """Fetch ALL active NBA players using pagination (v1)."""
@@ -119,31 +175,6 @@ def fetch_player_injuries(season: Optional[int] = None) -> Optional[List[Dict]]:
         set_cache(cache_key, injuries)
         return injuries
     return None
-
-# ========== SEASON AVERAGES ==========
-def fetch_player_season_averages(player_ids: List[int], season: int = 2025) -> Dict[int, Dict]:
-    """
-    Fetch season averages for a list of player IDs.
-    Returns dict mapping player_id -> average stats.
-    """
-    if not player_ids:
-        return {}
-    
-    avg_map = {}
-    for pid in player_ids:
-        # Single-player request
-        params = {'season': season, 'player_id': pid}
-        response = make_request('/v1/season_averages', params)
-        
-        if response and 'data' in response and response['data']:
-            # The API returns a list with one element
-            avg_map[pid] = response['data'][0]
-        
-        # Small delay to respect rate limits (60 per minute = 1 per second)
-        time.sleep(0.2)  # 200 ms → 5 requests per second (safe)
-    
-    print(f"✅ Fetched season averages for {len(avg_map)} players", flush=True)
-    return avg_map
 
 # ========== RECENT STATS ==========
 def fetch_player_recent_stats(player_id: int, last_n: int = 5) -> Optional[List[Dict]]:
