@@ -1459,7 +1459,7 @@ NODE_BASE_URL = "https://prizepicks-production.up.railway.app"
 def call_node_microservice(path, params=None):
     try:
         url = f"{NODE_BASE_URL}{path}"
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -6120,6 +6120,44 @@ def get_fantasy_players():
             "is_real_data": False,
             "message": f"Error fallback: {str(e)}"
         }), 200
+
+@app.route('/api/draft/rankings')
+def draft_rankings():
+    params = {
+        'sport': flask_request.args.get('sport', 'nba'),
+        'position': flask_request.args.get('position'),
+        'scoring': flask_request.args.get('scoring', 'standard'),
+        'limit': flask_request.args.get('limit', 50)
+    }
+    result = call_node_microservice('/api/draft/rankings', params=params, method='GET')
+    return jsonify(result)
+
+# Save draft result
+@app.route('/api/draft/save', methods=['POST'])
+def draft_save():
+    data = flask_request.json
+    result = call_node_microservice('/api/draft/save', method='POST', data=data)
+    return jsonify(result)
+
+# Get user draft history
+@app.route('/api/draft/history')
+def draft_history():
+    params = {
+        'userId': flask_request.args.get('userId'),
+        'sport': flask_request.args.get('sport'),
+        'status': flask_request.args.get('status')
+    }
+    result = call_node_microservice('/api/draft/history', params=params, method='GET')
+    return jsonify(result)
+
+# Get popular strategies
+@app.route('/api/draft/strategies/popular')
+def draft_strategies_popular():
+    params = {
+        'sport': flask_request.args.get('sport')
+    }
+    result = call_node_microservice('/api/draft/strategies/popular', params=params, method='GET')
+    return jsonify(result)
 
 @app.route('/api/player-analysis')
 def get_player_analysis():
