@@ -1675,7 +1675,7 @@ ADMIN_SECRET = os.getenv("ADMIN_SECRET", "your-secret-here")  # set a strong sec
 @app.route('/api/admin/update-nba-manual', methods=['POST'])
 def update_nba_manual():
     """Manually trigger NBA data update from Basketball Monster."""
-    # IMPORT ALL REQUIRED MODULES AT THE VERY BEGINNING
+    # IMPORT ALL REQUIRED MODULES
     import os
     import sys
     import subprocess
@@ -1684,18 +1684,19 @@ def update_nba_manual():
     import importlib
     import tempfile
     import requests
+    from bs4 import BeautifulSoup
+    import csv
     
     # Check API key
     api_key = request.headers.get('X-API-Key')
     expected_key = os.environ.get('ADMIN_API_KEY')
     
-    # Debug logging
     print(f"🔐 Auth check - Received: {api_key}, Expected: {expected_key}")
     
     if not expected_key:
         return jsonify({
             "error": "Server configuration error",
-            "message": "ADMIN_API_KEY not configured in environment"
+            "message": "ADMIN_API_KEY not configured"
         }), 500
     
     if not api_key or api_key != expected_key:
@@ -1707,29 +1708,80 @@ def update_nba_manual():
     try:
         print(f"🚀 Starting NBA data update at {datetime.now().isoformat()}")
         
-        # Step 1: Fetch data from Basketball Monster
+        # Step 1: Fetch and parse data from Basketball Monster
         print("📥 Fetching from Basketball Monster...")
         
-        # Simple fetch without pandas to avoid compatibility issues
-        fetch_url = "https://basketballmonster.com/playerrankings.aspx"
+        url = "https://basketballmonster.com/playerrankings.aspx"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        response = requests.get(fetch_url, headers=headers, timeout=30)
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
-        # Save raw HTML to temp file (update_nba_static.py will parse it)
+        # Parse HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Find the table - try multiple possible selectors
+        table = None
+        possible_selectors = [
+            'table#ctl00_cphMainContent_GridView1',
+            'table.rgMasterTable',
+            'table.GridView',
+            'table[class*="rgMaster"]'
+        ]
+        
+        for selector in possible_selectors:
+            table = soup.select_one(selector)
+            if table:
+                break
+        
+        if not table:
+            # Try to find any table with player data
+            tables = soup.find_all('table')
+            for t in tables:
+                if t.find('th') and 'Name' in str(t) and 'Team' in str(t):
+                    table = t
+                    break
+        
+        if not table:
+            return jsonify({"error": "Could not find player rankings table"}), 500
+        
+        # Extract headers
+        headers_row = table.find('tr')
+        headers = []
+        for th in headers_row.find_all(['th', 'td']):
+            headers.append(th.get_text(strip=True))
+        
+        # Clean headers
+        headers = [h for h in headers if h]
+        
+        # Extract data rows
+        rows = []
+        for tr in table.find_all('tr')[1:]:  # Skip header
+            cols = tr.find_all('td')
+            if len(cols) > 5:  # Ensure it's a data row
+                row_data = []
+                for col in cols:
+                    # Clean up the text
+                    text = col.get_text(strip=True)
+                    # Handle percentage signs
+                    if text and text[0] == '.':
+                        text = '0' + text
+                    row_data.append(text)
+                rows.append(row_data)
+        
+        print(f"✅ Found {len(rows)} players")
+        
+        # Save to CSV
         csv_path = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, dir='/tmp').name
         
-        # For now, create a simple CSV with the data we need
-        # This is a placeholder - you'll need to parse the HTML properly
-        with open(csv_path, 'w') as f:
-            f.write("Round,Rank,Value,Name,Team,Pos,Inj,g,m/g,p/g,3/g,r/g,a/g,s/g,b/g,fg%,fga/g,ft%,fta/g,to/g,USG,pV,3V,rV,aV,sV,bV,fg%V,ft%V,toV\n")
-            # Add sample data or parse from HTML
-            f.write("1,1,1.15,Nikola Jokic,DEN,C,,43,34.2,28.8,2.0,12.5,10.4,1.4,0.8,.577,17.5,.830,8.0,3.7,31.4,2.06,0.32,2.80,3.20,0.86,0.11,2.39,0.60,-1.99\n")
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(rows)
         
-        print(f"✅ Data saved to {csv_path}")
+        print(f"✅ Saved to {csv_path}")
         
         # Step 2: Run the update script
         print("🔄 Running update_nba_static.py...")
@@ -1762,7 +1814,7 @@ def update_nba_manual():
             player_count = len(nba_static_data.NBA_PLAYERS_2026)
         except Exception as e:
             print(f"⚠️ Could not reload module: {e}")
-            player_count = "unknown"
+            player_count = len(rows)  # Fallback to row count
         
         # Step 4: Return success
         return jsonify({
@@ -1771,15 +1823,13 @@ def update_nba_manual():
             "timestamp": datetime.now().isoformat(),
             "player_count": player_count,
             "data_source": "Basketball Monster",
-            "output": result.stdout.split('\n')[-5:] if result.stdout else []
+            "rows_found": len(rows),
+            "output": result.stdout.split('\n')[-3:] if result.stdout else []
         })
         
     except requests.exceptions.RequestException as e:
         print(f"❌ Download error: {e}")
         return jsonify({"error": f"Download failed: {str(e)}"}), 500
-    except subprocess.TimeoutExpired:
-        print("❌ Update timed out")
-        return jsonify({"error": "Update timed out"}), 500
     except Exception as e:
         print(f"❌ Error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -6518,9 +6568,9 @@ def get_fantasy_players():
         sport = flask_request.args.get('sport', 'nba').lower()
         limit = int(flask_request.args.get('limit', '100'))
         use_realtime = flask_request.args.get('realtime', 'true').lower() == 'true'
-
+        
         print(f"📥 GET /api/fantasy/players – sport={sport}, limit={limit}, realtime={use_realtime}", flush=True)
-
+        
         # ----- NEW: Try Node.js service first for NBA real-time data -----
         if sport == 'nba' and use_realtime:
             print("🔄 Attempting to fetch players from Node.js service...", flush=True)
@@ -6530,7 +6580,7 @@ def get_fantasy_players():
                 if response.status_code == 200:
                     data = response.json()
                     node_players = data.get('data', [])
-
+                    
                     # --- HEURISTIC: Reject if obviously fallback ---
                     if node_players and len(node_players) >= 10:
                         # Also check for fallback indicators (optional)
@@ -6546,7 +6596,7 @@ def get_fantasy_players():
                                 fantasy = p.get('fantasy_score', 0)
                                 if fantasy == 0:
                                     fantasy = pts + reb * 1.2 + ast * 1.5
-
+                                
                                 # Salary calculation (same as before)
                                 base_salary = fantasy * 400
                                 if fantasy > 25:
@@ -6554,8 +6604,8 @@ def get_fantasy_players():
                                 pos_mult = {'PG':0.9,'SG':0.95,'SF':1.0,'PF':1.05,'C':1.1}.get(p.get('position', 'N/A'), 1.0)
                                 rand_factor = random.uniform(0.85, 1.15)
                                 salary = int(max(3000, min(15000, base_salary * pos_mult * rand_factor)))
-
-                                mapped_players.append({
+                                
+                                mapped_players.append({   
                                     "id": p.get('player_id') or p.get('id', str(uuid.uuid4())),
                                     "name": p.get('name', 'Unknown'),
                                     "team": p.get('team', 'FA'),
@@ -6571,7 +6621,7 @@ def get_fantasy_players():
                                     "is_real_data": True,
                                     "data_source": "Node Service (NBA API)"
                                 })
-
+                            
                             print(f"✅ Node service returned {len(mapped_players)} real-looking players", flush=True)
                             return jsonify({
                                 "success": True,
@@ -6590,43 +6640,41 @@ def get_fantasy_players():
                     print(f"❌ Node service returned status {response.status_code}", flush=True)
             except Exception as e:
                 print(f"❌ Node service proxy error: {e}", flush=True)
-
-            print("⚠️ Falling back to Balldontlie...", flush=True)
-
-        # ----- 1. NBA + realtime: try Balldontlie (existing code) -----
-        if sport == 'nba' and use_realtime:
-            # ... your existing Balldontlie logic ...
-            # (keep it unchanged)
-            pass
-
-        # ----- 2. NEW: Fall back to static 2026 NBA data -----
+                            
+            print("⚠️ Falling back to static NBA data...", flush=True)
+        
+        # ----- 2. FALLBACK: Use static 2026 NBA data -----
         if sport == 'nba' and NBA_PLAYERS_2026:
-            print("📦 Using static 2026 NBA data as fallback", flush=True)
+            print(f"📦 Using static 2026 NBA data as fallback ({len(NBA_PLAYERS_2026)} players available)", flush=True)
             transformed = []
-            for player in NBA_PLAYERS_2026[:limit]:
-                fp = player['fantasy_points']
-
+            
+            # Sort by fantasy points to get the best players first
+            sorted_players = sorted(NBA_PLAYERS_2026, key=lambda x: x.get('fantasy_points', 0), reverse=True)
+            
+            for player in sorted_players[:limit]:
+                fp = player.get('fantasy_points', 0)
+                
                 # FanDuel salary formula
                 BASE_SALARY_MIN = 3000
                 BASE_SALARY_MAX = 11000
                 FP_TARGET = 48.0
-
+                
                 if fp >= FP_TARGET:
                     base_salary = BASE_SALARY_MAX
                 else:
                     slope = (BASE_SALARY_MAX - BASE_SALARY_MIN) / FP_TARGET
                     base_salary = BASE_SALARY_MIN + slope * fp
-
+                
                 pos_mult = {
                     'PG': 0.95, 'SG': 1.0, 'SF': 1.05, 'PF': 1.1, 'C': 1.15,
                     'G': 1.0, 'F': 1.1
                 }.get(player.get('position', ''), 1.0)
                 rand_factor = random.uniform(0.9, 1.1)
-
+                
                 salary = int(base_salary * pos_mult * rand_factor)
                 salary = max(3000, min(15000, salary))
                 value = fp / (salary / 1000) if salary > 0 else 0
-
+                
                 transformed.append({
                     "id": f"nba-static-{player.get('name', '').replace(' ', '-')}-{player.get('team', '')}",
                     "name": player.get('name', 'Unknown'),
@@ -6636,7 +6684,8 @@ def get_fantasy_players():
                     "fantasy_points": round(fp, 1),
                     "projected_points": round(fp, 1),
                     "value": round(value, 2),
-                    "points": round(player.get('pts_per_game', 0), 1),
+                    # FIXED: Use correct field names from nba_static_data.py
+                    "points": round(player.get('points_per_game', 0), 1),
                     "rebounds": round(player.get('reb_per_game', 0), 1),
                     "assists": round(player.get('ast_per_game', 0), 1),
                     "steals": round(player.get('stl_per_game', 0), 1),
@@ -6644,16 +6693,26 @@ def get_fantasy_players():
                     "turnovers": round(player.get('to_per_game', 0), 1),
                     "injury_status": player.get('injury_status', 'healthy'),
                     "games_played": player.get('games', 0),
+                    "minutes_per_game": round(player.get('minutes_per_game', 0), 1),
+                    "fg_pct": round(player.get('fg_pct', 0), 3),
+                    "ft_pct": round(player.get('ft_pct', 0), 3),
+                    "three_per_game": round(player.get('threes_per_game', 0), 1),
+                    "usage_rate": round(player.get('usage', 0), 1),
                     "is_real_data": True,
                     "data_source": "NBA 2026 Static"
                 })
-
-            # ---- ADDED DEBUG LOGS FROM FILE 1 ----
+            
+            # DEBUG LOGS
             if transformed:
-                print(f"📊 First static player: {transformed[0] if transformed else 'None'}", flush=True)
+                print(f"📊 First static player: {transformed[0]['name']} - FP: {transformed[0]['fantasy_points']}", flush=True)
                 zero_count = sum(1 for p in transformed if p['fantasy_points'] == 0)
                 print(f"📊 Players with zero fantasy points: {zero_count}/{len(transformed)}", flush=True)
-
+                if zero_count == len(transformed):
+                    print("⚠️ ALL players have zero fantasy points - check NBA_PLAYERS_2026 data", flush=True)
+                    # Print first player's raw data for debugging
+                    if NBA_PLAYERS_2026:
+                        print(f"🔍 Raw first player data: {NBA_PLAYERS_2026[0]}", flush=True)
+            
             if transformed:
                 return jsonify({
                     "success": True,
@@ -6662,22 +6721,22 @@ def get_fantasy_players():
                     "sport": sport,
                     "last_updated": datetime.now(timezone.utc).isoformat(),
                     "is_real_data": True,
+                    "data_source": "NBA 2026 Static",
                     "message": f"Returned {len(transformed)} players from 2026 static NBA data"
                 })
-
+        
         # ----- 3. Continue with existing fallback to JSON file -----
         print(f"📦 Using static/mock data for {sport}", flush=True)
         static_players = get_static_data_for_sport(sport)
         if static_players:
             # ... your existing static data logic ...
-            # (keep it unchanged)
             pass
         else:
             # ----- 4. Ultimate fallback: generate mock players -----
             mock_players = generate_mock_players(sport, limit)
             # ... (as before) ...
             return jsonify(...)
-
+                    
     except Exception as e:
         print(f"🔥 Unhandled error in /api/fantasy/players: {e}")
         traceback.print_exc()

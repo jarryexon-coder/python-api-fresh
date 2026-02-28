@@ -1,66 +1,21 @@
-#!/usr/bin/env python3
-"""
-Update NBA static data from CSV file.
-Usage: python update_nba_static.py <csv_file> [--output OUTPUT_FILE]
-"""
-
-import csv
-import sys
-import argparse
-import os
-from datetime import datetime
-
-def update_static_file(csv_file, output_file=None):
-    """
-    Update the static data file with new CSV data.
-    
-    Args:
-        csv_file: Path to the input CSV file
-        output_file: Path to output file (default: nba_static_data.py)
-    
-    Returns:
-        bool: True if successful
-    """
-    try:
-        # Read CSV data
-        players = []
-        with open(csv_file, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                players.append(row)
-        
-        print(f"📊 Read {len(players)} players from CSV")
-        
-        if len(players) == 0:
-            print("❌ No players found in CSV")
-            return False
-        
-        # Determine output file
-        if output_file is None:
-            output_file = 'nba_static_data.py'
-        
-        # Generate new static table
-        static_table = generate_static_table(players)
-        
-        # Generate new file content
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        new_content = f'''# nba_static_data.py
-# Auto-generated on {timestamp}
-# Contains {len(players)} NBA players
+# nba_static_data.py
+# Auto-generated on 2026-02-27 15:02:54
+# Contains 1 NBA players
 
 import csv
 import io
 import re
 from typing import List, Dict
 
-# ===== 2026 NBA PLAYER STATS ({len(players)} players) =====
+# ===== 2026 NBA PLAYER STATS (1 players) =====
 NBA_TABLE = """
-{static_table}
+Round	Rank	Value	Name	Team	Pos	Inj	g	m/g	p/g	3/g	r/g	a/g	s/g	b/g	fg%	fga/g	ft%	fta/g	to/g	USG	pV	3V	rV	aV	sV	bV	fg%V	ft%V	toV
+1	1	1.15	Nikola Jokic	DEN	C		43	34.2	28.8	2.0	12.5	10.4	1.4	0.8	.577	17.5	.830	8.0	3.7	31.4	2.06	0.32	2.80	3.20	0.86	0.11	2.39	0.60	-1.99
 """
 
 def parse_nba_player_table(table_str: str) -> List[Dict]:
     """Parse the tab-separated NBA player table using csv.reader."""
-    lines = table_str.strip().split('\\n')
+    lines = table_str.strip().split('\n')
     
     # Find the header line
     header_idx = None
@@ -75,11 +30,11 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
     header_line = lines[header_idx].strip()
     data_lines = lines[header_idx+1:]
     
-    header_reader = csv.reader([header_line], delimiter='\\t')
+    header_reader = csv.reader([header_line], delimiter='\t')
     headers = next(header_reader)
     headers = [h.strip() for h in headers]
     
-    header_map = {{
+    header_map = {
         'Name': 'name',
         'Team': 'team',
         'Pos': 'position',
@@ -98,24 +53,24 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         'fta/g': 'fta_per_game',
         'to/g': 'turnovers_per_game',
         'USG': 'usage'
-    }}
+    }
     
     players = []
     for line in data_lines:
         if not line.strip():
             continue
-        reader = csv.reader([line], delimiter='\\t')
+        reader = csv.reader([line], delimiter='\t')
         try:
             parts = next(reader)
         except StopIteration:
             continue
         if len(parts) != len(headers):
-            parts = re.split(r'\\s{{2,}}', line.strip())
+            parts = re.split(r'\s{2,}', line.strip())
             if len(parts) != len(headers):
                 print(f"⚠️ Skipping line – unexpected column count")
                 continue
         
-        player = {{}}
+        player = {}
         for i, header in enumerate(headers):
             key = header_map.get(header, header.lower())
             raw_val = parts[i].strip() if i < len(parts) else ''
@@ -166,62 +121,11 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         
         players.append(player)
     
-    print(f"✅ Parsed {{len(players)}} players")
+    print(f"✅ Parsed {len(players)} players")
     return players
 
 # Load once
 NBA_PLAYERS_2026 = parse_nba_player_table(NBA_TABLE)
 
 if __name__ == "__main__":
-    print(f"Loaded {{len(NBA_PLAYERS_2026)}} NBA players from static table")
-'''
-        
-        # Write the new file
-        with open(output_file, 'w') as f:
-            f.write(new_content)
-        
-        print(f"✅ Successfully updated {output_file} with {len(players)} players")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error updating static file: {e}")
-        return False
-
-def generate_static_table(players):
-    """Generate the static table string."""
-    if not players:
-        return ""
-    
-    # Get headers from first player
-    headers = list(players[0].keys())
-    
-    lines = []
-    # Add header
-    lines.append('\t'.join(headers))
-    
-    # Add each player
-    for player in players:
-        row = []
-        for header in headers:
-            val = player.get(header, '')
-            # Clean up values
-            if isinstance(val, float):
-                if header in ['fg%', 'ft%']:
-                    # Format as .XXX
-                    val = f".{str(val).split('.')[1][:3]}"
-                else:
-                    val = f"{val:.2f}" if val != int(val) else str(int(val))
-            row.append(str(val))
-        lines.append('\t'.join(row))
-    
-    return '\n'.join(lines)
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Update NBA static data')
-    parser.add_argument('csv_file', help='Path to CSV file')
-    parser.add_argument('--output', '-o', help='Output file path', default='nba_static_data.py')
-    
-    args = parser.parse_args()
-    
-    success = update_static_file(args.csv_file, args.output)
-    sys.exit(0 if success else 1)
+    print(f"Loaded {len(NBA_PLAYERS_2026)} NBA players from static table")
