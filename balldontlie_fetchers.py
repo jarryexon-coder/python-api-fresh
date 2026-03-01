@@ -61,6 +61,38 @@ def make_request(endpoint: str, params: Optional[Dict] = None, timeout: Optional
         return None
 
 # ========== PLAYER FETCHING ==========
+def fetch_multiple_player_recent_stats(player_ids: List[int], last_n: int = 5) -> Dict[int, List[Dict]]:
+    """
+    Fetch last N game stats for multiple players in one request.
+    Returns dict mapping player_id -> list of game stats.
+    """
+    if not player_ids:
+        return {}
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=last_n * 3)
+    params = {
+        'player_ids[]': player_ids,
+        'start_date': start_date.strftime("%Y-%m-%d"),
+        'end_date': end_date.strftime("%Y-%m-%d"),
+        'per_page': last_n * len(player_ids)
+    }
+    response = make_request("/v1/stats", params)
+    if not response or 'data' not in response:
+        return {}
+    stats_list = response['data']
+    by_player = {}
+    for stat in stats_list:
+        pid = stat.get('player_id')
+        if pid:
+            by_player.setdefault(pid, []).append(stat)
+    # Sort and limit per player
+    result = {}
+    for pid, games in by_player.items():
+        games.sort(key=lambda x: x.get('game', {}).get('date', ''), reverse=True)
+        result[pid] = games[:last_n]
+    print(f"✅ Fetched recent stats for {len(result)} players in batch", flush=True)
+    return result
+
 def fetch_active_players(per_page: int = 100, cache: bool = True, timeout: Optional[int] = None) -> Optional[List[Dict]]:
     """Fetch active NBA players from Balldontlie. Results cached for 1 hour."""
     cache_key = f"active_players:{per_page}"
@@ -110,25 +142,24 @@ def fetch_player_season_averages(
     timeout: Optional[int] = None
 ) -> Dict[int, Dict]:
     """
-    Fetch season averages for a list of player IDs.
+    Fetch season averages for a list of player IDs in one batch request.
     Returns dict mapping player_id -> average stats.
     """
     if not player_ids:
         return {}
     
+    params = {
+        'season': season,
+        'player_ids[]': player_ids  # Balldontlie accepts array
+    }
+    response = make_request('/v1/season_averages', params, timeout=timeout)
     avg_map = {}
-    for pid in player_ids:
-        # Single-player request
-        params = {'season': season, 'player_id': pid}
-        response = make_request('/v1/season_averages', params, timeout=timeout)
-       
-        if response and 'data' in response and response['data']:
-            avg_map[pid] = response['data'][0]
-        
-        # Small delay to respect rate limits (60 per minute = 1 per second)
-        time.sleep(0.2)
-        
-    print(f"✅ Fetched season averages for {len(avg_map)} players", flush=True)
+    if response and 'data' in response:
+        for avg in response['data']:
+            pid = avg.get('player_id')
+            if pid:
+                avg_map[pid] = avg
+    print(f"✅ Fetched season averages for {len(avg_map)} players in batch", flush=True)
     return avg_map
 
 def fetch_all_active_players() -> List[Dict]:

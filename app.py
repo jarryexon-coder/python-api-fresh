@@ -7060,114 +7060,236 @@ def get_value_bets():
 
 @app.route('/api/trends')
 def get_trends():
-    """Get player trends from Balldontlie (real data)"""
+    """
+    Get player trends for multiple NBA players using Balldontlie API.
+    Query params:
+        - sport (str): only 'nba' supported.
+        - limit (int): max number of players to process (default 20).
+        - player (str, optional): filter by player name (case-insensitive).
+    Returns JSON with a 'trends' array inside a 'data' wrapper.
+    """
     try:
-        player_name = flask_request.args.get('player')
         sport = flask_request.args.get('sport', 'nba').lower()
+        limit = int(flask_request.args.get('limit', 20))
+        player_filter = flask_request.args.get('player', '').strip().lower()
 
-        if sport != 'nba' or not BALLDONTLIE_API_KEY:
-            # Fallback to existing logic for non-NBA or no API key
-            return fallback_trends_logic(player_name, sport)
+        if sport != 'nba':
+            return fallback_trends_logic(player_filter, sport)
 
-        # Search for player by name in active players
-        players = fetch_active_players(per_page=500)  # fetch many to search
-        if not players:
-            return fallback_trends_logic(player_name, sport)
+        # 1. Fetch all active NBA players (pagination handled by fetcher)
+        print("📡 Fetching all active players...", flush=True)
+        all_players = fetch_all_active_players()  # from balldontlie_fetchers
+        if not all_players:
+            print("❌ No players fetched from Balldontlie", flush=True)
+            return fallback_trends_logic(player_filter, sport)
 
-        # Find matching player
-        target_player = None
-        for p in players:
-            full_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
-            if player_name and (player_name.lower() in full_name.lower() or
-                                player_name.lower() in p.get('first_name', '').lower() or
-                                player_name.lower() in p.get('last_name', '').lower()):
-                target_player = p
-                break
-        if not target_player and players:
-            target_player = players[0]  # default to first if no match
-            player_name = f"{target_player.get('first_name')} {target_player.get('last_name')}"
+        print(f"✅ Fetched {len(all_players)} total players", flush=True)
 
-        if not target_player:
-            return api_response(success=False, data={"trends": []}, message='Player not found')
+        # 2. Apply optional name filter
+        if player_filter:
+            filtered = []
+            for p in all_players:
+                full_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".lower()
+                if player_filter in full_name:
+                    filtered.append(p)
+            all_players = filtered
+            print(f"🔍 Filtered to {len(all_players)} players matching '{player_filter}'", flush=True)
 
-        pid = target_player['id']
+        if not all_players:
+            return api_response(
+                success=False,
+                data={"trends": []},
+                message='No players found matching criteria'
+            )
 
-        # Fetch season averages
-        season_avgs = fetch_player_season_averages([pid])
-        if not season_avgs or len(season_avgs) == 0:
-            return fallback_trends_logic(player_name, sport)
-        sa = season_avgs[0]
+        # 3. Take only the first 'limit' players (for performance)
+        players = all_players[:limit]
+        player_ids = [p['id'] for p in players if p.get('id')]
+        print(f"📊 Processing first {len(players)} players", flush=True)
 
-        # Fetch recent games (last 5)
-        recent_stats = fetch_player_recent_stats(pid, per_page=5)
-        if not recent_stats:
-            return fallback_trends_logic(player_name, sport)
+        # 4. Fetch season averages for all players in one batch
+        avg_map = fetch_player_season_averages_batch(player_ids, season=2025)
 
-        # Compute last 5 averages
-        last5 = {'pts': 0, 'reb': 0, 'ast': 0, 'stl': 0, 'blk': 0}
-        for g in recent_stats:
-            last5['pts'] += g.get('pts', 0)
-            last5['reb'] += g.get('reb', 0)
-            last5['ast'] += g.get('ast', 0)
-            last5['stl'] += g.get('stl', 0)
-            last5['blk'] += g.get('blk', 0)
-        n = len(recent_stats) or 1
-        for k in last5:
-            last5[k] /= n
+        # 5. Fetch recent stats for all players in one batch
+        recent_stats_map = fetch_multiple_player_recent_stats(player_ids, last_n=5)
 
-        season_avg = sa.get('pts', 0) + sa.get('reb', 0) + sa.get('ast', 0)
-        last5_avg = last5['pts'] + last5['reb'] + last5['ast']
+        # 6. Build trends
+        trends = []
+        for player in players:
+            pid = player['id']
+            full_name = f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+            team_abbr = player.get('team', {}).get('abbreviation', '')
+            position = player.get('position', '')
 
-        if last5_avg > season_avg * 1.1:
-            trend = 'up'
-            change_percentage = ((last5_avg - season_avg) / season_avg * 100)
-            change_direction = '+'
-        elif last5_avg < season_avg * 0.9:
-            trend = 'down'
-            change_percentage = ((season_avg - last5_avg) / season_avg * 100)
-            change_direction = '-'
-        else:
-            trend = 'stable'
-            change_percentage = 0
-            change_direction = ''
+            sa = avg_map.get(pid)
+            if not sa:
+                print(f"⚠️ No season averages for {full_name}, skipping", flush=True)
+                continue
 
-        # Last 5 games scores (using points as simple metric)
-        last_5_games = [g.get('pts', 0) for g in recent_stats]
+            recent_stats = recent_stats_map.get(pid, [])
+            if len(recent_stats) < 3:
+                print(f"⚠️ Not enough recent games for {full_name}, skipping", flush=True)
+                continue
 
-        analysis = {
-            'up': 'Showing consistent improvement in recent performances.',
-            'down': 'Recent performances below season average.',
-            'stable': 'Performing at expected levels consistently.'
-        }.get(trend, '')
+            # Compute last 5 averages
+            last5 = {'pts': 0, 'reb': 0, 'ast': 0, 'stl': 0, 'blk': 0}
+            for g in recent_stats:
+                last5['pts'] += g.get('pts', 0)
+                last5['reb'] += g.get('reb', 0)
+                last5['ast'] += g.get('ast', 0)
+                last5['stl'] += g.get('stl', 0)
+                last5['blk'] += g.get('blk', 0)
+            n = len(recent_stats)
+            for k in last5:
+                last5[k] /= n
 
-        real_trends = [{
-            'id': f'trend-real-{sport}-{pid}',
-            'player': player_name,
-            'sport': sport,
-            'metric': 'Fantasy Points',
-            'trend': trend,
-            'last_5_games': last_5_games,
-            'average': round(season_avg, 1),
-            'last_5_average': round(last5_avg, 1),
-            'change': f"{change_direction}{abs(change_percentage):.1f}%",
-            'analysis': analysis,
-            'confidence': 75,  # Could compute based on sample size
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'is_real_data': True,
-            'player_id': pid,
-            'team': target_player.get('team', {}).get('abbreviation', ''),
-            'position': target_player.get('position', '')
-        }]
+            # Season averages
+            season = {
+                'pts': sa.get('pts', 0),
+                'reb': sa.get('reb', 0),
+                'ast': sa.get('ast', 0),
+                'stl': sa.get('stl', 0),
+                'blk': sa.get('blk', 0)
+            }
 
+            # Define metrics
+            metrics = [
+                ('pts', 'Points'),
+                ('reb', 'Rebounds'),
+                ('ast', 'Assists'),
+                ('stl', 'Steals'),
+                ('blk', 'Blocks'),
+            ]
+
+            def compute_trend(current, previous):
+                if previous == 0:
+                    return 'stable', '0%'
+                if current > previous * 1.05:
+                    return 'up', f"+{((current - previous) / previous * 100):.1f}%"
+                elif current < previous * 0.95:
+                    return 'down', f"-{((previous - current) / previous * 100):.1f}%"
+                else:
+                    return 'stable', '0%'
+
+            # Generate trend for each metric
+            for key, name in metrics:
+                current = season.get(key, 0)
+                previous = last5.get(key, 0)
+                if current == 0 and previous == 0:
+                    continue
+                trend, change = compute_trend(current, previous)
+                last_5_values = [g.get(key, 0) for g in recent_stats]
+
+                trends.append({
+                    'id': f"trend-{pid}-{key}",
+                    'player': full_name,
+                    'team': team_abbr,
+                    'position': position,
+                    'sport': sport,
+                    'metric': name,
+                    'current': round(current, 1),
+                    'previous': round(previous, 1),
+                    'change': change,
+                    'trend': trend,
+                    'last_5_games': last_5_values,
+                    'is_real_data': True,
+                    'player_id': pid,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                })
+
+            # Composite Fantasy Points
+            comp_season = sum(season.values())
+            comp_last5 = sum(last5.values())
+            trend, change = compute_trend(comp_season, comp_last5)
+            comp_last5_values = [g.get('pts', 0) + g.get('reb', 0) + g.get('ast', 0) +
+                                 g.get('stl', 0) + g.get('blk', 0) for g in recent_stats]
+            trends.append({
+                'id': f"trend-{pid}-fantasy",
+                'player': full_name,
+                'team': team_abbr,
+                'position': position,
+                'sport': sport,
+                'metric': 'Fantasy Points',
+                'current': round(comp_season, 1),
+                'previous': round(comp_last5, 1),
+                'change': change,
+                'trend': trend,
+                'last_5_games': comp_last5_values,
+                'is_real_data': True,
+                'player_id': pid,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+
+        # If no trends generated, fallback to mock
+        if not trends:
+            print("⚠️ No trends generated, falling back to mock", flush=True)
+            return fallback_trends_logic(player_filter, sport)
+
+        print(f"✅ Generated {len(trends)} trend items from real data", flush=True)
         return api_response(
             success=True,
-            data={"trends": real_trends, "is_real_data": True},
+            data={
+                "trends": trends,
+                "is_real_data": True,
+                "count": len(trends)
+            },
             message='Trend data retrieved successfully'
         )
 
     except Exception as e:
-        print(f"❌ Error in trends: {e}")
-        return api_response(success=False, data={"trends": []}, message=str(e))
+        print(f"❌ Error in /api/trends: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return fallback_trends_logic(player_filter, sport)
+
+def fallback_trends_logic(player_name, sport):
+    """
+    Return mock trends for testing when real data unavailable.
+    """
+    mock_players = [
+        {'name': 'LeBron James', 'team': 'LAL', 'pos': 'F'},
+        {'name': 'Stephen Curry', 'team': 'GSW', 'pos': 'G'},
+        {'name': 'Giannis Antetokounmpo', 'team': 'MIL', 'pos': 'F'},
+        {'name': 'Luka Doncic', 'team': 'LAL', 'pos': 'G'},
+        {'name': 'Nikola Jokic', 'team': 'DEN', 'pos': 'C'},
+    ]
+    metrics = [
+        ('Points', 25.3, 27.1, 'up', '+1.8%'),
+        ('Rebounds', 8.2, 9.5, 'up', '+1.3%'),
+        ('Assists', 6.1, 5.8, 'down', '-0.3%'),
+        ('Steals', 1.2, 1.5, 'up', '+0.3%'),
+        ('Blocks', 0.8, 0.6, 'down', '-0.2%'),
+    ]
+    trends = []
+    for pid, p in enumerate(mock_players):
+        if player_name and player_name not in p['name'].lower():
+            continue
+        for m in metrics:
+            trends.append({
+                'id': f"mock-{pid}-{m[0]}",
+                'player': p['name'],
+                'team': p['team'],
+                'position': p['pos'],
+                'sport': sport,
+                'metric': m[0],
+                'current': m[1],
+                'previous': m[2],
+                'change': m[4],
+                'trend': m[3],
+                'last_5_games': [25, 26, 27, 28, 29],
+                'is_real_data': False,
+                'player_id': pid,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+    return api_response(
+        success=True,
+        data={
+            "trends": trends,
+            "is_real_data": False,
+            "count": len(trends)
+        },
+        message='Mock trend data (real data unavailable)'
+    )
 
 @app.route('/api/picks')
 def get_daily_picks():
