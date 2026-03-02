@@ -1,13 +1,11 @@
 # nba_static_data.py
 
 import csv
-import io
-import re
 from typing import List, Dict
 
-# ===== 2026 NBA PLAYER STATS (360 players, merged from two databases) =====
+# ===== 2026 NBA PLAYER STATS (29 columns, 360 players) =====
 NBA_TABLE = """
-Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	to	USG	pV	3V	rV	aV	sV	bV	fg%V	ft%V	toV
+Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	reb	ast	stl	blk	fg%	fga	ft%	fta	to	USG	pV	3V	rV	aV	sV	bV	fg%V	ft%V	toV
 1	1	1.15	Nikola Jokic	DEN	C		43	1472.0	1238	86	538	448	60	33	.577	752	.830	342	158	31.4	2.06	0.32	2.80	3.20	0.86	0.11	2.39	0.60	-1.99
 1	2	0.93	Shai Gilgeous-Alexander	OKC	G	Off Inj	49	1632.5	1558	87	217	314	64	38	.554	964	.892	452	103	33.4	2.58	0.09	-0.60	1.28	0.65	0.12	2.00	2.42	-0.19
 1	3	0.82	Tyrese Maxey	PHI	G		57	2189.6	1657	191	235	388	117	44	.465	1239	.892	352	141	29.8	2.11	1.68	-0.73	1.47	2.46	0.12	-0.71	1.62	-0.62
@@ -31,7 +29,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 2	21	0.27	Anthony Davis	WAS	F	INJ 11g	20	625.6	407	10	221	56	22	33	.506	334	.728	81	41	26.2	0.60	-1.19	2.18	-0.46	0.15	1.80	0.48	-0.96	-0.13
 2	22	0.26	Austin Reaves	LAL	G		32	1075.2	788	79	159	177	34	9	.502	486	.874	253	104	28.7	1.34	0.79	-0.37	0.85	0.06	-0.83	0.35	1.64	-1.51
 2	23	0.25	Chet Holmgren	OKC	C	Off Inj	52	1520.1	894	64	458	90	27	101	.552	596	.789	218	82	21.9	0.05	-0.46	1.24	-0.97	-1.26	2.37	1.12	-0.22	0.41
-2	24	0.25	Kadary Richmond	FA	G		3	66.8	25	2	10	8	8	1	.625	16	1.000	3	2	16.8	-1.48	-1.03	-1.06	-0.52	3.95	-0.73	1.09	0.57	1.45
+2	24	0.25	Kadary Richmond	FA	G		3	66.8	25	2	10	8	8	1	.625	16	1.000	3		16.8	-1.48	-1.03	-1.06	-0.52	3.95	-0.73	1.09	0.57	1.45
 3	25	0.24	Ty Jerome	MEM	G	D	8	167.8	157	21	22	45	10	2	.515	101	.865	37	14	33.6	0.47	0.95	-1.31	0.90	0.51	-0.89	0.53	0.83	0.21
 3	26	0.24	Joel Embiid	PHI	C		33	1029.1	878	42	249	130	21	35	.495	600	.858	282	98	34.1	1.68	-0.42	0.71	0.09	-0.98	0.67	0.23	1.37	-1.19
 3	27	0.23	Derrick White	BOS	G		56	1922.2	960	159	251	317	66	85	.391	854	.893	149	101	22.7	0.04	1.16	-0.58	0.92	0.34	1.55	-2.22	0.69	0.15
@@ -66,7 +64,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 5	56	0.03	Immanuel Quickley	TOR	G		56	1818.2	968	151	239	331	68	5	.449	751	.803	178	89	21.4	0.07	1.02	-0.67	1.04	0.42	-1.20	-0.78	-0.04	0.40
 5	57	0.02	Jaden McDaniels	MIN	F		58	1870.9	876	89	258	166	61	63	.518	639	.845	148	106	18.5	-0.31	-0.15	-0.59	-0.43	0.03	0.72	0.51	0.29	0.12
 5	58	0.02	LaMelo Ball	CHA	G		50	1377.1	969	175	239	367	54	11	.403	843	.898	127	144	31.8	0.43	1.83	-0.45	1.72	0.10	-0.94	-2.13	0.69	-1.08
-5	59	0.02	Alondes Williams	FA	G		4	100.8	44	5	25	12	3	3	.615	26	.875	8	5	20.0	-1.02	-0.44	0.16	-0.36	-0.70	0.07	1.25	0.40	0.79
+5	59	0.02	Alondes Williams	FA	G		4	100.8	44	5	25	12	3	3	.615	26	.875		20.0	-1.02	-0.44	0.16	-0.36	-0.70	0.07	1.25	0.40	0.79
 5	60	0.01	Jaylen Brown	BOS	F		52	1782.4	1513	106	370	253	52	22	.479	1172	.779	366	187	36.5	2.11	0.36	0.53	0.54	-0.10	-0.55	-0.27	-0.58	-1.90
 6	61	0.01	Andrew Wiggins	MIA	F		54	1684.0	872	111	274	150	62	53	.475	692	.780	132	89	20.1	-0.13	0.37	-0.33	-0.47	0.26	0.52	-0.23	-0.21	0.33
 6	62	0.01	Bam Adebayo	MIA	C		52	1627.9	962	86	512	149	52	35	.447	765	.771	249	92	24.0	0.28	-0.03	1.68	-0.42	-0.10	-0.07	-0.89	-0.51	0.19
@@ -148,7 +146,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 12	138	-0.25	Naji Marshall	DAL	F		57	1704.8	887	49	283	176	60	5	.533	614	.760	242	82	21.0	-0.23	-0.83	-0.38	-0.32	0.03	-1.20	0.73	-0.60	0.57
 12	139	-0.25	Dylan Cardwell	SAC	C	INJ 9g	29	615.5	156	0	223	36	22	47	.598	112	.550	40	24	10.4	-1.99	-1.70	0.77	-1.20	-0.68	1.75	0.63	-1.10	1.27
 12	140	-0.25	Ja Morant	MEM	G	INJ 6g	20	568.5	389	20	65	161	20	6	.410	322	.897	117	71	33.5	0.44	-0.69	-1.10	2.06	-0.10	-0.79	-1.88	1.63	-1.85
-12	141	-0.26	Leaky Black	WAS	F		1	30.4	4	0	7	0	0	2	.667	3	.000	0	0	3.9	-2.23	-1.70	0.48	-1.80	-2.52	2.48	0.79	-0.03	2.22
+12	141	-0.26	Leaky Black	WAS	F		1	30.4		.667	3	.000	0	0		3.9	-2.23	-1.70	0.48	-1.80	-2.52	2.48	0.79	-0.03	2.22
 12	142	-0.26	Miles McBride	NYK	G	INJ 23g	35	980.7	451	102	90	97	30	6	.434	362	.814	43	28	17.9	-0.69	1.24	-1.38	-0.47	-0.44	-1.04	-0.85	0.01	1.30
 12	143	-0.26	Moses Moody	GSW	G		57	1450.9	683	141	191	91	53	32	.446	514	.771	109	52	17.6	-0.85	0.79	-1.05	-1.03	-0.27	-0.29	-0.58	-0.22	1.17
 12	144	-0.26	Derrick Jones	LAC	F		26	681.8	278	32	71	34	22	29	.526	196	.755	53	21	16.1	-1.07	-0.46	-1.31	-1.17	-0.47	0.78	0.42	-0.34	1.29
@@ -163,7 +161,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 13	153	-0.28	Shaedon Sharpe	POR	G	INJ 22g	48	1439.1	1025	101	212	126	68	6	.456	847	.784	194	144	30.3	0.77	0.42	-0.61	-0.54	0.92	-1.13	-0.83	-0.28	-1.22
 13	154	-0.28	Bobby Portis	MIL	F		55	1329.9	725	105	360	87	31	9	.488	601	.723	47	55	22.2	-0.64	0.22	0.29	-1.04	-1.16	-1.05	0.00	-0.24	1.07
 13	155	-0.29	Isaiah Stewart	DET	C	SUSP 2g	48	1115.9	479	34	247	55	13	82	.540	339	.760	104	56	16.4	-1.19	-0.98	-0.30	-1.25	-1.87	1.92	0.55	-0.32	0.88
-13	156	-0.29	Matisse Thybulle	POR	G		8	94.9	43	9	13	5	15	2	.500	26	1.000	8	5	14.8	-1.99	-0.56	-1.78	-1.50	2.03	-0.89	0.04	0.57	1.50
+13	156	-0.29	Matisse Thybulle	POR	G		8	94.9	43	9	13	5	15	2	.500	26	1.000		14.8	-1.99	-0.56	-1.78	-1.50	2.03	-0.89	0.04	0.57	1.50
 14	157	-0.29	Bilal Coulibaly	WAS	F		38	992.4	382	34	166	97	55	38	.406	318	.756	119	55	17.1	-1.18	-0.80	-0.63	-0.57	0.99	0.55	-1.05	-0.49	0.56
 14	158	-0.29	Max Christie	DAL	G		53	1570.5	700	128	181	118	28	18	.465	518	.874	103	60	17.7	-0.64	0.73	-1.03	-0.73	-1.24	-0.71	-0.33	0.38	0.92
 14	159	-0.30	Cedric Coward	MEM	F	INJ 4g	48	1263.5	639	71	299	140	27	19	.468	498	.843	121	84	21.5	-0.62	-0.21	0.16	-0.40	-1.16	-0.61	-0.31	0.27	0.21
@@ -173,10 +171,10 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 14	163	-0.30	Herb Jones	NOR	F		37	1069.4	328	49	127	102	62	18	.386	311	.813	48	49	14.7	-1.39	-0.36	-1.02	-0.48	1.54	-0.43	-1.30	0.00	0.70
 14	164	-0.30	Jordan Goodwin	PHO	G	INJ 3g	54	1206.5	482	85	256	121	80	11	.408	449	.721	43	53	18.2	-1.38	-0.11	-0.47	-0.72	1.07	-0.98	-1.02	-0.23	1.09
 14	165	-0.31	Goga Bitadze	ORL	C		43	680.6	250	2	215	49	30	50	.691	152	.731	52	23	12.0	-1.91	-1.65	-0.36	-1.25	-0.83	0.87	1.07	-0.30	1.61
-14	166	-0.32	Yuki Kawamura	CHI	G		4	76.2	20	4	16	22	5	0	.294	17	1.000	6	4	13.0	-2.06	-0.69	-0.78	0.84	0.51	-1.37	-1.27	0.87	1.07
+14	166	-0.32	Yuki Kawamura	CHI	G		4	76.2	20	4	16	22	5	0	.294	17	1.000	6		13.0	-2.06	-0.69	-0.78	0.84	0.51	-1.37	-1.27	0.87	1.07
 14	167	-0.32	De'Anthony Melton	GSW	G	Q	31	687.6	393	46	89	72	50	11	.425	327	.812	85	53	25.4	-0.73	-0.20	-1.26	-0.68	1.39	-0.69	-1.00	0.03	0.26
 14	168	-0.32	Tim Hardaway Jr.	DEN	G		58	1572.0	806	161	151	78	31	8	.454	577	.840	144	29	18.5	-0.52	1.10	-1.37	-1.15	-1.23	-1.10	-0.51	0.24	1.65
-15	169	-0.33	MarJon Beauchamp	PHI	F		2	36.2	18	3	7	5	3	1	.429	14	.750	4	3	22.2	-1.36	-0.19	-0.99	-0.60	1.12	-0.41	-0.64	-0.36	0.50
+15	169	-0.33	MarJon Beauchamp	PHI	F		2	36.2	18	3	7	5	3	1	.429	14	.750		22.2	-1.36	-0.19	-0.99	-0.60	1.12	-0.41	-0.64	-0.36	0.50
 15	170	-0.33	R.J. Barrett	TOR	F		35	1032.5	628	60	189	124	29	10	.468	481	.707	167	59	25.2	0.18	0.03	-0.19	-0.10	-0.51	-0.82	-0.40	-1.45	0.29
 15	171	-0.33	Davion Mitchell	MIA	G		49	1407.6	434	59	126	342	54	9	.472	360	.648	54	81	13.3	-1.39	-0.49	-1.38	1.55	0.15	-1.01	-0.18	-0.55	0.32
 15	172	-0.33	Stephon Castle	SAS	G		49	1455.9	811	51	240	336	65	17	.466	594	.725	284	161	25.4	-0.06	-0.65	-0.40	1.49	0.70	-0.70	-0.39	-1.42	-1.55
@@ -188,7 +186,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 15	178	-0.35	Jakob Poeltl	TOR	C		25	621.3	236	0	183	50	19	14	.673	150	.630	54	36	14.3	-1.29	-1.70	0.61	-0.84	-0.68	-0.29	1.67	-1.18	0.57
 15	179	-0.35	Kris Dunn	LAC	G		58	1613.5	459	58	180	208	85	8	.483	356	.781	73	82	13.3	-1.55	-0.69	-1.16	-0.08	1.03	-1.10	-0.06	-0.12	0.60
 15	180	-0.35	Jaime Jaquez Jr.	MIA	F		55	1574.4	827	29	293	252	47	15	.503	666	.753	170	122	22.2	-0.32	-1.17	-0.22	0.40	-0.45	-0.84	0.29	-0.51	-0.32
-16	181	-0.35	Seth Curry	GSW	G	INJ 2g	2	32.1	14	2	4	3	2	0	.667	9	.000	0	0	11.8	-1.71	-0.69	-1.62	-1.08	-0.10	-1.37	1.20	-0.03	2.22
+16	181	-0.35	Seth Curry	GSW	G	INJ 2g	2	32.1	14	2	4	3	2	0	.667	9	.000	0		11.8	-1.71	-0.69	-1.62	-1.08	-0.10	-1.37	1.20	-0.03	2.22
 16	182	-0.36	T.J. McConnell	IND	G		43	726.6	408	13	94	204	47	8	.534	354	.850	20	54	24.1	-1.28	-1.39	-1.54	0.48	0.13	-1.01	0.57	0.04	0.78
 16	183	-0.36	Collin Murray-Boyles	TOR	F	Q	47	1046.3	366	17	233	93	44	41	.557	271	.653	72	51	14.3	-1.57	-1.33	-0.38	-0.85	-0.25	0.31	0.59	-0.73	0.97
 16	184	-0.36	Jock Landale	ATL	C		54	1241.9	606	63	337	89	30	29	.515	458	.664	107	52	18.5	-0.98	-0.52	0.16	-1.01	-1.17	-0.34	0.35	-0.88	1.11
@@ -229,7 +227,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 19	219	-0.45	Luguentz Dort	OKC	F		49	1373.1	430	94	184	66	44	22	.389	391	.762	42	39	14.0	-1.40	0.23	-0.88	-1.15	-0.34	-0.50	-1.20	-0.14	1.31
 19	220	-0.45	Tre Johnson	WAS	G		45	1099.5	573	89	123	95	28	14	.440	475	.892	74	65	20.8	-0.72	0.29	-1.31	-0.79	-1.01	-0.77	-0.76	0.41	0.56
 19	221	-0.46	Jaylin Williams	OKC	C		45	878.9	308	59	227	113	26	30	.399	243	.786	70	48	15.8	-1.74	-0.38	-0.34	-0.59	-1.12	-0.09	-0.74	-0.12	1.00
-19	222	-0.46	Isaiah Stevens	SAC	G		3	42.8	10	0	3	10	5	0	.429	7	1.000	4	2	10.5	-2.34	-1.70	-2.04	-0.20	1.52	-1.37	-0.23	0.77	1.45
+19	222	-0.46	Isaiah Stevens	SAC	G		3	42.8	10	0	3	10	5	0	.429	7	1.000	4		10.5	-2.34	-1.70	-2.04	-0.20	1.52	-1.37	-0.23	0.77	1.45
 19	223	-0.46	Dennis Schroder	CLE	G	Q	49	1253.2	600	65	142	249	45	8	.404	498	.826	161	93	21.4	-0.80	-0.36	-1.24	0.64	-0.29	-1.05	-1.30	0.19	0.04
 19	224	-0.47	Will Richard	GSW	G		53	1038.4	372	60	135	78	64	6	.477	283	.840	50	42	13.9	-1.71	-0.56	-1.39	-1.09	0.41	-1.15	-0.10	0.07	1.31
 19	225	-0.47	Pelle Larsson	MIA	G		49	1213.3	502	44	167	165	35	12	.499	361	.766	128	59	15.9	-1.15	-0.79	-1.03	-0.18	-0.79	-0.90	0.11	-0.34	0.84
@@ -238,7 +236,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 19	228	-0.47	Malik Monk	SAC	G		48	1058.7	591	97	93	125	31	18	.433	490	.864	81	69	23.4	-0.79	0.34	-1.65	-0.55	-0.96	-0.65	-0.85	0.28	0.57
 20	229	-0.47	Isaiah Collier	UTA	G		51	1307.4	551	24	129	371	55	16	.500	408	.700	170	128	18.7	-1.05	-1.22	-1.40	1.69	0.09	-0.76	0.14	-1.09	-0.66
 20	230	-0.48	Javonte Green	DET	F		57	1045.8	388	59	157	40	73	18	.441	290	.802	91	37	14.5	-1.74	-0.66	-1.30	-1.46	0.59	-0.76	-0.37	-0.04	1.47
-20	231	-0.48	Lawson Lovering	FA	C	D	2	49.3	14	0	15	3	3	1	.600	10	.400	5	2	16.8	-1.71	-1.70	0.69	-1.08	1.12	-0.41	0.83	-3.11	1.07
+20	231	-0.48	Lawson Lovering	FA	C	D	2	49.3	14	0	15	3	3	1	.600	10	.400	5		16.8	-1.71	-1.70	0.69	-1.08	1.12	-0.41	0.83	-3.11	1.07
 20	232	-0.48	Christian Braun	DEN	G		23	699.7	231	16	104	66	15	7	.494	178	.765	51	28	14.2	-1.18	-1.00	-0.56	-0.42	-0.94	-0.78	0.07	-0.30	0.82
 20	233	-0.48	John Konchar	UTA	G		37	593.7	120	14	121	55	48	20	.471	102	.625	16	20	8.7	-2.36	-1.32	-1.09	-1.09	0.63	-0.33	-0.10	-0.26	1.60
 20	234	-0.48	Khris Middleton	DAL	F	D	40	975.2	438	41	163	128	30	9	.444	358	.859	92	68	21.4	-1.03	-0.67	-0.75	-0.26	-0.70	-0.94	-0.60	0.35	0.27
@@ -254,7 +252,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 21	244	-0.50	De'Andre Hunter	SAC	F	X	45	1175.5	614	75	185	90	31	6	.415	501	.866	142	75	22.6	-0.56	-0.02	-0.73	-0.84	-0.85	-1.11	-1.22	0.57	0.31
 21	245	-0.50	Isaac Okoro	CHI	F		51	1357.3	470	59	143	78	34	24	.459	370	.807	88	35	13.6	-1.33	-0.53	-1.28	-1.07	-0.91	-0.46	-0.32	-0.01	1.43
 21	246	-0.51	Zach Collins	CHI	C	X	10	183.7	97	9	56	15	2	4	.578	64	.700	20	10	18.8	-1.24	-0.79	-0.11	-1.08	-2.04	-0.60	0.86	-0.66	1.07
-21	247	-0.51	Obi Toppin	IND	F		4	90.6	45	3	22	6	4	0	.400	40	.909	11	6	23.7	-0.97	-0.94	-0.15	-1.08	-0.10	-1.37	-1.33	0.85	0.50
+21	247	-0.51	Obi Toppin	IND	F		4	90.6	45	3	22	6	4	0	.400	40	.909	11		23.7	-0.97	-0.94	-0.15	-1.08	-0.10	-1.37	-1.33	0.85	0.50
 21	248	-0.51	Craig Porter Jr.	CLE	G		52	917.2	238	27	173	166	50	30	.455	211	.559	34	45	11.9	-2.13	-1.18	-1.06	-0.27	-0.19	-0.26	-0.22	-0.52	1.23
 21	249	-0.51	Jordan Walsh	BOS	F		52	923.7	285	34	218	41	41	24	.522	207	.761	46	29	11.8	-1.97	-1.04	-0.70	-1.42	-0.61	-0.48	0.19	-0.14	1.58
 21	250	-0.51	Kris Murray	POR	F		38	962.4	240	22	149	47	43	17	.458	203	.711	45	32	10.7	-1.83	-1.11	-0.81	-1.21	0.22	-0.51	-0.26	-0.36	1.25
@@ -277,7 +275,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 23	267	-0.55	Jaxson Hayes	LAL	C		48	833.6	324	2	187	44	19	30	.767	176	.650	80	24	12.4	-1.75	-1.66	-0.83	-1.36	-1.56	-0.17	1.53	-0.81	1.65
 23	268	-0.55	Jamal Shead	TOR	G		59	1309.7	416	67	116	314	59	9	.372	379	.770	87	81	16.1	-1.70	-0.55	-1.64	0.75	-0.10	-1.07	-1.14	-0.18	0.64
 23	269	-0.55	Luka Garza	BOS	C		49	762.6	355	34	194	47	19	21	.576	224	.759	83	26	16.1	-1.67	-1.00	-0.80	-1.34	-1.58	-0.54	0.59	-0.26	1.61
-23	270	-0.56	DeAndre Jordan	NOR	C		5	90.2	25	0	40	2	1	6	.769	13	.556	9	6	10.6	-2.06	-1.70	0.90	-1.61	-2.04	0.94	1.08	-1.39	0.84
+23	270	-0.56	DeAndre Jordan	NOR	C		5	90.2	25	0	40	2	1	6	.769	13	.556	9		10.6	-2.06	-1.70	0.90	-1.61	-2.04	0.94	1.08	-1.39	0.84
 23	271	-0.56	Klay Thompson	DAL	F		53	1168.7	612	153	126	73	27	16	.387	558	.730	37	51	23.9	-0.92	1.21	-1.46	-1.14	-1.29	-0.79	-1.60	-0.19	1.12
 23	272	-0.56	Kentavious Caldwell-Pope	MEM	G	X	51	1087.6	428	55	125	139	43	8	.410	366	.913	80	61	18.2	-1.47	-0.61	-1.43	-0.49	-0.48	-1.07	-0.86	0.49	0.85
 23	273	-0.56	Gui Santos	GSW	F		48	769.6	318	46	155	82	36	18	.531	224	.680	50	51	16.1	-1.77	-0.73	-1.11	-0.98	-0.70	-0.65	0.29	-0.42	1.00
@@ -295,9 +293,9 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 24	285	-0.59	Nae'Qwan Tomlin	CLE	F		48	784.5	296	20	144	42	34	28	.474	249	.755	53	19	15.0	-1.85	-1.28	-1.20	-1.38	-0.80	-0.25	-0.12	-0.19	1.77
 24	286	-0.59	Caris LeVert	DET	G		40	782.6	308	44	68	109	35	28	.432	257	.689	61	55	18.0	-1.59	-0.59	-1.75	-0.49	-0.40	-0.02	-0.56	-0.57	0.64
 24	287	-0.59	Buddy Hield	ATL	G		45	773.0	354	67	108	66	37	9	.432	301	.794	34	43	19.2	-1.56	-0.20	-1.45	-1.10	-0.53	-0.98	-0.58	-0.05	1.12
-24	288	-0.59	Skal Labissiere	FA	F		3	37.6	13	1	9	3	2	1	.600	10	.000	0	1	17.1	-2.17	-1.36	-1.20	-1.32	-0.91	-0.73	0.55	-0.03	1.84
+24	288	-0.59	Skal Labissiere	FA	F		3	37.6	13	1	9	3	2	1	.600	10	.000	0		17.1	-2.17	-1.36	-1.20	-1.32	-0.91	-0.73	0.55	-0.03	1.84
 25	289	-0.59	Vince Williams Jr.	UTA	G	X	40	819.4	300	55	155	167	29	16	.353	292	.780	50	70	18.7	-1.62	-0.31	-0.83	0.20	-0.76	-0.60	-1.50	-0.12	0.21
-25	290	-0.59	Taurean Prince	MIL	F	X	8	168.8	49	12	13	8	6	2	.447	38	1.000	3	5	11.5	-1.86	-0.19	-1.78	-1.32	-0.70	-0.89	-0.31	0.20	1.50
+25	290	-0.59	Taurean Prince	MIL	F	X	8	168.8	49	12	13	8	6	2	.447	38	1.000	3		11.5	-1.86	-0.19	-1.78	-1.32	-0.70	-0.89	-0.31	0.20	1.50
 25	291	-0.60	Bub Carrington	WAS	G		58	1611.3	568	115	214	266	38	13	.393	507	.733	75	137	16.8	-1.23	0.30	-0.91	0.40	-0.93	-0.94	-1.27	-0.31	-0.49
 25	292	-0.60	Ryan Dunn	PHO	F		53	1060.3	316	44	223	80	44	23	.433	291	.556	36	47	14.1	-1.89	-0.86	-0.69	-1.07	-0.51	-0.53	-0.47	-0.54	1.20
 25	293	-0.60	Jordan Miller	LAC	F		37	737.5	336	25	112	64	25	6	.516	225	.798	99	43	19.3	-1.35	-1.02	-1.19	-0.97	-0.88	-1.06	0.24	-0.08	0.89
@@ -306,11 +304,11 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 25	296	-0.61	Simone Fontecchio	MIA	F		56	945.8	468	96	177	83	30	9	.392	385	.833	84	42	19.8	-1.47	0.03	-1.13	-1.09	-1.22	-1.06	-1.01	0.10	1.36
 25	297	-0.61	Quenton Jackson	IND	G		30	518.2	276	30	65	64	19	5	.489	186	.810	79	36	20.8	-1.33	-0.69	-1.55	-0.78	-0.99	-1.05	0.00	0.02	0.84
 25	298	-0.62	Jamir Watkins	WAS	G		30	558.7	172	21	106	26	25	15	.430	149	.676	34	17	12.9	-1.93	-0.99	-0.98	-1.38	-0.50	-0.41	-0.45	-0.47	1.57
-25	299	-0.62	TyTy Washington	LAC	G		5	39.7	17	3	2	9	4	2	.583	12	.000	0	1	15.1	-2.33	-1.09	-2.29	-0.94	-0.58	-0.60	0.32	-0.03	1.99
+25	299	-0.62	TyTy Washington	LAC	G		5	39.7	17	3	2	9	4	2	.583	12	.000	0		15.1	-2.33	-1.09	-2.29	-0.94	-0.58	-0.60	0.32	-0.03	1.99
 25	300	-0.62	Gary Payton II	GSW	G		54	731.3	315	29	170	86	37	17	.539	258	.571	14	50	17.9	-1.91	-1.16	-1.14	-1.04	-0.86	-0.76	0.35	-0.21	1.16
 26	301	-0.62	Mouhamed Gueye	ATL	F		58	931.4	270	28	215	55	50	30	.443	235	.618	55	29	12.7	-2.11	-1.21	-0.90	-1.34	-0.43	-0.37	-0.30	-0.57	1.65
 26	302	-0.62	Jamaree Bouyea	PHO	G		33	512.1	213	19	64	61	25	14	.480	179	.710	31	21	17.6	-1.80	-1.12	-1.65	-0.91	-0.68	-0.55	-0.08	-0.30	1.49
-26	303	-0.63	Daeqwon Plowden	SAC	F		12	263.9	93	14	37	13	5	3	.425	80	.917	12	6	14.4	-1.58	-0.52	-1.17	-1.28	-1.51	-0.89	-0.64	0.31	1.65
+26	303	-0.63	Daeqwon Plowden	SAC	F		12	263.9	93	14	37	13	5	3	.425	80	.917	12		14.4	-1.58	-0.52	-1.17	-1.28	-1.51	-0.89	-0.64	0.31	1.65
 26	304	-0.63	Ben Sheppard	IND	G		49	1067.0	343	63	156	90	28	4	.420	293	.773	44	29	13.4	-1.71	-0.40	-1.12	-0.92	-1.14	-1.21	-0.63	-0.11	1.54
 26	305	-0.64	Bryce McGowens	NOR	G		36	742.1	290	33	73	52	23	6	.485	202	.744	82	15	14.1	-1.53	-0.77	-1.61	-1.11	-0.97	-1.05	-0.04	-0.45	1.74
 26	306	-0.64	Bones Hyland	MIN	G		51	751.9	354	66	89	133	29	11	.454	282	.711	45	42	19.6	-1.72	-0.39	-1.73	-0.55	-1.14	-0.95	-0.30	-0.28	1.27
@@ -325,7 +323,7 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 27	315	-0.66	Clint Capela	HOU	C		52	615.8	185	0	231	30	25	43	.513	154	.614	44	22	13.3	-2.30	-1.70	-0.60	-1.52	-1.36	0.22	0.09	-0.52	1.73
 27	316	-0.66	Sion James	CHA	G		60	1423.6	324	57	210	121	34	18	.369	268	.841	82	53	10.5	-1.99	-0.74	-0.99	-0.83	-1.15	-0.79	-0.82	0.13	1.21
 27	317	-0.67	Walter Clayton	MEM	G		50	929.3	347	49	100	169	29	12	.392	301	.925	67	67	18.3	-1.72	-0.71	-1.62	-0.18	-1.12	-0.91	-0.89	0.47	0.68
-27	318	-0.67	Blake Hinson	UTA	F		3	58.8	26	6	5	2	0	1	.556	18	.000	1	1	13.2	-1.42	0.32	-1.76	-1.48	-2.52	-0.73	0.60	-0.84	1.84
+27	318	-0.67	Blake Hinson	UTA	F		3	58.8	26	6	5	2	0	1	.556	18	.000	1		13.2	-1.42	0.32	-1.76	-1.48	-2.52	-0.73	0.60	-0.84	1.84
 27	319	-0.67	Daniss Jenkins	DET	G		48	816.1	377	44	91	144	40	7	.418	325	.792	77	62	21.4	-1.56	-0.77	-1.67	-0.36	-0.50	-1.09	-0.72	-0.09	0.74
 27	320	-0.68	Josh Green	CHA	G		36	594.3	179	40	72	35	23	4	.480	125	.905	21	22	11.1	-2.06	-0.58	-1.62	-1.33	-0.97	-1.15	-0.06	0.15	1.52
 27	321	-0.68	Tristan Vukcevic	WAS	C		37	470.3	291	24	103	42	16	25	.468	218	.788	80	43	25.1	-1.56	-1.04	-1.29	-1.25	-1.47	-0.07	-0.19	-0.14	0.89
@@ -335,34 +333,34 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 28	325	-0.70	Nique Clifford	SAC	F		57	1263.3	395	50	186	104	49	18	.396	379	.726	62	75	15.8	-1.72	-0.81	-1.09	-0.92	-0.44	-0.76	-0.94	-0.29	0.71
 28	326	-0.70	Pat Spencer	GSW	G		43	709.9	271	35	96	148	30	3	.423	248	.765	34	52	18.5	-1.83	-0.88	-1.52	-0.15	-0.83	-1.23	-0.58	-0.12	0.83
 28	327	-0.70	Patrick Williams	CHI	F	INJ 2g	55	1074.5	386	75	161	78	35	16	.390	354	.700	50	52	16.6	-1.71	-0.32	-1.23	-1.12	-0.98	-0.81	-0.97	-0.32	1.14
-28	328	-0.70	Kevon Looney	NOR	C		18	250.6	52	1	96	25	6	9	.442	52	.625	8	8	10.5	-2.42	-1.64	-0.22	-1.13	-1.71	-0.41	-0.22	-0.27	1.71
+28	328	-0.70	Kevon Looney	NOR	C		18	250.6	52	1	96	25	6	9	.442	52	.625	8		10.5	-2.42	-1.64	-0.22	-1.13	-1.71	-0.41	-0.22	-0.27	1.71
 28	329	-0.70	Thomas Bryant	CLE	C		42	442.5	222	28	119	26	10	18	.503	157	.857	42	17	17.6	-2.01	-1.03	-1.27	-1.50	-1.95	-0.54	0.07	0.13	1.75
 28	330	-0.71	Sidy Cissoko	POR	F		54	1178.6	332	55	136	83	45	19	.404	277	.697	76	58	12.7	-1.86	-0.67	-1.40	-1.06	-0.50	-0.69	-0.66	-0.49	0.99
 28	331	-0.71	Jared McCain	OKC	G		45	772.5	338	60	101	69	27	2	.400	300	.884	43	39	19.9	-1.62	-0.36	-1.52	-1.06	-1.07	-1.28	-0.90	0.20	1.23
 28	332	-0.71	Mike Conley	MIN	G		46	831.1	195	42	80	130	26	12	.316	177	.891	46	27	11.5	-2.19	-0.78	-1.73	-0.44	-1.15	-0.87	-1.02	0.24	1.55
 28	333	-0.71	Marcus Sasser	DET	G		18	169.8	95	19	15	34	11	2	.471	70	.909	11	13	21.5	-2.01	-0.63	-2.11	-0.89	-1.04	-1.15	-0.12	0.17	1.39
-28	334	-0.71	Eric Gordon	FA	G		6	73.8	33	8	2	3	4	1	.571	21	.500	2	3	19.6	-1.97	-0.36	-2.32	-1.56	-0.91	-1.05	0.42	-0.34	1.65
+28	334	-0.71	Eric Gordon	FA	G		6	73.8	33	8	2	3	4	1	.571	21	.500	2		19.6	-1.97	-0.36	-2.32	-1.56	-0.91	-1.05	0.42	-0.34	1.65
 28	335	-0.72	Baylor Scheierman	BOS	F		53	814.7	219	49	159	55	30	4	.436	181	.857	14	26	11.2	-2.21	-0.77	-1.20	-1.30	-1.15	-1.22	-0.29	0.01	1.66
 28	336	-0.72	Pete Nance	MIL	F		25	273.7	125	25	52	16	7	5	.588	85	.000	0	11	15.4	-2.06	-0.69	-1.59	-1.49	-1.84	-0.98	0.50	-0.03	1.71
-29	337	-0.72	Myron Gardner	MIA	F		29	269.6	117	19	84	30	14	5	.477	88	.737	19	7	15.5	-2.22	-1.04	-1.25	-1.30	-1.35	-1.04	-0.07	-0.16	1.94
+29	337	-0.72	Myron Gardner	MIA	F		29	269.6	117	19	84	30	14	5	.477	88	.737	19		15.5	-2.22	-1.04	-1.25	-1.30	-1.35	-1.04	-0.07	-0.16	1.94
 29	338	-0.72	Jahmai Mashack	MEM	G	Off Inj	15	217.7	62	9	25	16	20	4	.388	67	.250	4	14	16.3	-2.20	-1.09	-1.76	-1.29	0.71	-0.85	-0.69	-0.48	1.15
 29	339	-0.73	Gary Trent	MIL	G		49	1116.4	393	93	52	69	27	3	.382	351	.780	41	26	15.4	-1.53	0.21	-2.02	-1.12	-1.19	-1.25	-1.16	-0.09	1.61
 29	340	-0.73	Tyrese Martin	PHI	G		39	702.2	272	51	106	70	22	4	.395	256	.731	26	33	18.2	-1.71	-0.38	-1.32	-0.94	-1.15	-1.17	-0.94	-0.18	1.25
-29	341	-0.73	Mac McClung	CHI	G		4	47.4	23	2	5	2	5	2	.360	25	.750	4	3	26.3	-1.93	-1.19	-1.94	-1.56	0.51	-0.41	-1.22	-0.19	1.36
+29	341	-0.73	Mac McClung	CHI	G		4	47.4	23	2	5	2	5	2	.360	25	.750	4		26.3	-1.93	-1.19	-1.94	-1.56	0.51	-0.41	-1.22	-0.19	1.36
 29	342	-0.73	Gradey Dick	TOR	G		58	915.8	364	48	129	38	39	6	.414	304	.877	73	35	17.1	-1.83	-0.86	-1.53	-1.48	-0.89	-1.17	-0.60	0.25	1.53
 29	343	-0.73	Jalen Pickett	DEN	G	Q	39	688.4	212	40	102	99	13	4	.415	195	.909	11	29	14.5	-1.98	-0.67	-1.36	-0.58	-1.71	-1.17	-0.56	0.06	1.37
 29	344	-0.74	Jalen Green	PHO	G		12	241.7	155	22	35	26	13	0	.360	164	.714	21	20	33.9	-0.69	0.15	-1.24	-0.76	0.11	-1.37	-2.64	-0.51	0.31
 29	345	-0.74	Bogdan Bogdanovic	LAC	G		18	389.2	138	25	53	48	10	1	.367	128	.826	23	24	19.1	-1.59	-0.30	-1.22	-0.52	-1.17	-1.26	-1.31	0.06	0.69
 29	346	-0.74	Julian Strawther	DEN	G	P	36	539.9	257	31	77	40	18	4	.465	198	.792	53	24	19.8	-1.69	-0.83	-1.56	-1.27	-1.31	-1.15	-0.21	-0.08	1.45
 29	347	-0.74	Trendon Watford	PHI	F		36	574.9	217	10	122	92	9	12	.512	170	.733	45	37	16.8	-1.88	-1.42	-1.04	-0.57	-1.92	-0.73	0.15	-0.30	1.04
-29	348	-0.75	Cam Payne	PHI	G		5	67.0	16	4	5	10	7	0	.240	25	.000	0	2	17.2	-2.37	-0.89	-2.04	-0.84	0.87	-1.37	-1.89	-0.03	1.76
+29	348	-0.75	Cam Payne	PHI	G		5	67.0	16	4	5	10	7	0	.240	25	.000	0		17.2	-2.37	-0.89	-2.04	-0.84	0.87	-1.37	-1.89	-0.03	1.76
 30	349	-0.76	Justin Edwards	PHI	F		44	608.1	203	38	63	45	30	8	.404	178	.913	23	24	14.9	-2.12	-0.83	-1.86	-1.31	-0.87	-1.02	-0.53	0.15	1.59
 30	350	-0.76	Will Riley	WAS	F		50	857.8	374	40	122	76	30	6	.426	317	.780	82	46	18.6	-1.63	-0.89	-1.44	-1.07	-1.07	-1.14	-0.61	-0.15	1.16
 30	351	-0.76	Kobe Sanders	LAC	G		48	1017.3	333	48	121	82	27	6	.440	277	.804	51	63	16.3	-1.72	-0.69	-1.40	-0.98	-1.16	-1.13	-0.43	-0.03	0.71
 30	352	-0.76	Cam Thomas	MIL	G		31	718.1	479	46	59	85	4	2	.419	387	.845	129	59	30.6	-0.25	-0.20	-1.66	-0.48	-2.21	-1.24	-1.30	0.49	0.04
-30	353	-0.76	Tolu Smith	DET	F		7	88.4	33	0	33	6	2	5	.476	21	.722	18	5	16.0	-2.10	-1.70	-0.48	-1.39	-1.83	0.01	-0.08	-0.67	1.40
+30	353	-0.76	Tolu Smith	DET	F		7	88.4	33	0	33	6	2	5	.476	21	.722	18	16	16.0	-2.10	-1.70	-0.48	-1.39	-1.83	0.01	-0.08	-0.67	1.40
 30	354	-0.76	Taylor Hendricks	MEM	F		41	681.0	238	33	137	36	23	11	.442	197	.633	49	30	15.6	-1.92	-0.89	-1.06	-1.38	-1.16	-0.85	-0.35	-0.65	1.38
-30	355	-0.76	Keshon Gilbert	FA	F		3	48.3	6	0	5	3	2	4	.250	4	1.000	4	6	14.2	-2.57	-1.70	-1.76	-1.32	-0.91	1.20	-0.51	0.77	-0.07
+30	355	-0.76	Keshon Gilbert	FA	F		3	48.3		.250	4	1.000	4	6		14.2	-2.57	-1.70	-1.76	-1.32	-0.91	1.20	-0.51	0.77	-0.07
 30	356	-0.76	Jericho Sims	MIL	C		43	713.8	170	0	200	42	8	12	.828	93	.640	25	45	9.1	-2.24	-1.70	-0.51	-1.33	-2.07	-0.83	1.09	-0.32	1.02
 30	357	-0.77	Cody Williams	UTA	F		45	902.9	261	16	109	42	28	20	.466	238	.590	39	30	12.6	-1.92	-1.34	-1.44	-1.35	-1.01	-0.51	-0.19	-0.59	1.45
 30	358	-0.77	Johnny Furphy	IND	G	X	35	643.1	180	23	153	41	20	7	.470	149	.486	35	29	12.7	-2.03	-1.04	-0.63	-1.24	-1.14	-0.98	-0.13	-1.00	1.27
@@ -372,29 +370,14 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	3	reb	ast	stl	blk	fg%	fga	ft%	fta	t
 
 def parse_nba_player_table(table_str: str) -> List[Dict]:
     """Parse the tab-separated NBA player table using csv.reader."""
-    # Remove leading/trailing whitespace and split into lines
     lines = table_str.strip().split('\n')
     
-    # Find the header line (contains 'Name' and 'Team')
-    header_idx = None
-    for i, line in enumerate(lines):
-        if 'Name' in line and 'Team' in line:
-            header_idx = i
-            break
-    if header_idx is None:
-        print("❌ Could not find header line in NBA_TABLE")
-        return []
-    
-    # Use csv.reader with tab delimiter
-    header_line = lines[header_idx].strip()
-    data_lines = lines[header_idx+1:]
-    
-    # Create a CSV reader that treats tabs as delimiters
-    header_reader = csv.reader([header_line], delimiter='\t')
-    headers = next(header_reader)
-    headers = [h.strip() for h in headers]  # clean up spaces
-    
-    # Map headers to internal keys
+    # Hardcoded 29 headers
+    headers = [
+        'Round', 'Rank', 'Value', 'Name', 'Team', 'Pos', 'Inj', 'g', 'min', 'pts',
+        'reb', 'ast', 'stl', 'blk', 'fg%', 'fga', 'ft%', 'fta', 'to', 'USG',
+        'pV', '3V', 'rV', 'aV', 'sV', 'bV', 'fg%V', 'ft%V', 'toV'
+    ]
     header_map = {
         'Name': 'name',
         'Team': 'team',
@@ -403,7 +386,6 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         'g': 'games',
         'min': 'minutes',
         'pts': 'points',
-        '3': 'threes',
         'reb': 'rebounds',
         'ast': 'assists',
         'stl': 'steals',
@@ -414,7 +396,6 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         'fta': 'fta',
         'to': 'turnovers',
         'USG': 'usage',
-        # These extra columns exist but we may not need them:
         'pV': 'pV',
         '3V': '3V',
         'rV': 'rV',
@@ -425,43 +406,44 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         'ft%V': 'ft%V',
         'toV': 'toV'
     }
-    
+
     players = []
-    for line in data_lines:
-        if not line.strip():
+    for line in lines:
+        line = line.strip()
+        if not line:
             continue
-        # Use csv.reader for this line
+        # Only process lines that start with a digit (player data)
+        if not line[0].isdigit():
+            continue
+        
+        # Use csv.reader to handle tabs correctly
         reader = csv.reader([line], delimiter='\t')
         try:
-            parts = next(reader)
+            fields = next(reader)
         except StopIteration:
             continue
-        if len(parts) != len(headers):
-            # Fallback: try splitting by multiple spaces
-            parts = re.split(r'\s{2,}', line.strip())
-            if len(parts) != len(headers):
-                print(f"⚠️ Skipping line – unexpected column count: {len(parts)} vs {len(headers)}")
-                continue
+        
+        # Expect exactly 29 fields
+        if len(fields) != len(headers):
+            print(f"⚠️ Skipping line – unexpected column count: {len(fields)} vs {len(headers)}")
+            continue
         
         player = {}
         for i, header in enumerate(headers):
             key = header_map.get(header, header.lower())
-            raw_val = parts[i].strip() if i < len(parts) else ''
-            # Remove any trailing $ if present
+            raw_val = fields[i].strip()
             if raw_val.endswith('$'):
                 raw_val = raw_val[:-1]
             
             # Convert numeric fields
-            if key in ['games', 'points', 'threes', 'rebounds', 'assists', 'steals', 'blocks',
+            if key in ['games', 'points', 'rebounds', 'assists', 'steals', 'blocks',
                        'fga', 'fta', 'turnovers', 'minutes', 'usage']:
-                # Remove commas and convert
                 raw_val = raw_val.replace(',', '')
                 try:
                     val = float(raw_val) if raw_val else 0.0
                 except ValueError:
                     val = 0.0
             elif key in ['fg_pct', 'ft_pct']:
-                # Handle percentage strings like .577
                 if raw_val.startswith('.'):
                     raw_val = '0' + raw_val
                 try:
@@ -472,28 +454,27 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
                 val = raw_val
             
             player[key] = val
-        
-        # Per‑game averages
+
+        # ----- File 1 integration: per‑game averages and fantasy points -----
         g = player.get('games', 1)
         if g == 0:
-            g = 1  # avoid division by zero
-        player['pts_per_game'] = player.get('points', 0) / g
-        player['reb_per_game'] = player.get('rebounds', 0) / g
-        player['ast_per_game'] = player.get('assists', 0) / g
-        player['stl_per_game'] = player.get('steals', 0) / g
-        player['blk_per_game'] = player.get('blocks', 0) / g
-        player['to_per_game'] = player.get('turnovers', 0) / g
-        
-        # FanDuel fantasy points per game
+            g = 1
+
+        player['points'] = player.get('points', 0) / g
+        player['rebounds'] = player.get('rebounds', 0) / g
+        player['assists'] = player.get('assists', 0) / g
+        player['steals'] = player.get('steals', 0) / g
+        player['blocks'] = player.get('blocks', 0) / g
+        player['turnovers'] = player.get('turnovers', 0) / g
         player['fantasy_points'] = (
-            player['pts_per_game'] +
-            1.2 * player['reb_per_game'] +
-            1.5 * player['ast_per_game'] +
-            2 * player['stl_per_game'] +
-            2 * player['blk_per_game'] -
-            player['to_per_game']
+            player['points'] +
+            1.2 * player['rebounds'] +
+            1.5 * player['assists'] +
+            2 * player['steals'] +
+            2 * player['blocks'] -
+            player['turnovers']
         )
-        
+
         # Injury status mapping
         inj = str(player.get('injury', '')).lower()
         if 'inj' in inj or 'out' in inj or 'off inj' in inj:
@@ -508,7 +489,7 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
             player['injury_status'] = 'suspended'
         else:
             player['injury_status'] = 'healthy'
-        
+
         players.append(player)
     
     print(f"✅ Parsed {len(players)} players from NBA_TABLE")
@@ -521,7 +502,6 @@ NBA_PLAYERS_2026 = parse_nba_player_table(NBA_TABLE)
 
 if __name__ == "__main__":
     print(f"Loaded {len(NBA_PLAYERS_2026)} NBA players from static table")
-    # Print top 5 players by fantasy points
     top_players = sorted(NBA_PLAYERS_2026, key=lambda x: x.get('fantasy_points', 0), reverse=True)[:5]
     print("\nTop 5 Players by Fantasy Points:")
     for p in top_players:
