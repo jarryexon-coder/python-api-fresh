@@ -3,7 +3,8 @@
 import csv
 from typing import List, Dict
 
-# ===== 2026 NBA PLAYER STATS (29 columns, 360 players) =====
+# ===== 2026 NBA PLAYER STATS (30 columns, including '3') =====
+# Paste your full 30‑column table here. It must start with the header line and end with Caleb Martin.
 NBA_TABLE = """
 Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	reb	ast	stl	blk	fg%	fga	ft%	fta	to	USG	pV	3V	rV	aV	sV	bV	fg%V	ft%V	toV
 1	1	1.15	Nikola Jokic	DEN	C		43	1472.0	1238	86	538	448	60	33	.577	752	.830	342	158	31.4	2.06	0.32	2.80	3.20	0.86	0.11	2.39	0.60	-1.99
@@ -369,13 +370,13 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	reb	ast	stl	blk	fg%	fga	ft%	fta	to	
 """
 
 def parse_nba_player_table(table_str: str) -> List[Dict]:
-    """Parse the tab-separated NBA player table using csv.reader."""
+    """Parse the NBA player table (30 columns)."""
     lines = table_str.strip().split('\n')
     
-    # Hardcoded 29 headers
+    # Hardcoded 30 headers (including '3')
     headers = [
         'Round', 'Rank', 'Value', 'Name', 'Team', 'Pos', 'Inj', 'g', 'min', 'pts',
-        'reb', 'ast', 'stl', 'blk', 'fg%', 'fga', 'ft%', 'fta', 'to', 'USG',
+        '3', 'reb', 'ast', 'stl', 'blk', 'fg%', 'fga', 'ft%', 'fta', 'to', 'USG',
         'pV', '3V', 'rV', 'aV', 'sV', 'bV', 'fg%V', 'ft%V', 'toV'
     ]
     header_map = {
@@ -386,6 +387,7 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         'g': 'games',
         'min': 'minutes',
         'pts': 'points',
+        '3': 'threes',          # extra column, stored but not used in fantasy points
         'reb': 'rebounds',
         'ast': 'assists',
         'stl': 'steals',
@@ -416,14 +418,12 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         if not line[0].isdigit():
             continue
         
-        # Use csv.reader to handle tabs correctly
-        reader = csv.reader([line], delimiter='\t')
-        try:
-            fields = next(reader)
-        except StopIteration:
-            continue
+        # Split by tabs
+        fields = line.split('\t')
+        # If there's a trailing empty field due to extra tab, drop it
+        if len(fields) == 31 and fields[-1] == '':
+            fields = fields[:-1]
         
-        # Expect exactly 29 fields
         if len(fields) != len(headers):
             print(f"⚠️ Skipping line – unexpected column count: {len(fields)} vs {len(headers)}")
             continue
@@ -436,7 +436,7 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
                 raw_val = raw_val[:-1]
             
             # Convert numeric fields
-            if key in ['games', 'points', 'rebounds', 'assists', 'steals', 'blocks',
+            if key in ['games', 'points', 'threes', 'rebounds', 'assists', 'steals', 'blocks',
                        'fga', 'fta', 'turnovers', 'minutes', 'usage']:
                 raw_val = raw_val.replace(',', '')
                 try:
