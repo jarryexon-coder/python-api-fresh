@@ -249,27 +249,19 @@ def fallback_trends_logic(player_name, sport):
         ]
     }
 
-# Helper to convert American odds to implied probability
 def american_to_implied(odds):
-    if odds is None:
-        return 0.5
-    if odds > 0:
-        return 100 / (odds + 100)
-    else:
-        return -odds / (-odds + 100)
+    if odds is None: return 0.5
+    if odds > 0: return 100 / (odds + 100)
+    return -odds / (-odds + 100)
 
-# ========== Player lookup tables (built once from your 2026 NBA dataset) ==========
-NBA_PLAYERS_2026 = [...]  # your existing list of dicts with 'name', 'team', 'position'
-
-PLAYER_NAME_TO_TEAM = {p['name']: p['team'] for p in NBA_PLAYERS_2026 if p.get('name') and p.get('team')}
-PLAYER_NAME_TO_POSITION = {p['name']: p['position'] for p in NBA_PLAYERS_2026 if p.get('name') and p.get('position')}
-print(f"✅ Built team map with {len(PLAYER_NAME_TO_TEAM)} entries, e.g., {list(PLAYER_NAME_TO_TEAM.items())[:2]}")
-print(f"✅ Built position map with {len(PLAYER_NAME_TO_POSITION)} entries")
-
-# ========== Props builder ==========
 def build_props_response(sport):
     print("🔥🔥🔥 NEW build_props_response LOADED 🔥🔥🔥")
-    print(f"🏗️ build_props_response started for sport={sport}")
+    # Build player maps lazily (now NBA_PLAYERS_2026 should be ready)
+    global PLAYER_NAME_TO_TEAM, PLAYER_NAME_TO_POSITION
+    if not PLAYER_NAME_TO_TEAM:
+        PLAYER_NAME_TO_TEAM = {p['name']: p['team'] for p in NBA_PLAYERS_2026 if p.get('name') and p.get('team')}
+        PLAYER_NAME_TO_POSITION = {p['name']: p['position'] for p in NBA_PLAYERS_2026 if p.get('name') and p.get('position')}
+        print(f"✅ Built team map with {len(PLAYER_NAME_TO_TEAM)} entries inside build_props_response")
 
     # Try The Odds API first
     odds_props = []
