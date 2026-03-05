@@ -84,17 +84,6 @@ except FileNotFoundError:
     PLAYER_NAME_MAP = {}
     print("⚠️ player_names.json not found – names will be placeholders")
 
-# Build name -> team mapping from static data
-PLAYER_NAME_TO_TEAM = {}
-for player in NBA_PLAYERS_2026:
-    name = player.get('name')
-    team = player.get('team')
-    if name and team:
-        PLAYER_NAME_TO_TEAM[name] = team
-
-def get_team_from_player_name(name):
-    return PLAYER_NAME_TO_TEAM.get(name, '')
-
 # ==============================================================================
 # 1. FLASK APP INITIALIZATION
 # ==============================================================================
@@ -259,6 +248,137 @@ def fallback_trends_logic(player_name, sport):
             }
         ]
     }
+
+# Helper to convert American odds to implied probability
+def american_to_implied(odds):
+    if odds is None:
+        return 0.5
+    if odds > 0:
+        return 100 / (odds + 100)
+    else:
+        return -odds / (-odds + 100)
+
+# ========== Player lookup tables (built once from your 2026 NBA dataset) ==========
+NBA_PLAYERS_2026 = [...]  # your existing list of dicts with 'name', 'team', 'position'
+
+PLAYER_NAME_TO_TEAM = {p['name']: p['team'] for p in NBA_PLAYERS_2026 if p.get('name') and p.get('team')}
+PLAYER_NAME_TO_POSITION = {p['name']: p['position'] for p in NBA_PLAYERS_2026 if p.get('name') and p.get('position')}
+print(f"✅ Built team map with {len(PLAYER_NAME_TO_TEAM)} entries, e.g., {list(PLAYER_NAME_TO_TEAM.items())[:2]}")
+print(f"✅ Built position map with {len(PLAYER_NAME_TO_POSITION)} entries")
+
+# ========== Props builder ==========
+def build_props_response(sport):
+    print("🔥🔥🔥 NEW build_props_response LOADED 🔥🔥🔥")
+    print(f"🏗️ build_props_response started for sport={sport}")
+
+    # Try The Odds API first
+    odds_props = []
+    try:
+        print(f"   ⚡ Attempting to fetch from The Odds API for {sport}...")
+        events = fetch_player_props(sport)
+        print(f"   ⚡ fetch_player_props returned {len(events) if events else 0} events")
+
+        if events:
+            print(f"   ⚡ Processing {len(events)} events...")
+            for event_idx, event in enumerate(events):
+                details = event.get('event_details', {})
+                home_team = details.get('home_team', '')
+                away_team = details.get('away_team', '')
+                commence_time = details.get('commence_time', '')
+                game_id = details.get('id', '')
+                print(f"      Event {event_idx+1}: {away_team} @ {home_team} (ID: {game_id})")
+
+                # Aggregate best odds across all bookmakers for this event
+                best_odds = {}  # key: (player_name, market_key, line) -> {'over': best_over, 'under': best_under}
+
+                bookmakers = event.get('bookmakers', [])
+                print(f"         Found {len(bookmakers)} bookmakers")
+                for bm_idx, bookmaker in enumerate(bookmakers):
+                    markets = bookmaker.get('markets', [])
+                    for market in markets:
+                        market_key = market['key']
+                        outcomes = market.get('outcomes', [])
+                        for outcome in outcomes:
+                            player_name = outcome.get('description') or outcome.get('name')
+                            line = outcome.get('point')
+                            price = outcome.get('price')
+                            if not player_name or line is None:
+                                continue
+
+                            # Determine side
+                            desc = (outcome.get('description') or '').lower()
+                            name_lower = (outcome.get('name') or '').lower()
+                            if 'over' in desc or 'over' in name_lower:
+                                side = 'over'
+                            elif 'under' in desc or 'under' in name_lower:
+                                side = 'under'
+                            else:
+                                continue
+
+                            key = (player_name, market_key, line)
+                            if key not in best_odds:
+                                best_odds[key] = {'over': None, 'under': None}
+
+                            # Store the first encountered odds for simplicity (can be improved later)
+                            if best_odds[key][side] is None:
+                                best_odds[key][side] = price
+
+                # Convert aggregated best odds into props
+                for (player_name, market_key, line), sides in best_odds.items():
+                    over_odds = sides.get('over')
+                    under_odds = sides.get('under')
+                    if over_odds is None or under_odds is None:
+                        continue  # need both sides
+
+                    # Compute confidence from odds (assumes american_to_implied is defined)
+                    implied_over = american_to_implied(over_odds)
+                    implied_under = american_to_implied(under_odds)
+                    confidence = round(max(implied_over, implied_under) * 100)  # 0-100
+
+                    # Look up team and position from static data
+                    team = PLAYER_NAME_TO_TEAM.get(player_name, '')
+                    position = PLAYER_NAME_TO_POSITION.get(player_name, '')
+
+                    # Create a unique ID
+                    prop_id = f"{game_id}_{market_key}_{player_name}_{line}".replace(' ', '_')
+                    odds_props.append({
+                        'id': prop_id,
+                        'player': player_name,
+                        'team': team,
+                        'position': position,
+                        'market': market_key,
+                        'line': line,
+                        'over_odds': over_odds,
+                        'under_odds': under_odds,
+                        'confidence': confidence,
+                        'player_id': None,
+                        'sport': sport.upper(),
+                        'is_real_data': True,
+                        'game': f"{away_team} @ {home_team}",
+                        'game_time': commence_time,
+                    })
+                    print(f"                  ✅ Added prop: {player_name} {market_key} O/U {line} (conf: {confidence}%)")
+
+    except Exception as e:
+        print(f"   ❌ Exception during Odds API processing: {e}")
+        import traceback
+        traceback.print_exc()
+        odds_props = []
+
+    if odds_props:
+        print(f"✅ Using {len(odds_props)} props from The Odds API")
+        return {
+            'success': True,
+            'props': odds_props,
+            'count': len(odds_props),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'source': 'theoddsapi',
+            'sport': sport,
+            'is_real_data': True
+        }
+    else:
+        print("⚠️ Falling back to Balldontlie")
+        return build_balldontlie_response(sport)
 
 # ==============================================================================
 # BALLDONTLIE REQUEST HELPER
