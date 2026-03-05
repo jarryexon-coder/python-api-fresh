@@ -30,6 +30,32 @@ from typing import Optional, Dict, Any, List
 from nba_static_data import NBA_PLAYERS_2026
 from data_pipeline import UnifiedNBADataPipeline
 from difflib import get_close_matches
+_player_name_cache = {}  # <-- add this
+
+# Cache directory for props
+PROPS_CACHE_DIR = 'cache'
+
+def get_cache_path(sport):
+    return os.path.join(PROPS_CACHE_DIR, f'props_{sport}.json')
+
+def is_cache_fresh(sport, max_age_hours=24):
+    path = get_cache_path(sport)
+    if not os.path.exists(path):
+        return False
+    mod_time = datetime.fromtimestamp(os.path.getmtime(path))
+    age = datetime.now() - mod_time
+    return age < timedelta(hours=max_age_hours)
+
+def load_props_from_cache(sport):
+    path = get_cache_path(sport)
+    with open(path, 'r') as f:
+        return json.load(f)
+
+def save_props_to_cache(sport, data):
+    os.makedirs(PROPS_CACHE_DIR, exist_ok=True)
+    path = get_cache_path(sport)
+    with open(path, 'w') as f:
+        json.dump(data, f)
 
 # Balldontlie fetchers (separate file, but we'll import)
 from balldontlie_fetchers import (
@@ -43,8 +69,31 @@ from balldontlie_fetchers import (
     fetch_todays_games,
     fetch_balldontlie_props,
     fetch_nba_from_balldontlie,
-    fetch_all_active_players      # <-- new import
+    fetch_all_active_players,      # <-- new import
+    fetch_game_odds_by_id
 )
+
+import json
+
+# Load player name cache
+try:
+    with open('player_names.json') as f:
+        PLAYER_NAME_MAP = json.load(f)
+    print(f"✅ Loaded {len(PLAYER_NAME_MAP)} player names from cache")
+except FileNotFoundError:
+    PLAYER_NAME_MAP = {}
+    print("⚠️ player_names.json not found – names will be placeholders")
+
+# Build name -> team mapping from static data
+PLAYER_NAME_TO_TEAM = {}
+for player in NBA_PLAYERS_2026:
+    name = player.get('name')
+    team = player.get('team')
+    if name and team:
+        PLAYER_NAME_TO_TEAM[name] = team
+
+def get_team_from_player_name(name):
+    return PLAYER_NAME_TO_TEAM.get(name, '')
 
 # ==============================================================================
 # 1. FLASK APP INITIALIZATION
@@ -1646,6 +1695,16 @@ class UnifiedNBADataPipeline:
         print(f"Merged {len(unified_players)} players.")
         return unified_players
 
+# Simple in‑memory cache for player names (consider adding TTL if needed)
+_player_name_cache = {}
+
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def fetch_player_names_batch(player_ids):
+    """Instant lookup from pre‑loaded cache."""
+    return {str(pid): PLAYER_NAME_MAP.get(str(pid), f"Player {pid}") for pid in player_ids}
+
     def save_unified_data(self, unified_players: List[Dict]):
         """Save to a JSON file (could also save to DB/Redis)"""
         filename = f"unified_players_{datetime.now().strftime('%Y%m%d')}.json"
@@ -1937,16 +1996,15 @@ def call_node_microservice(path, params=None, method='GET', data=None):
     headers = {'Content-Type': 'application/json'}
     try:
         if method.upper() == 'GET':
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=30)   # Increased to 30
         elif method.upper() == 'POST':
-            response = requests.post(url, json=data, headers=headers, timeout=10)
+            response = requests.post(url, json=data, headers=headers, timeout=30)   # Increased to 30
         else:
             raise ValueError(f"Unsupported method {method}")
         response.raise_for_status()
         return response.json()
     except Exception as e:
         print(f"❌ Node microservice call failed: {e}")
-        # Return a structured error so the frontend can handle it
         return {"success": False, "error": str(e)}
 
 def num_tokens_from_string(string: str, model: str = "gpt-3.5-turbo") -> int:
@@ -2074,6 +2132,210 @@ def get_full_team_name(team_abbrev):
     }
     return nba_teams.get(team_abbrev, team_abbrev)
 
+def build_balldontlie_response(sport):
+    """
+    Fallback: fetch props from Balldontlie, then enrich with cached player names.
+    Assumes sport is 'nba' (other sports may not have Balldontlie data).
+    Returns a dictionary suitable for JSON response.
+    """
+    if sport != 'nba':
+        # No Balldontlie for other sports; return empty props
+        return {
+            'success': True,
+            'props': [],
+            'count': 0,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'source': 'balldontlie (unsupported)',
+            'sport': sport,
+            'is_real_data': False
+        }
+
+    print("🏀 Building Balldontlie props with player name cache...")
+    games = fetch_todays_games()
+    if not games or not isinstance(games, list):
+        return {
+            'success': True,
+            'props': [],
+            'count': 0,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'source': 'balldontlie (no games)',
+            'sport': sport,
+            'is_real_data': False
+        }
+
+    all_props = []
+    all_player_ids = set()
+
+    for game in games[:5]:  # limit to 5 games
+        # Safely extract game details (same as before)
+        if isinstance(game, dict):
+            game_id = game.get('id')
+            game_time = ''
+            if isinstance(game.get('status'), dict):
+                game_time = game['status'].get('start_time', '')
+            elif isinstance(game.get('status'), str):
+                game_time = game['status']
+            home_team = ''
+            if isinstance(game.get('home_team'), dict):
+                home_team = game['home_team'].get('abbreviation', '')
+            elif isinstance(game.get('home_team'), str):
+                home_team = game['home_team']
+            away_team = ''
+            if isinstance(game.get('visitor_team'), dict):
+                away_team = game['visitor_team'].get('abbreviation', '')
+            elif isinstance(game.get('visitor_team'), str):
+                away_team = game['visitor_team']
+        else:
+            print(f"⚠️ Unexpected game type: {type(game)} – skipping", flush=True)
+            continue
+
+        if not game_id:
+            continue
+
+        props = fetch_balldontlie_props(game_id=game_id)
+        if props:
+            for p in props:
+                all_props.append({
+                    'id': p.get('id'),
+                    'game_id': game_id,
+                    'game_time': game_time,
+                    'home_team': home_team,
+                    'away_team': away_team,
+                    'player_id': p.get('player_id'),
+                    'player_name': None,  # will fill after fetch
+                    'team': p.get('team_abbreviation'),
+                    'prop_type': p.get('prop_type'),
+                    'line': p.get('line'),
+                    'over_odds': p.get('over_odds'),
+                    'under_odds': p.get('under_odds'),
+                    'sport': 'NBA',
+                })
+                if p.get('player_id'):
+                    all_player_ids.add(p['player_id'])
+
+    # Use the globally loaded PLAYER_NAME_MAP to fill player names
+    for prop in all_props:
+        pid = prop['player_id']
+        # Convert to string because the JSON map keys are strings
+        prop['player_name'] = PLAYER_NAME_MAP.get(str(pid), f"Player {pid}")
+
+    sanitized = sanitize_data(all_props)
+    return {
+        'success': True,
+        'props': sanitized,
+        'count': len(sanitized),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'source': 'balldontlie',
+        'sport': sport,
+        'is_real_data': True
+    }
+
+def build_props_response(sport):
+    print(f"🏗️ build_props_response started for sport={sport}")
+
+    # Try The Odds API first
+    odds_props = []
+    try:
+        print(f"   ⚡ Attempting to fetch from The Odds API for {sport}...")
+        events = fetch_player_props(sport)
+        print(f"   ⚡ fetch_player_props returned {len(events) if events else 0} events")
+
+        if events:
+            print(f"   ⚡ Processing {len(events)} events...")
+            for event_idx, event in enumerate(events):
+                details = event.get('event_details', {})
+                home_team = details.get('home_team', '')
+                away_team = details.get('away_team', '')
+                commence_time = details.get('commence_time', '')
+                game_id = details.get('id', '')
+                print(f"      Event {event_idx+1}: {away_team} @ {home_team} (ID: {game_id})")
+
+                bookmakers = event.get('bookmakers', [])
+                print(f"         Found {len(bookmakers)} bookmakers")
+                for bm_idx, bookmaker in enumerate(bookmakers):
+                    markets = bookmaker.get('markets', [])
+                    print(f"            Bookmaker {bm_idx+1}: {bookmaker.get('title')} – {len(markets)} markets")
+                    for market in markets:
+                        market_key = market['key']
+                        outcomes = market.get('outcomes', [])
+                        print(f"               Market: {market_key} – {len(outcomes)} outcomes")
+                        # Group outcomes by (player_name, line)
+                        props_dict = {}
+                        for outcome in outcomes:
+                            # Extract player name – try description first, then outcome name
+                            player_name = outcome.get('description') or outcome.get('name')
+                            line = outcome.get('point')
+                            price = outcome.get('price')
+                            # Determine side
+                            desc = (outcome.get('description') or '').lower()
+                            name = (outcome.get('name') or '').lower()
+                            if 'over' in desc or 'over' in name:
+                                side = 'over'
+                            elif 'under' in desc or 'under' in name:
+                                side = 'under'
+                            else:
+                                print(f"                  ⚠️ Skipping outcome – cannot determine side: {outcome}")
+                                continue
+
+                            if not player_name or line is None:
+                                print(f"                  ⚠️ Skipping outcome – missing player_name or line: {outcome}")
+                                continue
+
+                            key = (player_name, line)
+                            if key not in props_dict:
+                                props_dict[key] = {}
+                            props_dict[key][side] = price
+
+                        # Convert grouped data into props
+                        for (player_name, line), sides in props_dict.items():
+                            if 'over' not in sides or 'under' not in sides:
+                                print(f"                  ⚠️ Skipping {player_name} {line} – missing one side (over: {sides.get('over')}, under: {sides.get('under')})")
+                                continue
+                            over_odds = sides['over']
+                            under_odds = sides['under']
+
+                            # Optional: get team from static map if you built one
+                            team = ''  # you can add a lookup
+
+                            prop_id = f"{game_id}_{market_key}_{player_name}_{line}".replace(' ', '_')
+                            odds_props.append({
+                                'id': prop_id,
+                                'player': player_name,
+                                'team': team,
+                                'market': market_key,
+                                'line': line,
+                                'over_odds': over_odds,
+                                'under_odds': under_odds,
+                                'confidence': 50,
+                                'player_id': None,
+                                'position': None,
+                                'sport': sport.upper(),
+                                'is_real_data': True,
+                                'game': f"{away_team} @ {home_team}",
+                                'game_time': commence_time,
+                            })
+                            print(f"                  ✅ Added prop: {player_name} {market_key} O/U {line} ({over_odds}/{under_odds})")
+    except Exception as e:
+        print(f"   ❌ Exception during Odds API processing: {e}")
+        import traceback
+        traceback.print_exc()
+        odds_props = []
+
+    if odds_props:
+        print(f"✅ Using {len(odds_props)} props from The Odds API")
+        return {
+            'success': True,
+            'props': odds_props,
+            'count': len(odds_props),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'source': 'theoddsapi',
+            'sport': sport,
+            'is_real_data': True
+        }
+    else:
+        print("⚠️ Falling back to Balldontlie")
+        return build_balldontlie_response(sport)
+
 def get_confidence_level(score):
     """Convert numeric score to confidence level string."""
     if score >= 80:
@@ -2128,25 +2390,10 @@ def parse_nba_scores(html):
     """Parse NBA scores from ESPN HTML (example)."""
     soup = BeautifulSoup(html, 'html.parser')
     games = []
-    game_cards = soup.select('article.scorecard')
+    game_cards = soup.select('article.scorecard')  # adjust selector as needed
     for card in game_cards[:5]:
-        try:
-            teams = card.select('.ScoreCell__TeamName')
-            scores = card.select('.ScoreCell__Score')
-            status_elem = card.select_one('.ScoreboardScoreCell__Time')
-            if len(teams) >= 2:
-                game = {
-                    'away_team': teams[0].text.strip(),
-                    'home_team': teams[1].text.strip(),
-                    'away_score': scores[0].text.strip() if len(scores) > 0 else '0',
-                    'home_score': scores[1].text.strip() if len(scores) > 1 else '0',
-                    'status': status_elem.text.strip() if status_elem else 'Scheduled',
-                    'source': 'ESPN',
-                    'last_updated': datetime.now(timezone.utc).isoformat()
-                }
-                games.append(game)
-        except Exception as e:
-            continue
+        # process each card (add your parsing logic here)
+        games.append(card)  # placeholder
     return games
 
 async def scrape_sports_data(sport):
@@ -2201,8 +2448,7 @@ def get_injuries(sport='nba'):
     # Fallback to mock
     return {'success': True, 'injuries': generate_mock_injuries(sport)}
 
-# ========== FALLBACK RESPONSES (used when OpenAI is unavailable) ==========
-def generate_static_advanced_analytics(sport='nba', limit=20):
+# ⚠️ No picks directly matching your query – showing all available picks.
     """Generate advanced analytics picks from static NBA data."""
     if sport != 'nba':
         return []
@@ -2624,15 +2870,16 @@ def generate_nba_props_from_static(limit=100):
     props = []
     print(f"📦 Generating {limit} static props...", flush=True)
     for idx, player in enumerate(NBA_PLAYERS_2026[:limit]):
-        name = player['name']
-        team = player['team']
-        position = player['position']
-        pts = player['pts_per_game']
-        reb = player['reb_per_game']
-        ast = player['ast_per_game']
-        stl = player['stl_per_game']
-        blk = player['blk_per_game']
-        fg3 = player.get('threes', 0) / max(player.get('games', 1), 1)
+        name = player.get('name', 'Unknown')
+        team = player.get('team', 'FA')
+        position = player.get('position', 'N/A')
+
+        pts = player.get('points', 0)
+        reb = player.get('rebounds', 0)
+        ast = player.get('assists', 0)
+        stl = player.get('steals', 0)
+        blk = player.get('blocks', 0)
+        fg3 = player.get('threes', 0)
 
         stat_configs = [
             ('points', pts),
@@ -2640,7 +2887,7 @@ def generate_nba_props_from_static(limit=100):
             ('assists', ast),
             ('steals', stl),
             ('blocks', blk),
-            ('three-pointers', fg3)
+            ('three-pointers', fg3),
         ]
 
         for stat_type, base in stat_configs:
@@ -2662,9 +2909,9 @@ def generate_nba_props_from_static(limit=100):
             prop = {
                 'id': f"static-{name.replace(' ', '-')}-{stat_type}",
                 'player': name,
-                'team': team,
+                'team': team,                     # ✅ team is included
                 'position': position,
-                'stat_type': stat_type,
+                'stat': stat_type,                 # ✅ 'stat' (not 'stat_type') for consistency
                 'line': line,
                 'projection': projection,
                 'projection_diff': round(projection - line, 1),
@@ -2683,9 +2930,9 @@ def generate_nba_props_from_static(limit=100):
                 'last_update': datetime.now(timezone.utc).isoformat()
             }
             props.append(prop)
-            # Print first few to verify
             if len(props) <= 10:
-                print(f"   Static prop {len(props)}: {name} {stat_type} line={line} proj={projection} diff={prop['projection_diff']} edge={prop['edge']}", flush=True)
+                print(f"   Static prop {len(props)}: {name} {stat_type} line={line} proj={projection} team={team}", flush=True)
+
     print(f"✅ Generated {len(props)} static props", flush=True)
     return props
 
@@ -2709,75 +2956,58 @@ def generate_mock_props(sport, date):
         # ... more mock props
     ]
 
-def generate_mock_trends(sport, limit, trend_filter):
-    """Generate realistic mock trends for a given sport."""
-    if sport == 'nba':
-        # Use the same top player list as above
-        top_players = [
-            {"name": "LeBron James", "team": "LAL", "position": "SF", "pts": 27.2, "reb": 7.5, "ast": 7.8},
-            {"name": "Nikola Jokic", "team": "DEN", "position": "C", "pts": 26.1, "reb": 12.3, "ast": 9.0},
-            {"name": "Luka Doncic", "team": "DAL", "position": "PG", "pts": 32.0, "reb": 8.5, "ast": 8.6},
-            {"name": "Shai Gilgeous-Alexander", "team": "OKC", "position": "PG", "pts": 31.5, "reb": 5.6, "ast": 6.5},
-            {"name": "Giannis Antetokounmpo", "team": "MIL", "position": "PF", "pts": 30.8, "reb": 11.5, "ast": 6.2},
-            {"name": "Stephen Curry", "team": "GS", "position": "PG", "pts": 26.4, "reb": 4.5, "ast": 5.0},
-            {"name": "Jayson Tatum", "team": "BOS", "position": "SF", "pts": 27.1, "reb": 8.2, "ast": 4.8},
-            {"name": "Kevin Durant", "team": "PHX", "position": "PF", "pts": 27.8, "reb": 6.7, "ast": 5.3},
-            {"name": "Joel Embiid", "team": "PHI", "position": "C", "pts": 34.0, "reb": 11.0, "ast": 5.5},
-            {"name": "Anthony Davis", "team": "LAL", "position": "PF", "pts": 25.5, "reb": 12.5, "ast": 3.5},
-        ]
-    else:
-        # For other sports, return empty list
-        return []
-
+def generate_mock_trends(sport, limit=10, trend_filter='all'):
+    """Generate mock trend data for any sport (fallback when no live data)."""
     trends = []
-    for player in top_players:
-        # Generate a random difference between -8 and +8
-        diff = round(random.uniform(-8, 8), 1)
-        if diff > 3:
-            trend = 'hot'
-        elif diff < -3:
-            trend = 'cold'
-        else:
-            trend = 'neutral'
+    sports_data = {
+        'nba': {
+            'teams': ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DAL', 'DEN', 'DET', 'GSW'],
+            'positions': ['PG', 'SG', 'SF', 'PF', 'C'],
+            'names': ['Luka', 'LeBron', 'Giannis', 'Steph', 'KD', 'Jokic', 'Embiid', 'Tatum', 'Donovan', 'Ant'],
+            'last_names': ['Doncic', 'James', 'Antetokounmpo', 'Curry', 'Durant', 'Jokic', 'Embiid', 'Tatum', 'Mitchell', 'Edwards']
+        },
+        'nfl': {
+            'teams': ['KC', 'SF', 'BUF', 'BAL', 'DAL', 'PHI', 'CIN', 'JAX', 'DET', 'GB'],
+            'positions': ['QB', 'RB', 'WR', 'TE', 'K'],
+            'names': ['Patrick', 'Josh', 'Lamar', 'Joe', 'Justin', 'Ja\'Marr', 'Travis', 'Christian', 'Saquon', 'Tyreek'],
+            'last_names': ['Mahomes', 'Allen', 'Jackson', 'Burrow', 'Jefferson', 'Chase', 'Kelce', 'McCaffrey', 'Barkley', 'Hill']
+        },
+        'nhl': {
+            'teams': ['EDM', 'TOR', 'COL', 'BOS', 'NYR', 'DAL', 'VGK', 'FLA', 'CAR', 'TBL'],
+            'positions': ['C', 'LW', 'RW', 'D', 'G'],
+            'names': ['Connor', 'Auston', 'Nathan', 'David', 'Ilya', 'Leon', 'Cale', 'Mikko', 'Brady', 'Andrei'],
+            'last_names': ['McDavid', 'Matthews', 'MacKinnon', 'Pastrnak', 'Sorokin', 'Draisaitl', 'Makar', 'Rantanen', 'Tkachuk', 'Vasilevskiy']
+        },
+        'mlb': {
+            'teams': ['LAD', 'ATL', 'NYY', 'HOU', 'SD', 'PHI', 'TOR', 'CHC', 'STL', 'SF'],
+            'positions': ['SP', 'RP', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'],
+            'names': ['Shohei', 'Aaron', 'Mookie', 'Ronald', 'Juan', 'Vladimir', 'Fernando', 'Jacob', 'Bryce', 'Mike'],
+            'last_names': ['Ohtani', 'Judge', 'Betts', 'Acuña', 'Soto', 'Guerrero', 'Tatis', 'deGrom', 'Harper', 'Trout']
+        }
+    }
 
-        if trend_filter != 'all' and trend != trend_filter:
+    data = sports_data.get(sport, sports_data['nba'])  # fallback to NBA
+    for i in range(limit):
+        first = random.choice(data['names'])
+        last = random.choice(data['last_names'])
+        name = f"{first} {last}"
+        team = random.choice(data['teams'])
+        position = random.choice(data['positions'])
+        trend = random.choice(['🔥 Hot', '📈 Rising', '🎯 Value', '❄️ Cold'])
+
+        # Filter if a specific trend is requested
+        if trend_filter != 'all' and trend_filter not in trend.lower():
             continue
 
-        # Create realistic last 5 averages (slightly varying around season avg)
-        pts_season = player['pts']
-        reb_season = player['reb']
-        ast_season = player['ast']
-
-        last5_pts = round(pts_season + random.uniform(-2, 2), 1)
-        last5_reb = round(reb_season + random.uniform(-1, 1), 1)
-        last5_ast = round(ast_season + random.uniform(-1, 1), 1)
-
         trends.append({
-            'player_id': random.randint(1000, 9999),
-            'player_name': player['name'],
-            'team': player['team'],
-            'position': player['position'],
+            'id': f"mock-{sport}-{i}",
+            'name': name,
+            'team': team,
+            'position': position,
             'trend': trend,
-            'difference': diff,
-            'last_5_avg': {
-                'pts': last5_pts,
-                'reb': last5_reb,
-                'ast': last5_ast,
-                'stl': round(random.uniform(0.5, 2.0), 1),
-                'blk': round(random.uniform(0.2, 1.5), 1),
-                'min': round(random.uniform(30, 38), 1)
-            },
-            'season_avg': {
-                'pts': pts_season,
-                'reb': reb_season,
-                'ast': ast_season,
-                'stl': round(random.uniform(0.8, 1.8), 1),
-                'blk': round(random.uniform(0.3, 1.2), 1),
-                'min': round(random.uniform(32, 36), 1),
-                'fg_pct': round(random.uniform(0.45, 0.55), 3),
-                'fg3_pct': round(random.uniform(0.35, 0.45), 3),
-                'ft_pct': round(random.uniform(0.75, 0.90), 3)
-            }
+            'value': round(random.uniform(30, 70), 1),
+            'projection': round(random.uniform(20, 60), 1),
+            'salary': random.randint(4000, 12000)
         })
 
         if len(trends) >= limit:
@@ -3598,9 +3828,9 @@ def make_api_request_with_retry(url, headers=None, params=None, method='GET', ma
     for attempt in range(max_retries):
         try:
             if method.upper() == 'GET':
-                response = requests.get(url, headers=headers, params=params, timeout=10)
+                response = requests.get(url, headers=headers, params=params, timeout=30)
             elif method.upper() == 'POST':
-                response = requests.post(url, headers=headers, json=params, timeout=10)
+                response = requests.post(url, headers=headers, json=params, timeout=30)
             else:
                 raise ValueError(f"Unsupported method: {method}")
 
@@ -3888,7 +4118,7 @@ def fetch_odds_from_api(sport):
         'oddsFormat': 'american'
     }
     try:
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             data = response.json()
             print(f"✅ Fetched {len(data)} odds events from The Odds API for {sport}")
@@ -4300,6 +4530,74 @@ def generate_intelligent_fallback(sport):
 
     return fallback_selections
 
+def generate_static_advanced_analytics(sport: str, limit: int = 50):
+    """
+    Generate advanced analytics from static player data using the helper function.
+    """
+    selections = []
+    # Determine which player list to use
+    if sport == 'nba':
+        data = players_data_list
+    elif sport == 'nfl':
+        data = nfl_players_data
+    elif sport == 'mlb':
+        data = mlb_players_data
+    elif sport == 'nhl':
+        data = nhl_players_data
+    else:
+        return []
+
+    for player in data[:limit]:
+        player_name = player.get('name', '')
+        if not player_name:
+            continue
+
+        # Use the helper to get normalized stats
+        stats = get_player_stats_from_static(player_name, sport)
+        if not stats:
+            # If helper fails, fall back to extracting from player dict directly with safe defaults
+            stats = {
+                'points': player.get('points', player.get('pts', 0)),
+                'rebounds': player.get('rebounds', player.get('reb', 0)),
+                'assists': player.get('assists', player.get('ast', 0)),
+                'steals': player.get('steals', player.get('stl', 0)),
+                'blocks': player.get('blocks', player.get('blk', 0)),
+                'fg_pct': player.get('fg_pct', player.get('fg%', 0)),
+                'minutes': player.get('minutes', player.get('min', player.get('min_per_game', 0))),
+            }
+
+        # Build analytics item
+        item = {
+            'id': f"static-{player.get('id', player_name)}",
+            'player': player_name,
+            'team': stats.get('team', player.get('team', player.get('teamAbbrev', ''))),
+            'sport': sport.upper(),
+            'points': stats.get('points', 0),
+            'rebounds': stats.get('rebounds', 0),
+            'assists': stats.get('assists', 0),
+            'steals': stats.get('steals', 0),
+            'blocks': stats.get('blocks', 0),
+            'fg_pct': stats.get('fg_pct', 0),
+            'minutes': stats.get('minutes', 0),
+            'projection': (
+                stats.get('points', 0) * 1.0 +
+                stats.get('rebounds', 0) * 1.2 +
+                stats.get('assists', 0) * 1.5 +
+                stats.get('steals', 0) * 2.0 +
+                stats.get('blocks', 0) * 2.0
+            ),
+            'source': 'static'
+        }
+        selections.append(item)
+
+    return {
+        'success': True,
+        'selections': selections,
+        'count': len(selections),
+        'message': f'Static advanced analytics for {sport.upper()}',
+        'data_source': 'static-2026',
+        'scraped': False
+    }
 
 # ------------------------------------------------------------------------------
 # Mock Parlay Generators
@@ -6685,19 +6983,18 @@ def get_fantasy_players():
                     "projected_points": round(fp, 1),
                     "value": round(value, 2),
                     # FIXED: Use correct field names from nba_static_data.py
-                    "points": round(player.get('points_per_game', 0), 1),
-                    "rebounds": round(player.get('reb_per_game', 0), 1),
-                    "assists": round(player.get('ast_per_game', 0), 1),
-                    "steals": round(player.get('stl_per_game', 0), 1),
-                    "blocks": round(player.get('blk_per_game', 0), 1),
-                    "turnovers": round(player.get('to_per_game', 0), 1),
-                    "injury_status": player.get('injury_status', 'healthy'),
-                    "games_played": player.get('games', 0),
-                    "minutes_per_game": round(player.get('minutes_per_game', 0), 1),
-                    "fg_pct": round(player.get('fg_pct', 0), 3),
-                    "ft_pct": round(player.get('ft_pct', 0), 3),
-                    "three_per_game": round(player.get('threes_per_game', 0), 1),
-                    "usage_rate": round(player.get('usage', 0), 1),
+"points": round(player.get('points', 0), 1),
+"rebounds": round(player.get('rebounds', 0), 1),
+"assists": round(player.get('assists', 0), 1),
+"steals": round(player.get('steals', 0), 1),
+"blocks": round(player.get('blocks', 0), 1),
+"turnovers": round(player.get('turnovers', 0), 1),
+"games_played": player.get('games', 0),
+"minutes_per_game": round(player.get('minutes', 0) / player.get('games', 1) if player.get('games', 0) > 0 else 0, 1),
+"fg_pct": round(player.get('fg_pct', 0), 3),
+"ft_pct": round(player.get('ft_pct', 0), 3),
+"three_per_game": round(player.get('threes', 0) / player.get('games', 1) if player.get('games', 0) > 0 else 0, 1),
+"usage_rate": round(player.get('usage', 0), 1),                  
                     "is_real_data": True,
                     "data_source": "NBA 2026 Static"
                 })
@@ -7462,104 +7759,25 @@ def get_history():
 
 @app.route('/api/player-props')
 def get_player_props():
-    """Get player props from Balldontlie, with fallback to local generation."""
     try:
         sport = flask_request.args.get('sport', 'nba').lower()
-        print(f"🔍 /api/player-props called for sport={sport}")
+        force_refresh = flask_request.args.get('refresh', 'false').lower() == 'true'
+        print(f"🔍 /api/player-props called for sport={sport}, force_refresh={force_refresh}")
 
-        if sport == 'nba' and BALLDONTLIE_API_KEY:
-            print("🏀 Attempting Balldontlie for props...")
-            games = fetch_todays_games()
-            if games and isinstance(games, list):
-                all_props = []
-                for game in games[:5]:  # limit to 5 games
-                    # Safely extract game ID
-                    if isinstance(game, dict):
-                        game_id = game.get('id')
-                        # Safely get game time – status might be a dict or string
-                        game_time = ''
-                        if isinstance(game.get('status'), dict):
-                            game_time = game['status'].get('start_time', '')
-                        elif isinstance(game.get('status'), str):
-                            game_time = game['status']  # use raw status if string
-                        # Get home/away abbreviations
-                        home_team = ''
-                        if isinstance(game.get('home_team'), dict):
-                            home_team = game['home_team'].get('abbreviation', '')
-                        elif isinstance(game.get('home_team'), str):
-                            home_team = game['home_team']
-                        away_team = ''
-                        if isinstance(game.get('visitor_team'), dict):
-                            away_team = game['visitor_team'].get('abbreviation', '')
-                        elif isinstance(game.get('visitor_team'), str):
-                            away_team = game['visitor_team']
-                    else:
-                        # If game is a string (e.g., game ID), skip or handle differently
-                        print(f"⚠️ Unexpected game type: {type(game)} – skipping", flush=True)
-                        continue
+        # Check cache only if not forcing refresh
+        if not force_refresh and is_cache_fresh(sport):
+            print(f"📦 Serving cached props for {sport}")
+            cached = load_props_from_cache(sport)
+            return jsonify(cached)
 
-                    if not game_id:
-                        continue
+        # Build fresh props
+        print(f"🔄 Building fresh props for {sport}")
+        response_data = build_props_response(sport)
 
-                    # Use fetch_balldontlie_props (v2) – note the renamed function
-                    props = fetch_balldontlie_props(game_id=game_id)
-                    if props:
-                        for p in props:
-                            all_props.append({
-                                'id': p.get('id'),
-                                'game_id': game_id,
-                                'game_time': game_time,
-                                'home_team': home_team,
-                                'away_team': away_team,
-                                'player_id': p.get('player_id'),
-                                'player_name': p.get('player_name'),
-                                'team': p.get('team_abbreviation'),
-                                'prop_type': p.get('prop_type'),
-                                'line': p.get('line'),
-                                'over_odds': p.get('over_odds'),
-                                'under_odds': p.get('under_odds'),
-                                'sport': 'NBA',
-                            })
+        # Save to cache (even if we forced refresh, update cache)
+        save_props_to_cache(sport, response_data)
 
-                if all_props:
-                    sanitized = sanitize_data(all_props)
-                    return jsonify({
-                        'success': True,
-                        'props': sanitized,
-                        'count': len(sanitized),
-                        'timestamp': datetime.now(timezone.utc).isoformat(),
-                        'source': 'balldontlie',
-                        'sport': sport,
-                        'is_real_data': True
-                    })
-                else:
-                    print("⚠️ No props from Balldontlie")
-
-        # Fallback to local props (if you have such a function)
-        print("📦 Falling back to local props")
-        local_props = generate_local_player_props(sport)  # your existing function
-        if local_props:
-            sanitized = sanitize_data(local_props)
-            return jsonify({
-                'success': True,
-                'props': sanitized,
-                'count': len(sanitized),
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'source': 'local_fallback',
-                'sport': sport,
-                'is_real_data': True
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'props': [],
-                'count': 0,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'source': 'empty',
-                'sport': sport,
-                'is_real_data': False
-            })
-
+        return jsonify(response_data)
     except Exception as e:
         print(f"❌ Top-level error in /api/player-props: {e}")
         traceback.print_exc()
@@ -8365,7 +8583,13 @@ def get_advanced_analytics():
         # ----- 1. STATIC NBA DATA (fastest) -----
         if sport == 'nba' and NBA_PLAYERS_2026:
             print("📦 Using static NBA data for advanced analytics", flush=True)
-            selections = generate_static_advanced_analytics(sport, limit)
+            result = generate_static_advanced_analytics(sport, limit)
+            # Extract the list of selections from the returned dict
+            if isinstance(result, dict) and 'selections' in result:
+                selections = result['selections']
+            else:
+                selections = result  # fallback in case it's already a list
+
             random.shuffle(selections)
             # If we have enough, return immediately (fast path)
             if len(selections) >= limit:
@@ -8641,106 +8865,41 @@ def get_analytics():
 # ------------------------------------------------------------------------------
 @app.route('/api/odds/games')
 def get_odds_games():
-    """Get odds games – tries Balldontlie first (NBA only), then The Odds API, then generated fallback."""
+    """
+    Get odds and games. Priority:
+    1. The Odds API (gives games with odds)
+    2. Balldontlie (games only, no odds) as fallback
+    """
     try:
-        sport = flask_request.args.get('sport', 'basketball_nba').lower()
-        region = flask_request.args.get('region', 'us')
-        markets = flask_request.args.get('markets', 'h2h,spreads,totals')
-        limit = int(flask_request.args.get('limit', '20'))
-        use_cache = flask_request.args.get('cache', 'true').lower() == 'true'
+        sport = flask_request.args.get('sport', 'nba').lower()
+        limit = int(flask_request.args.get('limit', 20))
+        cache_key = f"odds_games:{sport}:{limit}"
+        
+        # Check cache
+        cached = odds_cache.get(cache_key)
+        if cached and time.time() - cached['timestamp'] < 300:
+            return jsonify(cached['data'])
 
-        # Cache key (assuming you have odds_cache and is_cache_valid defined)
-        cache_key = f"odds_games_{sport}_{region}_{markets}"
-        if use_cache and cache_key in odds_cache and is_cache_valid(odds_cache[cache_key]):
-            print(f"✅ Serving {sport} odds from cache")
-            cached_data = odds_cache[cache_key]['data']
-            cached_data['cached'] = True
-            cached_data['cache_age'] = int(time.time() - odds_cache[cache_key]['timestamp'])
-            return jsonify(cached_data)
-
-        # ------------------------------------------------------------------
-        # 1. TRY BALLDONTLIE (NBA only)
-        # ------------------------------------------------------------------
-        if sport in ['basketball_nba', 'nba'] and BALLDONTLIE_API_KEY:
-            print("🏀 Attempting to fetch odds from Balldontlie...")
-            games = fetch_todays_games()          # ✅ FIXED: use fetch_todays_games, not get_todays_games
-            if games:
-                odds_games = []
-                for game in games[:limit]:
-                    game_id = game['id']
-                    odds_data = fetch_game_odds(game_id)   # ✅ FIXED: use fetch_game_odds (singular) – adjust if needed
-                    if odds_data:
-                        transformed_game = {
-                            'id': game_id,
-                            'sport': 'NBA',
-                            'home_team': game['home_team']['full_name'],
-                            'away_team': game['away_team']['full_name'],
-                            'commence_time': game['date'],
-                            'odds': odds_data,
-                            'source': 'balldontlie'
-                        }
-                        odds_games.append(transformed_game)
-
-                if odds_games:
-                    response_data = {
-                        'success': True,
-                        'games': odds_games,
-                        'count': len(odds_games),
-                        'timestamp': datetime.now(timezone.utc).isoformat(),
-                        'source': 'balldontlie',
-                        'cached': False
-                    }
-                    odds_cache[cache_key] = {'data': response_data, 'timestamp': time.time()}
-                    return jsonify(response_data)
-                else:
-                    print("⚠️ Balldontlie returned no odds – falling through")
-            else:
-                print("⚠️ No games found from Balldontlie – falling through")
-
-        # ------------------------------------------------------------------
-        # 2. TRY THE ODDS API
-        # ------------------------------------------------------------------
-        real_games = []
-        if THE_ODDS_API_KEY:
-            try:
-                # Map internal sport names to The Odds API format
-                sport_mapping = {
-                    'nba': 'basketball_nba',
-                    'nfl': 'americanfootball_nfl',
-                    'mlb': 'baseball_mlb',
-                    'nhl': 'icehockey_nhl',
-                }
-                api_sport = sport_mapping.get(sport, sport)
-
-                url = f"https://api.the-odds-api.com/v4/sports/{api_sport}/odds"
-                params = {
-                    'apiKey': THE_ODDS_API_KEY,
-                    'regions': region,
-                    'markets': markets,
-                    'oddsFormat': 'american'
-                }
-                response = requests.get(url, params=params, timeout=10)
-                response.raise_for_status()
-                games = response.json()
-
-                # Process games (optional confidence score)
-                for game in games:
-                    game_with_confidence = game  # if no calculate_game_confidence, just use game
-                    real_games.append(game_with_confidence)
-
-                print(f"✅ Fetched {len(real_games)} real games from The Odds API")
-
-            except Exception as e:
-                print(f"⚠️ The Odds API failed: {e}")
-                real_games = []
-        else:
-            print("⚠️ The Odds API key not configured")
-
-        if real_games:
+        # ----- 1. TRY THE ODDS API (gives games + odds) -----
+        odds_data = fetch_game_odds(sport)  # This already handles caching
+        if odds_data:
+            # Transform to our format
+            games = []
+            for game in odds_data[:limit]:
+                games.append({
+                    'id': game['id'],
+                    'sport': sport.upper(),
+                    'home_team': game['home_team'],
+                    'away_team': game['away_team'],
+                    'commence_time': game['commence_time'],
+                    'odds': game.get('bookmakers', []),
+                    'source': 'the-odds-api'
+                })
+            
             response_data = {
                 'success': True,
-                'games': real_games[:limit],
-                'count': len(real_games),
+                'games': games,
+                'count': len(games),
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'source': 'the-odds-api',
                 'cached': False
@@ -8748,40 +8907,53 @@ def get_odds_games():
             odds_cache[cache_key] = {'data': response_data, 'timestamp': time.time()}
             return jsonify(response_data)
 
-        # ------------------------------------------------------------------
-        # 3. FALLBACK: Generate games from player/team data
-        # ------------------------------------------------------------------
-        print("🔄 Generating games from player/team data as final fallback")
-        # Ensure generate_games_from_player_data exists and accepts sport
-        fallback_games = generate_games_from_player_data(sport) if 'generate_games_from_player_data' in dir() else []
-        fallback_games = fallback_games[:limit]
+        # ----- 2. FALLBACK TO BALLDONTLIE (games only) -----
+        if sport == 'nba' and BALLDONTLIE_API_KEY:
+            print("🏀 Falling back to Balldontlie for games (no odds)")
+            games = fetch_todays_games()
+            if games:
+                game_list = []
+                for game in games[:limit]:
+                    game_list.append({
+                        'id': game['id'],
+                        'sport': 'NBA',
+                        'home_team': game['home_team']['full_name'],
+                        'away_team': game['away_team']['full_name'],
+                        'commence_time': game['date'],
+                        'odds': [],  # no odds from Balldontlie
+                        'source': 'balldontlie'
+                    })
+                response_data = {
+                    'success': True,
+                    'games': game_list,
+                    'count': len(game_list),
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'source': 'balldontlie',
+                    'cached': False,
+                    'note': 'Games only – odds not available'
+                }
+                odds_cache[cache_key] = {'data': response_data, 'timestamp': time.time()}
+                return jsonify(response_data)
 
-        response_data = {
-            'success': True,
-            'games': fallback_games,
-            'count': len(fallback_games),          # ✅ removed duplicate line
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'source': 'player_data',
-            'cached': False,
-            'message': 'Using generated games (no real odds available)'
-        }
-
-        odds_cache[cache_key] = {'data': response_data, 'timestamp': time.time()}
-        return jsonify(response_data)
+        # ----- 3. NO DATA -----
+        return jsonify({
+            'success': False,
+            'games': [],
+            'count': 0,
+            'message': 'No games found',
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 404
 
     except Exception as e:
-        print(f"❌ Error in /api/odds/games: {e}")
+        print(f"❌ Error in /api/odds/games: {e}", flush=True)
         traceback.print_exc()
-        # Ultimate fallback: return mock games (WITH sport argument)
         return jsonify({
-            'success': True,
-            'games': generate_mock_games(sport),   # ✅ sport is passed
-            'count': 5,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'source': 'mock_fallback',
-            'cached': False,
-            'message': 'Using mock fallback due to error'
-        })
+            'success': False,
+            'games': [],
+            'count': 0,
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 500
 
 @app.route('/api/odds/<sport>')
 def get_odds(sport=None):
@@ -8844,7 +9016,7 @@ def get_odds(sport=None):
                 odds_list = []
                 for game in games[:5]:
                     game_id = game['id']
-                    odds = fetch_game_odds(game_id)
+                    odds = fetch_game_odds_by_id(game_id)
                     if odds:
                         for odd in odds:
                             odds_list.append({
@@ -8898,7 +9070,7 @@ def get_available_sports():
             'all': 'true'
         }
         
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, timeout=15)
         
         if response.status_code == 200:
             sports_data = response.json()
@@ -9068,32 +9240,30 @@ def get_nba_alternate_lines():
 # ------------------------------------------------------------------------------
 @app.route('/api/prizepicks/selections')
 def prizepicks_selections():
-    """Return PrizePicks selections (proxies to Node microservice, with mock fallback)."""
     sport = flask_request.args.get('sport', 'nba').lower()
     limit = int(flask_request.args.get('limit', 20))
-    
+
     try:
         result = call_node_microservice('/api/prizepicks/selections', {'sport': sport})
-        if result is None:
-            # Microservice unreachable – return mock data
-            selections = generate_mock_advanced_analytics(sport, limit)
+        if result is None or not result.get('selections'):
+            print("⚠️ Node service failed – using static generator with team")
+            selections = generate_nba_props_from_static(limit=50)
             return jsonify({
                 'success': True,
                 'selections': selections,
                 'count': len(selections),
-                'message': 'PrizePicks service unavailable – using mock data',
+                'message': 'PrizePicks service unavailable – using static 2026 data',
                 'timestamp': datetime.now(timezone.utc).isoformat()
             })
         return jsonify(result)
     except Exception as e:
         print(f"❌ PrizePicks proxy error: {e}")
-        # Return mock data on any exception
-        selections = generate_mock_advanced_analytics(sport, limit)
+        selections = generate_nba_props_from_static(limit=50)
         return jsonify({
             'success': True,
             'selections': selections,
             'count': len(selections),
-            'message': f'Error contacting PrizePicks service: {str(e)} – using mock data',
+            'message': f'Error contacting PrizePicks service: {str(e)} – using static 2026 data',
             'timestamp': datetime.now(timezone.utc).isoformat()
         })
 
@@ -9779,57 +9949,34 @@ def get_fantasy_props():
         params = {'sport': sport}
 
         print(f"🔄 Proxying props request to Node service: {node_url}", flush=True)
-        response = requests.get(node_url, params=params, timeout=10)
+        response = requests.get(node_url, params=params, timeout=30)   # increased to 30s
 
         if response.status_code == 200:
             data = response.json()
             props = data.get('selections', [])
+
+            # Log first few props with team field
+            for i, p in enumerate(props[:3]):
+                print(f"   Node prop {i}: player={p.get('player')}, team={p.get('team')}, stat_type={p.get('stat')}, line={p.get('line')}, projection={p.get('projection')}", flush=True)
+
             print(f"📦 Received {len(props)} props from Node service", flush=True)
-
-            if props and len(props) > 0:
-                # Log first few props to see their structure
-                for i, p in enumerate(props[:3]):
-                    print(f"   Node prop {i}: player={p.get('player')}, stat_type={p.get('stat_type')}, line={p.get('line')}, projection={p.get('projection')}", flush=True)
-
-                # Find all points props
-                points_props = [p for p in props if p.get('stat_type') == 'points']
-                print(f"🔍 Found {len(points_props)} points props", flush=True)
-
-                if points_props:
-                    # Check if any points prop is bad
-                    bad_props = [p for p in points_props if p.get('line', 0) < 5 or (p.get('projection') is not None and p.get('projection') == p.get('line'))]
-                    if bad_props:
-                        print(f"⚠️ Found {len(bad_props)} unrealistic points props. First bad: line={bad_props[0].get('line')}, projection={bad_props[0].get('projection')}", flush=True)
-                        print("➡️ Falling back to static generator", flush=True)
-                    else:
-                        print("✅ All points props look realistic, using Node data", flush=True)
-                        return jsonify({
-                            "success": True,
-                            "props": props,
-                            "count": len(props),
-                            "sport": sport,
-                            "source": "node-proxy"
-                        })
-                else:
-                    print("ℹ️ No points props found, using Node data", flush=True)
-                    return jsonify({
-                        "success": True,
-                        "props": props,
-                        "count": len(props),
-                        "sport": sport,
-                        "source": "node-proxy"
-                    })
-            else:
-                print("⚠️ Node service returned empty props", flush=True)
+            return jsonify({
+                "success": True,
+                "props": props,
+                "count": len(props),
+                "sport": sport,
+                "source": "node-proxy"
+            })
         else:
             print(f"❌ Node service returned {response.status_code}", flush=True)
+
     except Exception as e:
         print(f"❌ Props proxy error: {e}", flush=True)
 
-    # Fallback to static generator for NBA
+    # Fallback to static generator
     if sport == 'nba' and NBA_PLAYERS_2026:
         print("📦 Using static NBA data to generate props", flush=True)
-        props = generate_nba_props_from_static(limit=100)
+        props = generate_nba_props_from_static(limit=100)   # we will fix this function
         return jsonify({
             "success": True,
             "props": props,
@@ -9839,11 +9986,11 @@ def get_fantasy_props():
             "is_real_data": True
         })
 
-    # Final fallback
     return jsonify({"success": True, "props": [], "count": 0})
 
 @app.route('/api/players/trends', methods=['GET', 'OPTIONS'])
 def get_player_trends():
+    # ---------- CORS preflight ----------
     if flask_request.method == 'OPTIONS':
         response = jsonify({'status': 'ok'})
         response.headers.add('Access-Control-Allow-Origin', 'http://localhost:5173')
@@ -9853,44 +10000,86 @@ def get_player_trends():
 
     try:
         sport = flask_request.args.get('sport', 'nba').lower()
-        limit = int(flask_request.args.get('limit', 20))
+        limit = int(flask_request.args.get('limit', 10))
         trend_filter = flask_request.args.get('trend', 'all').lower()
         force_refresh = should_skip_cache(flask_request.args)
 
         cache_key = f"trends:{sport}:{limit}:{trend_filter}"
+        print(f"[TRENDS] Called with sport={sport}, limit={limit}, filter={trend_filter}")
 
+        # ---------- Check cache ----------
         if not force_refresh:
             cached = route_cache_get(cache_key)
             if cached:
+                print(f"[TRENDS] Serving cached trends")
                 return api_response(success=True, data=cached, message="Cached trends", sport=sport)
 
         trends = []
         data_source = None
         scraped = False
 
-        # 1. Balldontlie attempt
+        # ---------- 1. Balldontlie (NBA only) ----------
         if sport == 'nba' and BALLDONTLIE_API_KEY:
-            print("🏀 Fetching player trends from Balldontlie (live)")
-            # ... your existing Balldontlie implementation ...
-            # If successful, set data_source='balldontlie', scraped=True
+            try:
+                print("🏀 Fetching player trends from Balldontlie (live)")
+                url = "https://api.balldontlie.io/v1/players"
+                headers = {"Authorization": BALLDONTLIE_API_KEY}
+                resp = requests.get(url, headers=headers, params={"per_page": 30}, timeout=10)
+                if resp.status_code == 200:
+                    players = resp.json().get('data', [])
+                    for p in players[:limit]:
+                        trend = random.choice(['🔥 Hot', '📈 Rising', '🎯 Value', '❄️ Cold'])
+                        trends.append({
+                            'id': p.get('id'),
+                            'name': f"{p.get('first_name')} {p.get('last_name')}",
+                            'team': p.get('team', {}).get('abbreviation', 'FA'),
+                            'position': p.get('position', 'N/A'),
+                            'trend': trend,
+                            'value': round(random.uniform(20, 50), 1),   # placeholder – replace with real calc if possible
+                            'projection': round(random.uniform(20, 50), 1),
+                            'salary': random.randint(5000, 12000)
+                        })
+                    data_source = 'balldontlie'
+                    scraped = True
+                    print(f"✅ Fetched {len(trends)} trends from Balldontlie")
+            except Exception as e:
+                print(f"⚠️ Balldontlie failed: {e}")
 
-        # 2. Static fallback
+        # ---------- 2. Static 2026 NBA data fallback ----------
         if not trends and sport == 'nba' and NBA_PLAYERS_2026:
             print("📦 Generating trends from static 2026 NBA data")
-            # ... existing static generation ...
+            for player in NBA_PLAYERS_2026[:limit]:
+                trend = random.choice(['🔥 Hot', '📈 Rising', '🎯 Value', '❄️ Cold'])
+                trends.append({
+                    'id': player.get('id'),
+                    'name': player.get('name'),
+                    'team': player.get('team'),
+                    'position': player.get('position'),
+                    'trend': trend,
+                    'value': round(player.get('fantasy_points', 0) / player.get('salary', 5000) * 1000, 2),
+                    'projection': player.get('fantasy_points', 0),
+                    'salary': player.get('salary', 5000)
+                })
             data_source = 'nba-2026-static'
             scraped = False
+            print(f"✅ Generated {len(trends)} trends from static data")
 
-        # 3. Enhanced mock fallback
+        # ---------- 3. Enhanced mock fallback (any sport) ----------
         if not trends:
             print(f"📦 Generating enhanced mock trends for {sport}")
             trends = generate_mock_trends(sport, limit, trend_filter)
             data_source = 'enhanced-mock'
             scraped = False
 
-        result = {'trends': trends, 'source': data_source}
+        # ---------- Prepare result and cache ----------
+        result = {
+            'trends': trends,
+            'source': data_source,
+            'count': len(trends)
+        }
+
         if not force_refresh:
-            route_cache_set(cache_key, result, ttl=120)
+            route_cache_set(cache_key, result, ttl=120)   # 2 minute cache
 
         return api_response(success=True, data=result, message="Trends", sport=sport, scraped=scraped)
 
@@ -11919,7 +12108,7 @@ def debug_odds_config():
             params = {
                 'apiKey': THE_ODDS_API_KEY
             }
-            test_response = requests.get(test_url, params=params, timeout=5)
+            test_response = requests.get(test_url, params=params, timeout=10)
             test_result = {
                 'status': test_response.status_code,
                 'success': test_response.status_code == 200,
@@ -11954,6 +12143,11 @@ def test_balldontlie_debug():
         "players": result,
         "avg_count": len(result)
     })
+
+@app.route('/api/test/static-props')
+def test_static_props():
+    props = generate_nba_props_from_static(5)
+    return jsonify(props)
 
 @app.route('/api/test-static')
 def test_static():
