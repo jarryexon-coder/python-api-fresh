@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request as flask_request 
+from flask import Flask, jsonify, request as flask_request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -6,7 +6,7 @@ from flask import request
 import requests
 import json
 import os
-import time
+import time 
 import hashlib
 import traceback
 import uuid
@@ -17,6 +17,7 @@ import subprocess
 import sys
 import asyncio
 import aiohttp
+import re
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -31,19 +32,35 @@ from nba_static_data import NBA_PLAYERS_2026
 from data_pipeline import UnifiedNBADataPipeline
 from difflib import get_close_matches
 _player_name_cache = {}  # <-- add this
+import redis
+from redis import Redis
+
+# Import from utils
+from utils import (
+    american_to_implied,
+    decimal_to_american,
+    calculate_confidence,
+    get_confidence_level,
+    get_full_team_name,
+    balldontlie_request,
+    sanitize_data,
+    num_tokens_from_string,
+    run_async,
+    safe_load_json,
+    make_api_request_with_retry,  
+    get_cache_key,
+    is_cache_valid,   
+    should_skip_cache,
+    cached,                 # in‑memory decorator
+    cached_redis,           # Redis decorator factory
+)
+
+# Initialize Redis client (if using Redis caching)
+redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
 # At the very top of the file (after imports), add these empty dicts
 PLAYER_NAME_TO_TEAM = {}
 PLAYER_NAME_TO_POSITION = {}
-
-# Helper function (place before build_props_response)
-def american_to_implied(odds):
-    if odds is None:
-        return 0.5
-    if odds > 0:
-        return 100 / (odds + 100)
-    else:
-        return -odds / (-odds + 100)
 
 def build_props_response(sport):
     print("🔥🔥🔥 NEW build_props_response LOADED 🔥🔥🔥")
@@ -191,6 +208,14 @@ def save_props_to_cache(sport, data):
     with open(path, 'w') as f:
         json.dump(data, f)
 
+data, error = balldontlie_request('players', {'per_page': 100})
+if error:
+    # handle error
+    pass  # TODO: implement error handling
+else:
+    # process data
+    pass  # TODO: implement data processing
+
 # Balldontlie fetchers (separate file, but we'll import)
 from balldontlie_fetchers import (
     fetch_player_injuries,
@@ -276,6 +301,127 @@ API_CONFIG = {
 # Legacy single‑key variables for backward compatibility
 THE_ODDS_API_KEY = ODDS_API_KEY
 
+import os
+import requests
+
+TANK01_API_HOST = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
+TANK01_API_KEY = os.environ.get("TANK01_API_KEY", "your-key-here")  # from RapidAPI
+
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+redis_client = redis.from_url(REDIS_URL)
+
+def call_tank01(endpoint, params=None):
+    """Generic function to call Tank01 API."""
+    url = f"https://{TANK01_API_HOST}/{endpoint}"
+    headers = {
+        "x-rapidapi-host": TANK01_API_HOST,
+        "x-rapidapi-key": TANK01_API_KEY
+    }
+    response = requests.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    return response.json()
+
+def get_spring_prospects(limit=30):
+    """
+    Identify prospects as players with ADP > 200 (rookies) and not in depth charts? 
+    Actually depth charts include all active players, so prospects will be in depth charts.
+    Better: use ADP rank and age (if available).
+    """
+    adp_list = fetch_adp_list(limit=500)  # get many
+    projections = fetch_all_projections()
+    prospects = []
+
+    for item in adp_list:
+        overall_adp = float(item.get("overallADP", 999))
+        # Arbitrary threshold: ADP > 200 indicates rookie/uncertain
+        if overall_adp > 200:
+            player_id = item.get("playerID")
+            proj = projections.get(str(player_id), {})
+            # Determine if hitter or pitcher
+            is_pitcher = "P" in item.get("posADP", "")
+            if is_pitcher:
+                pitching = proj.get("Pitching", {})
+                prospects.append({
+                    "id": player_id,
+                    "name": item.get("longName"),
+                    "team": proj.get("team", ""),
+                    "position": "P",
+                    "era": pitching.get("ERA"),
+                    "whip": pitching.get("WHIP"),
+                    "so": pitching.get("SO"),
+                    "ip": pitching.get("InningsPitched"),
+                    "is_prospect": True
+                })
+            else:
+                hitting = proj.get("Hitting", {})
+                prospects.append({
+                    "id": player_id,
+                    "name": item.get("longName"),
+                    "team": proj.get("team", ""),
+                    "position": hitting.get("pos") or item.get("posADP", "").replace("1","").replace("2",""),
+                    "avg": hitting.get("AVG"),
+                    "hr": hitting.get("HR"),
+                    "rbi": hitting.get("RBI"),
+                    "ops": hitting.get("OPS"),
+                    "is_prospect": True
+                })
+        if len(prospects) >= limit:
+            break
+
+    return prospects
+
+def fetch_all_projections():
+    """Fetch fantasy projections for all players."""
+    data = call_tank01("getMLBProjections", {"projectionType": "7", "fantasyPoints": "true"})
+    return data.get("body", {}).get("playerProjections", {})
+
+def get_player_projection(player_id, projections_cache=None):
+    """Return projection for a single player."""
+    if projections_cache is None:
+        projections_cache = fetch_all_projections()
+    return projections_cache.get(str(player_id), {})
+
+def get_spring_prospects(limit=30):
+    """Identify prospects using ADP > 200."""
+    adp_list = fetch_adp_list(limit=500)
+    projections = fetch_all_projections()
+    prospects = []
+    for item in adp_list:
+        overall_adp = float(item.get("overallADP", 999))
+        if overall_adp > 200:
+            player_id = item.get("playerID")
+            proj = projections.get(str(player_id), {})
+            is_pitcher = "P" in item.get("posADP", "")
+            if is_pitcher:
+                pitching = proj.get("Pitching", {})
+                prospects.append({
+                    "id": player_id,
+                    "name": item.get("longName"),
+                    "team": proj.get("team", ""),
+                    "position": "P",
+                    "era": pitching.get("ERA"),
+                    "whip": pitching.get("WHIP"),
+                    "so": pitching.get("SO"),
+                    "ip": pitching.get("InningsPitched"),
+                    "is_prospect": True
+                })
+            else:
+                hitting = proj.get("Hitting", {})
+                prospects.append({
+                    "id": player_id,
+                    "name": item.get("longName"),
+                    "team": proj.get("team", ""),
+                    "position": hitting.get("pos") or item.get("posADP", "").replace("1","").replace("2",""),
+                    "avg": hitting.get("AVG"),
+                    "hr": hitting.get("HR"),
+                    "rbi": hitting.get("RBI"),
+                    "ops": hitting.get("OPS"),
+                    "is_prospect": True
+                })
+        if len(prospects) >= limit:
+            break
+    return prospects
+
 # ==============================================================================
 # 3. RATE LIMITING & CACHING SETUP
 # ==============================================================================
@@ -325,18 +471,6 @@ def set_cache(key, data):
         'timestamp': time.time()
     }
 
-def get_cache_key(endpoint, params):
-    """Generate a consistent cache key from endpoint and parameters."""
-    key_str = f"{endpoint}:{json.dumps(params, sort_keys=True)}"
-    return hashlib.md5(key_str.encode()).hexdigest()
-
-def is_cache_valid(cache_entry, cache_minutes=5):
-    """Check if a cache entry is still valid."""
-    if not cache_entry:
-        return False
-    cache_age = time.time() - cache_entry['timestamp']
-    return cache_age < (cache_minutes * 60)
-
 def get_cached_data(key):
     """Stub for your cache system – implement if needed."""
     return None
@@ -344,10 +478,6 @@ def get_cached_data(key):
 def cache_data(key, data, ttl_minutes=15):
     """Stub for your cache system – implement if needed."""
     pass
-
-def should_skip_cache(args):
-    """Check if force refresh is requested."""
-    return args.get('force', '').lower() in ('true', '1', 'yes')
 
 # Separate cache for API routes (not to be confused with the fetcher cache `_cache`)
 route_cache = {}
@@ -1601,13 +1731,6 @@ DEFAULT_EVENT_ID = "22200"
 # ==============================================================================
 # 5. DATABASE LOADING (JSON FILES)
 # ==============================================================================
-def safe_load_json(filename, default=None):
-    try:
-        with open(filename, 'r') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"⚠️ Could not load {filename}: {e}")
-        return default if default is not None else []
 
 players_data_list = safe_load_json('players_data_comprehensive_fixed.json', [])
 nfl_players_data = safe_load_json('nfl_players_data_comprehensive_fixed.json', [])
@@ -1818,6 +1941,42 @@ class UnifiedNBADataPipeline:
         print(f"Merged {len(unified_players)} players.")
         return unified_players
 
+@cached(ttl_seconds=300)
+def fetch_tank01_props(game_date, limit=50):
+    """Fetch player props for a given date from Tank01."""
+    try:
+        params = {
+            "gameDate": game_date.replace('-', ''),  # Tank01 uses YYYYMMDD
+            "playerProps": "true",
+            "itemFormat": "list"
+        }
+        data = call_tank01("getMLBBettingOdds", params)
+        games = data.get("body", [])
+        props = []
+        for game in games:
+            for prop in game.get("playerProps", []):
+                # Transform to your frontend format
+                player_id = prop.get("playerID")
+                bets = prop.get("propBets", {})
+                # Example mapping – adjust as needed
+                prop_item = {
+                    "id": f"prop-{player_id}-{game_date}",
+                    "player_id": player_id,
+                    "game_id": game.get("gameID"),
+                    "game_date": game_date,
+                    "team": game.get("homeTeam") if prop.get("isHome") else game.get("awayTeam"),
+                    "opponent": game.get("awayTeam") if prop.get("isHome") else game.get("homeTeam"),
+                    "props": bets  # send raw for frontend to parse
+                }
+                props.append(prop_item)
+        # Shuffle and limit (optional)
+        import random
+        random.shuffle(props)
+        return props[:limit]
+    except Exception as e:
+        print(f"❌ Error fetching props: {e}")
+        return None
+
 # Simple in‑memory cache for player names (consider adding TTL if needed)
 _player_name_cache = {}
 
@@ -1847,9 +2006,9 @@ def fetch_player_names_batch(player_ids):
         print("Update complete.")
 
 # Example standalone run (for testing)
-if __name__ == "__main__":
-    pipeline = UnifiedNBADataPipeline(sleeper_league_id="YOUR_LEAGUE_ID")
-    pipeline.run_daily_update()
+# if __name__ == "__main__":
+#    pipeline = UnifiedNBADataPipeline(sleeper_league_id="YOUR_LEAGUE_ID")
+#    pipeline.run_daily_update()
 
 # Load admin secret from environment
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "your-secret-here")  # set a strong secret
@@ -2130,16 +2289,6 @@ def call_node_microservice(path, params=None, method='GET', data=None):
         print(f"❌ Node microservice call failed: {e}")
         return {"success": False, "error": str(e)}
 
-def num_tokens_from_string(string: str, model: str = "gpt-3.5-turbo") -> int:
-    """Return token count for a string. Falls back to word count * 1.3 if tiktoken fails."""
-    try:
-        import tiktoken
-        encoding = tiktoken.encoding_for_model(model)
-        return len(encoding.encode(string))
-    except Exception:
-        # Rough estimate: 1 token ≈ 0.75 words, so words * 1.33
-        return int(len(string.split()) * 1.3)
-
 def _build_cors_preflight_response():
     """Build a response for the OPTIONS preflight request."""
     response = jsonify({'status': 'ok'})
@@ -2195,65 +2344,7 @@ def build_roster_context(sport):
 # Roster context cache
 roster_cache = {}
 
-# ========== DATA SANITIZATION ==========
-def sanitize_data(obj):
-    """Recursively convert sets to lists and handle unexpected types for JSON serialization."""
-    if isinstance(obj, dict):
-        return {k: sanitize_data(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [sanitize_data(v) for v in obj]
-    elif isinstance(obj, set):
-        print(f"⚠️ Converting set to list: {obj}")
-        return list(obj)
-    elif isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    else:
-        print(f"⚠️ Unexpected type {type(obj)} – converting to string")
-        return str(obj)
-
 # ========== ODDS & VALUE CALCULATIONS ==========
-def decimal_to_american(decimal_odds):
-    """Convert decimal odds to American format."""
-    if decimal_odds >= 2.0:
-        return int((decimal_odds - 1) * 100)
-    else:
-        return int(-100 / (decimal_odds - 1))
-
-def calculate_confidence(over_odds, under_odds):
-    """Calculate a confidence score from over/under odds (American format)."""
-    if not over_odds or not under_odds:
-        return 60
-    # Convert American to decimal for averaging
-    def to_decimal(american):
-        if american > 0:
-            return (american / 100) + 1
-        else:
-            return (100 / abs(american)) + 1
-    over_dec = to_decimal(over_odds)
-    under_dec = to_decimal(under_odds)
-    avg_odds = (over_dec + under_dec) / 2
-    if avg_odds < 1.8:
-        return 85
-    elif avg_odds > 2.2:
-        return 70
-    else:
-        return 75
-
-def get_full_team_name(team_abbrev):
-    """Map NBA team abbreviation to full name."""
-    nba_teams = {
-        'LAL': 'Los Angeles Lakers',
-        'GSW': 'Golden State Warriors',
-        'BOS': 'Boston Celtics',
-        'PHX': 'Phoenix Suns',
-        'MIL': 'Milwaukee Bucks',
-        'DEN': 'Denver Nuggets',
-        'DAL': 'Dallas Mavericks',
-        'MIA': 'Miami Heat',
-        'PHI': 'Philadelphia 76ers',
-        'LAC': 'Los Angeles Clippers'
-    }
-    return nba_teams.get(team_abbrev, team_abbrev)
 
 def build_balldontlie_response(sport):
     """
@@ -2353,125 +2444,6 @@ def build_balldontlie_response(sport):
         'is_real_data': True
     }
 
-def build_props_response(sport):
-    print(f"🏗️ build_props_response started for sport={sport}")
-
-    # Try The Odds API first
-    odds_props = []
-    try:
-        print(f"   ⚡ Attempting to fetch from The Odds API for {sport}...")
-        events = fetch_player_props(sport)
-        print(f"   ⚡ fetch_player_props returned {len(events) if events else 0} events")
-
-        if events:
-            print(f"   ⚡ Processing {len(events)} events...")
-            for event_idx, event in enumerate(events):
-                details = event.get('event_details', {})
-                home_team = details.get('home_team', '')
-                away_team = details.get('away_team', '')
-                commence_time = details.get('commence_time', '')
-                game_id = details.get('id', '')
-                print(f"      Event {event_idx+1}: {away_team} @ {home_team} (ID: {game_id})")
-
-                bookmakers = event.get('bookmakers', [])
-                print(f"         Found {len(bookmakers)} bookmakers")
-                for bm_idx, bookmaker in enumerate(bookmakers):
-                    markets = bookmaker.get('markets', [])
-                    print(f"            Bookmaker {bm_idx+1}: {bookmaker.get('title')} – {len(markets)} markets")
-                    for market in markets:
-                        market_key = market['key']
-                        outcomes = market.get('outcomes', [])
-                        print(f"               Market: {market_key} – {len(outcomes)} outcomes")
-                        # Group outcomes by (player_name, line)
-                        props_dict = {}
-                        for outcome in outcomes:
-                            # Extract player name – try description first, then outcome name
-                            player_name = outcome.get('description') or outcome.get('name')
-                            line = outcome.get('point')
-                            price = outcome.get('price')
-                            # Determine side
-                            desc = (outcome.get('description') or '').lower()
-                            name = (outcome.get('name') or '').lower()
-                            if 'over' in desc or 'over' in name:
-                                side = 'over'
-                            elif 'under' in desc or 'under' in name:
-                                side = 'under'
-                            else:
-                                print(f"                  ⚠️ Skipping outcome – cannot determine side: {outcome}")
-                                continue
-
-                            if not player_name or line is None:
-                                print(f"                  ⚠️ Skipping outcome – missing player_name or line: {outcome}")
-                                continue
-
-                            key = (player_name, line)
-                            if key not in props_dict:
-                                props_dict[key] = {}
-                            props_dict[key][side] = price
-
-                        # Convert grouped data into props
-                        for (player_name, line), sides in props_dict.items():
-                            if 'over' not in sides or 'under' not in sides:
-                                print(f"                  ⚠️ Skipping {player_name} {line} – missing one side (over: {sides.get('over')}, under: {sides.get('under')})")
-                                continue
-                            over_odds = sides['over']
-                            under_odds = sides['under']
-
-                            # Optional: get team from static map if you built one
-                            team = ''  # you can add a lookup
-
-                            prop_id = f"{game_id}_{market_key}_{player_name}_{line}".replace(' ', '_')
-                            odds_props.append({
-                                'id': prop_id,
-                                'player': player_name,
-                                'team': team,
-                                'market': market_key,
-                                'line': line,
-                                'over_odds': over_odds,
-                                'under_odds': under_odds,
-                                'confidence': 50,
-                                'player_id': None,
-                                'position': None,
-                                'sport': sport.upper(),
-                                'is_real_data': True,
-                                'game': f"{away_team} @ {home_team}",
-                                'game_time': commence_time,
-                            })
-                            print(f"                  ✅ Added prop: {player_name} {market_key} O/U {line} ({over_odds}/{under_odds})")
-    except Exception as e:
-        print(f"   ❌ Exception during Odds API processing: {e}")
-        import traceback
-        traceback.print_exc()
-        odds_props = []
-
-    if odds_props:
-        print(f"✅ Using {len(odds_props)} props from The Odds API")
-        return {
-            'success': True,
-            'props': odds_props,
-            'count': len(odds_props),
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'source': 'theoddsapi',
-            'sport': sport,
-            'is_real_data': True
-        }
-    else:
-        print("⚠️ Falling back to Balldontlie")
-        return build_balldontlie_response(sport)
-
-def get_confidence_level(score):
-    """Convert numeric score to confidence level string."""
-    if score >= 80:
-        return 'very-high'
-    elif score >= 70:
-        return 'high'
-    elif score >= 60:
-        return 'medium'
-    elif score >= 50:
-        return 'low'
-    else:
-        return 'very-low'
-
 # ========== RATE LIMITING (if not using Flask‑Limiter for everything) ==========
 def is_rate_limited(ip, endpoint, limit=60, window=60):
     """Simple in‑memory rate limiter (uses global request_log)."""
@@ -2483,16 +2455,6 @@ def is_rate_limited(ip, endpoint, limit=60, window=60):
         return True
     request_log[ip].append(current_time)
     return False
-
-# ========== ASYNC HELPER ==========
-def run_async(coro):
-    """Run an async coroutine synchronously (for compatibility)."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 # ========== WEB SCRAPING HELPERS ==========
 async def fetch_page(url, headers=None):
@@ -3944,49 +3906,6 @@ def generate_player_props(sport='nba', count=20):
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# Generic retry helper (for SportsData.io and others)
-# ------------------------------------------------------------------------------
-
-def make_api_request_with_retry(url, headers=None, params=None, method='GET', max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            if method.upper() == 'GET':
-                response = requests.get(url, headers=headers, params=params, timeout=30)
-            elif method.upper() == 'POST':
-                response = requests.post(url, headers=headers, json=params, timeout=30)
-            else:
-                raise ValueError(f"Unsupported method: {method}")
-
-            if response.status_code == 200:
-                return response
-            elif response.status_code == 429:  # Rate limited
-                wait_time = (2 ** attempt) + random.random()
-                print(f"⚠️ Rate limited, waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait_time)
-                continue
-            elif response.status_code >= 500:  # Server error
-                wait_time = (1.5 ** attempt) + random.random()
-                print(f"⚠️ Server error {response.status_code}, waiting {wait_time:.1f}s")
-                time.sleep(wait_time)
-                continue
-            else:
-                return response
-        except requests.exceptions.Timeout:
-            wait_time = (2 ** attempt) + random.random()
-            print(f"⚠️ Timeout, waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
-            time.sleep(wait_time)
-            continue
-        except Exception as e:
-            print(f"⚠️ Request error: {e}")
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(1)
-    return None
-
-# ------------------------------------------------------------------------------
-# SportsData.io fetches
-# ------------------------------------------------------------------------------
-# ------------------------------------------------------------------------------
 # Balldontlie helpers (uses caching and make_request defined earlier)
 # ------------------------------------------------------------------------------
 # Note: BALLDONTLIE_API_KEY, BALLDONTLIE_HEADERS, make_request, get_cached, set_cache
@@ -4185,19 +4104,24 @@ def determine_strategy_from_query(query):
         return 'projection'
     return 'balanced'
 
-# ------------------------------------------------------------------------------
-# MLB fetches (if needed)
-# ------------------------------------------------------------------------------
-def fetch_mlb_players():
-    """Fetch MLB players from SportsData.io (if available)."""
-    if not API_CONFIG.get('sportsdata_mlb', {}).get('working'):
-        return None
-    url = f"{API_CONFIG['sportsdata_mlb']['base_url']}/stats/json/Players"
-    headers = {"Ocp-Apim-Subscription-Key": API_CONFIG['sportsdata_mlb']['key']}
-    response = make_api_request_with_retry(url, headers=headers)
-    if response and response.status_code == 200:
-        return response.json()
-    return None
+# ------------------------------------------------------------
+# NBA helper – convert PrizePicks props to phrases
+# ------------------------------------------------------------
+def fetch_nba_props_from_prizepicks():
+    """Fetch NBA props from your PrizePicks endpoint."""
+    try:
+        # Option A: call the internal function that powers /api/fantasy/props
+        # from your_fantasy_module import get_prizepicks_props
+        # return get_prizepicks_props(sport='nba')
+        
+        # Option B: make a loopback HTTP request (simpler for now)
+        resp = requests.get('http://localhost:8000/api/fantasy/props?sport=nba&source=prizepicks', timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get('props', [])
+    except Exception as e:
+        print(f"⚠️ fetch_nba_props failed: {e}")
+    return []
 
 def fetch_mlb_stats(stat_type='season', year=None):
     """Fetch MLB stats (hitting, pitching, standings) from SportsData.io."""
@@ -4219,6 +4143,7 @@ def fetch_mlb_stats(stat_type='season', year=None):
         return response.json()
     return None
 
+@cached(ttl_seconds=300)
 def fetch_odds_from_api(sport):
     if not THE_ODDS_API_KEY:
         print("⚠️ THE_ODDS_API_KEY not set")
@@ -4252,6 +4177,600 @@ def fetch_odds_from_api(sport):
     except Exception as e:
         print(f"⚠️ The Odds API request failed: {e}")
         return None
+
+@cached(ttl_seconds=300)
+def fetch_tank01_props(game_date, limit=50):
+    """Fetch player props for a given date from Tank01."""
+    try:
+        params = {
+            "gameDate": game_date.replace('-', ''),  # Tank01 uses YYYYMMDD
+            "playerProps": "true",
+            "itemFormat": "list"
+        }
+        data = call_tank01("getMLBBettingOdds", params)
+        games = data.get("body", [])
+        props = []
+        for game in games:
+            for prop in game.get("playerProps", []):
+                # Transform to your frontend format
+                player_id = prop.get("playerID")
+                bets = prop.get("propBets", {})
+                # Example mapping – adjust as needed
+                prop_item = {
+                    "id": f"prop-{player_id}-{game_date}",
+                    "player_id": player_id,
+                    "game_id": game.get("gameID"),
+                    "game_date": game_date,
+                    "team": game.get("homeTeam") if prop.get("isHome") else game.get("awayTeam"),
+                    "opponent": game.get("awayTeam") if prop.get("isHome") else game.get("homeTeam"),
+                    "props": bets  # send raw for frontend to parse
+                }
+                props.append(prop_item)
+        # Shuffle and limit (optional)
+        import random
+        random.shuffle(props)
+        return props[:limit]
+    except Exception as e:
+        print(f"❌ Error fetching props: {e}")
+        return None
+
+@cached(ttl_seconds=3600)
+def fetch_tank01_players():
+    """Fetch all MLB players from Tank01."""
+    data = call_tank01("getMLBPlayers")
+    # The response body is a dict with playerID keys
+    players_list = []
+    for player_id, player_info in data.get("body", {}).items():
+        players_list.append({
+            "PlayerID": player_id,
+            "Name": player_info.get("longName"),
+            "Team": player_info.get("team"),
+            "Position": player_info.get("pos"),
+            "Jersey": player_info.get("jerseyNum"),
+            "BatHand": player_info.get("bat"),
+            "ThrowHand": player_info.get("throw"),
+            "Height": player_info.get("height"),
+            "Weight": player_info.get("weight"),
+            "BirthDate": player_info.get("bDay"),
+            "College": player_info.get("college")
+        })
+    return players_list
+
+@cached(ttl_seconds=300)
+def fetch_mlb_props(date=None, limit=100):
+    """Get MLB props from Tank01 or fallback to mock."""
+    try:
+        # Use your existing function (adjust name as needed)
+        props = fetch_tank01_props(date, limit)  # from your MLB module
+        if props:
+            return props
+    except Exception as e:
+        print(f"⚠️ fetch_tank01_props failed: {e}")
+    # fallback to mock
+    players = generate_mlb_players(100)
+    return generate_mlb_props(players, date or datetime.now().strftime('%Y-%m-%d'))
+
+@cached(ttl_seconds=3600)
+def fetch_mlb_standings():
+    """Get MLB standings (mock for now, can be replaced with real data)."""
+    return generate_mlb_standings()
+
+@cached(ttl_seconds=300)
+def fetch_mlb_games_data(date=None):
+    """Get MLB games from Tank01."""
+    from your_mlb_module import get_mlb_games  # or copy logic from /api/mlb/games
+    # If you have a function that returns games, use it; otherwise adapt.
+    # For example, reuse the Tank01 call:
+    try:
+        date_str = (date or datetime.now().strftime('%Y-%m-%d')).replace('-', '')
+        url = f"https://tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com/getMLBGamesForDate?gameDate={date_str}"
+        headers = {'x-rapidapi-host': TANK01_API_HOST, 'x-rapidapi-key': RAPIDAPI_KEY}
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            games = []
+            # parse as in your /api/mlb/games endpoint
+            # ... (copy the parsing logic from your existing route)
+            return games
+    except Exception as e:
+        print(f"⚠️ fetch_mlb_games_data failed: {e}")
+    return generate_mock_spring_games()  # fallback
+
+@cached(ttl_seconds=300)
+def fetch_nhl_props_from_odds_api(game_date=None):
+    """
+    Fetch NHL player props from The Odds API.
+    Returns a list of props with player, team, opponent, stat, line, odds, etc.
+    If game_date is provided, it's used to filter by commencement time (optional).
+    """
+    if not THE_ODDS_API_KEY:
+        print("⚠️ THE_ODDS_API_KEY not set – cannot fetch NHL props")
+        return None
+
+    sport_key = 'icehockey_nhl'
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+    params = {
+        'apiKey': THE_ODDS_API_KEY,
+        'regions': 'us',
+        'markets': 'player_points,player_assists,player_shots_on_goal',  # adjust as needed
+        'oddsFormat': 'american',
+        'dateFormat': 'iso'
+    }
+    if game_date:
+        # Optional: filter by date (the API uses commence_time)
+        params['commenceTimeFrom'] = f"{game_date}T00:00:00Z"
+        params['commenceTimeTo'] = f"{game_date}T23:59:59Z"
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code != 200:
+            print(f"⚠️ The Odds API returned {response.status_code}")
+            return None
+
+        games_data = response.json()
+        props = []
+
+        for game in games_data:
+            home_team = game['home_team']
+            away_team = game['away_team']
+            commence_time = game['commence_time']
+
+            for bookmaker in game['bookmakers']:
+                for market in bookmaker['markets']:
+                    # market key like 'player_points', 'player_assists', etc.
+                    market_key = market['key']
+                    if not market_key.startswith('player_'):
+                        continue
+
+                    stat_type = market_key.replace('player_', '')
+                    for outcome in market['outcomes']:
+                        # outcome typically has: name, price, point, description?
+                        # For player props, 'description' often holds player name.
+                        player_name = outcome.get('description') or outcome.get('name', '')
+                        # The Odds API often puts the player name in 'name' for player props.
+                        # But sometimes it's 'description'. We'll try both.
+                        if not player_name:
+                            continue
+
+                        # Attempt to extract team from game context – crude but works if player name is unique
+                        # In reality, you'd need a player-team mapping. We'll set team to home/away based on name.
+                        # This is a simplification; you may want to use a lookup.
+                        team = home_team if player_name in home_team else away_team if player_name in away_team else 'NHL'
+
+                        line = outcome.get('point')
+                        if line is None:
+                            continue
+
+                        odds = outcome['price']
+
+                        prop = {
+                            'player': player_name,
+                            'team': team,
+                            'opponent': away_team if team == home_team else home_team,
+                            'stat': stat_type,
+                            'line': line,
+                            'projection': line,  # start with line as projection
+                            'odds': odds,
+                            'bookmaker': bookmaker['title'],
+                            'game_date': commence_time.split('T')[0],
+                            'game_id': game['id']
+                        }
+                        props.append(prop)
+
+        print(f"📦 Fetched {len(props)} NHL props from The Odds API")
+        return props
+
+    except Exception as e:
+        print(f"⚠️ Error fetching NHL props from The Odds API: {e}")
+        return None
+
+@cached(ttl_seconds=3600)
+def fetch_nhl_defensive_stats(days_back=30):
+    """
+    Fetch NHL defensive stats for all teams by averaging goals allowed
+    (and optionally shots allowed) from games played in the last `days_back` days.
+    Returns a dict: team_abbrev -> { goals_against_per_game, shots_against_per_game }
+    """
+    if not RAPIDAPI_KEY:
+        print("⚠️ RAPIDAPI_KEY not set – cannot fetch NHL defensive stats")
+        return {}
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_back)
+
+    team_stats = {}
+
+    current = start_date
+    while current <= end_date:
+        date_str = current.strftime("%Y-%m-%d")
+        games = get_real_nhl_games(date_str)   # uses your existing function
+        for game in games:
+            if game.get('status') != 'final':
+                continue
+
+            home_team = game.get('home_team')
+            away_team = game.get('away_team')
+            home_score = game.get('home_score')
+            away_score = game.get('away_score')
+
+            if not home_team or not away_team or home_score is None or away_score is None:
+                continue
+
+            # Home team allowed away_score goals
+            if home_team not in team_stats:
+                team_stats[home_team] = {'goals_allowed': 0, 'games': 0}
+            team_stats[home_team]['goals_allowed'] += away_score
+            team_stats[home_team]['games'] += 1
+
+            # Away team allowed home_score goals
+            if away_team not in team_stats:
+                team_stats[away_team] = {'goals_allowed': 0, 'games': 0}
+            team_stats[away_team]['goals_allowed'] += home_score
+            team_stats[away_team]['games'] += 1
+
+        current += timedelta(days=1)
+
+    defensive_stats = {}
+    for team, stats in team_stats.items():
+        if stats['games'] > 0:
+            defensive_stats[team] = {
+                'goals_against_per_game': round(stats['goals_allowed'] / stats['games'], 2),
+            }
+
+    print(f"✅ Computed NHL defensive stats for {len(defensive_stats)} teams")
+    return defensive_stats
+
+@cached(ttl_seconds=3600)
+def get_real_nhl_standings(year=None):
+    """Fetch NHL standings from RapidAPI /nhlstandings."""
+    if not RAPIDAPI_KEY:
+        return []
+
+    if not year:
+        year = datetime.now().year
+
+    url = f"https://{RAPIDAPI_NHL_HOST}/nhlstandings"
+    querystring = {
+        "year": str(year),
+        "group": "league"
+    }
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_NHL_HOST
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=querystring)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"❌ Error fetching standings: {e}")
+        return []
+
+    standings = []
+    for team in data.get('data', []):
+        standings.append({
+            'id': f"nhl-{team.get('teamAbbrev', {}).get('default')}",
+            'team': team.get('teamName', {}).get('default', ''),
+            'abbreviation': team.get('teamAbbrev', {}).get('default', ''),
+            'conference': team.get('conferenceName', ''),
+            'division': team.get('divisionName', ''),
+            'games_played': team.get('gamesPlayed', 0),
+            'wins': team.get('wins', 0),
+            'losses': team.get('losses', 0),
+            'ot_losses': team.get('otLosses', 0),
+            'points': team.get('points', 0),
+            'win_percentage': team.get('pointPctg', 0) / 100 if team.get('pointPctg') else 0,
+            'goals_for': team.get('goalsFor', 0),
+            'goals_against': team.get('goalsAgainst', 0),
+            'goal_differential': team.get('goalDifferential', 0),
+            'streak': team.get('streak', ''),
+            'last_10': team.get('last10', ''),
+            'home_record': team.get('homeRecord', ''),
+            'away_record': team.get('roadRecord', ''),
+            'is_real_data': True
+        })
+    return standings
+
+@cached(ttl_seconds=600)
+def get_real_news(sport):
+    try:
+        query = f"{sport} basketball" if sport == 'nba' else f"{sport} football"
+        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
+        
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        return jsonify({
+            'success': True,
+            'news': data.get('articles', [])[:10],
+            'count': len(data.get('articles', [])),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'source': 'newsapi',
+            'sport': sport
+        })
+    except Exception as e:
+        print(f"⚠️ News API failed: {e}")
+        # Fallback to player data news
+        return get_sports_wire()
+
+@cached(ttl_seconds=600)
+def scrape_espn_betting_tips():
+    """Scrape actual betting tips from ESPN."""
+    try:
+        url = "https://www.espn.com/nba/lines"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        phrases = []
+        spread_elements = soup.find_all(['div', 'td'], class_=re.compile(r'spread|line|odds', re.I))
+        for element in spread_elements[:8]:
+            text = element.get_text(strip=True)
+            if text and any(term in text.lower() for term in ['favorite', 'underdog', 'over', 'under', 'spread', 'moneyline', 'o/u']):
+                confidence = random.randint(65, 85)
+                phrases.append({
+                    'id': f'espn-{hash(text) % 10000}',
+                    'text': f"ESPN odds: {text}",
+                    'source': 'ESPN Betting',
+                    'category': categorize_betting_text(text),
+                    'confidence': confidence,
+                    'scraped_at': datetime.now(timezone.utc).isoformat(),
+                    'tags': extract_tags_from_text(text)
+                })
+        # Add curated tips
+        curated_tips = [
+            {'text': 'Home underdogs of 3-6 points cover spread 58% of the time in conference games', 'category': 'trend', 'confidence': 78},
+            {'text': 'Teams on 3+ game winning streak are 12-5 ATS as underdogs', 'category': 'expert_prediction', 'confidence': 82},
+            {'text': 'Over hits 63% when total is 220-225 and both teams played yesterday', 'category': 'trend', 'confidence': 75}
+        ]
+        for tip in curated_tips:
+            phrases.append({
+                'id': f'espn-curated-{hash(tip["text"]) % 10000}',
+                'text': tip['text'],
+                'source': 'ESPN Analytics',
+                'category': tip['category'],
+                'confidence': tip['confidence'],
+                'scraped_at': datetime.now(timezone.utc).isoformat(),
+                'tags': extract_tags_from_text(tip['text'])
+            })
+        return phrases
+    except Exception as e:
+        print(f"⚠️ ESPN betting scraping failed: {e}")
+        return []
+
+@cached(ttl_seconds=600)
+def scrape_action_network():
+    """Scrape from Action Network - dedicated betting site."""
+    try:
+        url = "https://www.actionnetwork.com/nba/odds"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        phrases = []
+        insights = soup.find_all(['div', 'p'], class_=re.compile(r'insight|analysis|trend', re.I))
+        for insight in insights[:5]:
+            text = insight.get_text(strip=True)
+            if text and 20 < len(text) < 150:
+                if any(term in text.lower() for term in ['cover', 'spread', 'bet', 'odds', 'under', 'over']):
+                    phrases.append({
+                        'id': f'action-{hash(text) % 10000}',
+                        'text': text,
+                        'source': 'Action Network',
+                        'category': categorize_betting_text(text),
+                        'confidence': random.randint(70, 88),
+                        'scraped_at': datetime.now(timezone.utc).isoformat(),
+                        'tags': extract_tags_from_text(text)
+                    })
+        return phrases
+    except Exception as e:
+        print(f"⚠️ Action Network scraping failed: {e}")
+        return []
+
+@cached(ttl_seconds=600)
+def scrape_rotowire_betting():
+    """Scrape from RotoWire betting insights."""
+    try:
+        url = "https://www.rotowire.com/betting/nba/"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        phrases = []
+        articles = soup.find_all(['article', 'div'], class_=re.compile(r'article|insight|tip', re.I))
+        for article in articles[:5]:
+            headline = article.find(['h2', 'h3', 'h4'])
+            if headline:
+                text = headline.get_text(strip=True)
+                if text and any(term in text.lower() for term in ['bet', 'odds', 'pick', 'prediction']):
+                    phrases.append({
+                        'id': f'rotowire-{hash(text) % 10000}',
+                        'text': text,
+                        'source': 'RotoWire Betting',
+                        'category': 'expert_prediction',
+                        'confidence': random.randint(65, 85),
+                        'scraped_at': datetime.now(timezone.utc).isoformat(),
+                        'tags': extract_tags_from_text(text)
+                    })
+        return phrases
+    except Exception as e:
+        print(f"⚠️ RotoWire scraping failed: {e}")
+        return []
+
+@cached(ttl_seconds=3600)
+def generate_ai_insights():
+    """Fetch AI‑generated betting insights from DeepSeek (fallback)."""
+    try:
+        if not DEEPSEEK_API_KEY:
+            return []
+
+        prompt = """Generate 3 specific NBA betting insights with actual numbers and percentages. 
+        Format: Insight|Confidence (1-100)
+        
+        Examples:
+        - Home underdogs of 3-6 points cover 58% of spreads in conference games
+        - Player X is 12-3 over his points line when playing on 2+ days rest
+        - Teams on 3-game win streaks are 8-1 ATS as underdogs
+        """
+
+        response = requests.post(
+            'https://api.deepseek.com/v1/chat/completions',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {DEEPSEEK_API_KEY}'
+            },
+            json={
+                'model': 'deepseek-chat',
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': 'You are a sports betting analyst. Generate specific, actionable insights with actual statistics.'
+                    },
+                    {
+                        'role': 'user',
+                        'content': prompt
+                    }
+                ],
+                'max_tokens': 300,
+                'temperature': 0.7
+            },
+            timeout=30
+        )
+
+        response.raise_for_status()
+        data = response.json()
+        insights_text = data['choices'][0]['message']['content']
+        insights = []
+
+        for line in insights_text.split('\n'):
+            if '|' in line:
+                text, confidence = line.split('|', 1)
+                try:
+                    conf_num = int(confidence.strip())
+                except:
+                    conf_num = random.randint(75, 90)
+
+                insights.append({
+                    'id': f'ai-{hash(text) % 10000}',
+                    'text': text.strip(),
+                    'source': 'AI Betting Model',
+                    'category': categorize_betting_text(text),
+                    'confidence': conf_num,
+                    'scraped_at': datetime.now(timezone.utc).isoformat(),
+                    'tags': extract_tags_from_text(text)
+                })
+
+        return insights[:3]
+
+    except Exception as e:
+        print(f"⚠️ AI insights generation failed: {e}")
+        return []
+
+@cached(ttl_seconds=3600)
+def fetch_spring_games(year):
+    games = []
+    for i in range((spring_end - spring_start).days + 1):
+        date = spring_start + timedelta(days=i)
+        date_str = date.strftime("%Y%m%d")
+        try:
+            data = call_tank01("getMLBDailySchedule", {"gameDate": date_str})
+            day_games = data.get("body", [])
+            for game in day_games:
+                games.append(transform_game(game, date))
+        except Exception as e:
+            # Only log non-404 errors
+            if "404" not in str(e):
+                print(f"⚠️ Error fetching games for {date_str}: {e}")
+            continue
+    return games
+
+@cached(ttl_seconds=3600)
+def get_mlb_leaders(limit=10):
+    """
+    Use ADP to identify top players, then attach their projections.
+    Returns dict with 'hitting_leaders' and 'pitching_leaders'.
+    """
+    adp_list = fetch_adp_list(limit=50)  # fetch more than needed to ensure enough of each type
+    projections = fetch_all_projections()
+
+    hitters = []
+    pitchers = []
+
+    for item in adp_list:
+        player_id = item.get("playerID")
+        proj = projections.get(str(player_id), {})
+        # Determine if hitter or pitcher based on posADP or proj presence
+        pos_adp = item.get("posADP", "")
+        if "P" in pos_adp:
+            # Pitcher – extract pitching stats from proj
+            pitching = proj.get("Pitching", {})
+            if pitching:
+                pitchers.append({
+                    "rank": len(pitchers) + 1,
+                    "player": item.get("longName"),
+                    "team": proj.get("team", ""),
+                    "era": pitching.get("ERA"),
+                    "wins": pitching.get("Win"),
+                    "losses": None,  # not directly in projections
+                    "saves": pitching.get("Save"),
+                    "so": pitching.get("SO"),
+                    "whip": pitching.get("WHIP"),
+                    "ip": pitching.get("InningsPitched")
+                })
+        else:
+            # Hitter – extract hitting stats
+            hitting = proj.get("Hitting", {})
+            if hitting:
+                # Compute AVG and OPS if needed (projections may already provide)
+                avg = hitting.get("AVG")
+                obp = hitting.get("OBP")  # not always present
+                slg = hitting.get("SLG")
+                ops = hitting.get("OPS")
+                if ops is None and obp and slg:
+                    ops = round(obp + slg, 3)
+                hitters.append({
+                    "rank": len(hitters) + 1,
+                    "player": item.get("longName"),
+                    "team": proj.get("team", ""),
+                    "avg": avg,
+                    "hr": hitting.get("HR"),
+                    "rbi": hitting.get("RBI"),
+                    "ops": ops,
+                    "hits": hitting.get("H"),
+                    "runs": hitting.get("R"),
+                    "sb": hitting.get("SB")
+                })
+
+    # Sort and limit
+    hitters = hitters[:limit]
+    pitchers = pitchers[:limit]
+    return {"hitting_leaders": hitters, "pitching_leaders": pitchers}
+
+@cached(ttl_seconds=86400)
+def fetch_adp_list(limit=100):
+    """
+    Get ADP list from Tank01.
+    Returns list of dicts with playerID, longName, overallADP, posADP.
+    """
+    data = call_tank01("getMLBADP")
+    adp_list = data.get("body", {}).get("adpList", [])
+    # Sort by overallADP (lowest first) and limit
+    adp_list.sort(key=lambda x: float(x.get("overallADP", 999)))
+    return adp_list[:limit]
+
+@cached(ttl_seconds=86400)
+def fetch_depth_charts():
+    """Get depth charts for all teams from Tank01."""
+    data = call_tank01("getMLBDepthCharts")
+    charts = data.get("body", [])
+    # Build a set of player IDs that appear in depth charts (all active players)
+    depth_player_ids = set()
+    for team_chart in charts:
+        for position, players in team_chart.get("depthChart", {}).items():
+            for p in players:
+                depth_player_ids.add(p.get("playerID"))
+    return depth_player_ids
 
 # RapidAPI fetches (NBA props)
 @lru_cache(maxsize=128)
@@ -5235,27 +5754,6 @@ def generate_games_from_player_data(sport):
 # ------------------------------------------------------------------------------
 # NHL Mock Games
 # ------------------------------------------------------------------------------
-def generate_mock_nhl_games(date=None):
-    games = [
-        {
-            'id': 'nhl-1',
-            'home_team': 'Toronto Maple Leafs',
-            'away_team': 'Montreal Canadiens',
-            'date': date or datetime.now(timezone.utc).isoformat(),
-            'venue': 'Scotiabank Arena',
-            'tv': 'ESPN+'
-        },
-        {
-            'id': 'nhl-2',
-            'home_team': 'New York Rangers',
-            'away_team': 'Boston Bruins',
-            'date': date or datetime.now(timezone.utc).isoformat(),
-            'venue': 'Madison Square Garden',
-            'tv': 'TNT'
-        }
-    ]
-    return games
-
 
 # ------------------------------------------------------------------------------
 # Spring Training Games
@@ -5298,7 +5796,7 @@ def generate_mock_spring_games():
 # MLB Players Generator
 # ------------------------------------------------------------------------------
 def generate_mlb_players(limit=200):
-    """Generate mock MLB players (hitters and pitchers)."""
+    print(f"⚾ generate_mlb_players called with limit={limit}")
     teams = ['ARI', 'ATL', 'BAL', 'BOS', 'CHC', 'CIN', 'CLE', 'COL', 'CWS', 'DET',
              'HOU', 'KC', 'LAA', 'LAD', 'MIA', 'MIL', 'MIN', 'NYM', 'NYY', 'OAK',
              'PHI', 'PIT', 'SD', 'SEA', 'SF', 'STL', 'TB', 'TEX', 'TOR', 'WAS']
@@ -5336,21 +5834,28 @@ def generate_mlb_players(limit=200):
                 'rbi': random.randint(0, 120),
                 'obp': round(random.uniform(0.280, 0.410), 3),
                 'slg': round(random.uniform(0.350, 0.600), 3),
-                'ops': 0.0,  # will compute later
+                'ops': 0.0,
                 'sb': random.randint(0, 30)
             })
             player['ops'] = round(player['obp'] + player['slg'], 3)
         players.append(player)
+    
+    print(f"⚾ Generated {len(players)} players")
     return players
-
 
 # ------------------------------------------------------------------------------
 # MLB Props Generator
 # ------------------------------------------------------------------------------
 def generate_mlb_props(players, game_date=None):
-    """Generate mock player props for MLB games."""
+    import random
+    from datetime import datetime
+    print("⚾ [generate_mlb_props] FUNCTION STARTED")
+    print(f"⚾ [generate_mlb_props] Received {len(players)} players")
+
     props = []
     game_date = game_date or datetime.now().strftime('%Y-%m-%d')
+    print(f"⚾ [generate_mlb_props] Using game_date: {game_date}")
+
     stat_categories = [
         ('Hits', 0.5, 2.5),
         ('Home Runs', 0.5, 1.5),
@@ -5359,28 +5864,50 @@ def generate_mlb_props(players, game_date=None):
         ('Total Bases', 1.5, 3.5),
         ('Stolen Bases', 0.5, 1.5)
     ]
-    for player in random.sample(players, min(30, len(players))):
+    print(f"⚾ [generate_mlb_props] stat_categories count: {len(stat_categories)}")
+
+    sample_size = min(30, len(players))
+    print(f"⚾ [generate_mlb_props] sample_size = {sample_size}")
+
+    if sample_size == 0:
+        print("⚾ [generate_mlb_props] No players to sample – returning []")
+        return []
+
+    try:
+        selected_players = random.sample(players, sample_size)
+    except Exception as e:
+        print(f"❌ [generate_mlb_props] random.sample failed: {e}")
+        return []
+    print(f"⚾ [generate_mlb_props] Selected {len(selected_players)} players")
+
+    player_counter = 0
+    for player in selected_players:
+        player_counter += 1
+        print(f"⚾ [generate_mlb_props] Processing player {player_counter}: {player.get('name')} ({player.get('team')})")
+
         for stat, low, high in stat_categories:
             line = round(random.uniform(low, high), 1)
-            over_odds = random.choice(['-120', '-130', '-140', '-110'])
-            under_odds = random.choice(['+100', '-110', '-115'])
             prop = {
-                'id': f"prop-{player['id']}-{stat.replace(' ', '-')}",
+                'id': f"prop-{player['id']}-{stat.replace(' ', '-')}-{random.randint(1000,9999)}",
                 'player': player['name'],
                 'team': player['team'],
                 'position': player['position'],
                 'stat': stat,
                 'line': line,
-                'over_odds': over_odds,
-                'under_odds': under_odds,
+                'over_odds': random.choice(['-120', '-130', '-140', '-110']),
+                'under_odds': random.choice(['+100', '-110', '-115']),
                 'game_date': game_date,
-                'opponent': random.choice(['LAD', 'NYY', 'HOU', 'ATL']),
-                'confidence': random.randint(60, 90),
-                'projection': round(line * random.uniform(0.9, 1.2), 1)
+                'opponent': random.choice(['LAD', 'NYY', 'HOU', 'ATL', 'BOS', 'CHC']),
+                'projection': round(line * random.uniform(0.9, 1.2), 1),
+                'source': 'mock',
+                'is_real_data': False
             }
             props.append(prop)
-    return props
+            if len(props) % 10 == 0:
+                print(f"⚾ [generate_mlb_props] Generated {len(props)} props so far...")
 
+    print(f"⚾ [generate_mlb_props] FINAL: Generated {len(props)} props")
+    return props
 
 # ------------------------------------------------------------------------------
 # MLB Standings Generator
@@ -5567,75 +6094,6 @@ def extract_tags_from_text(text: str) -> List[str]:
 # ------------------------------------------------------------------------------
 # AI Insights Generator (DeepSeek)
 # ------------------------------------------------------------------------------
-def generate_ai_insights():
-    """Fetch AI‑generated betting insights from DeepSeek (fallback)."""
-    try:
-        if not DEEPSEEK_API_KEY:
-            return []
-
-        prompt = """Generate 3 specific NBA betting insights with actual numbers and percentages. 
-        Format: Insight|Confidence (1-100)
-        
-        Examples:
-        - Home underdogs of 3-6 points cover 58% of spreads in conference games
-        - Player X is 12-3 over his points line when playing on 2+ days rest
-        - Teams on 3-game win streaks are 8-1 ATS as underdogs
-        """
-
-        response = requests.post(
-            'https://api.deepseek.com/v1/chat/completions',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {DEEPSEEK_API_KEY}'
-            },
-            json={
-                'model': 'deepseek-chat',
-                'messages': [
-                    {
-                        'role': 'system',
-                        'content': 'You are a sports betting analyst. Generate specific, actionable insights with actual statistics.'
-                    },
-                    {
-                        'role': 'user',
-                        'content': prompt
-                    }
-                ],
-                'max_tokens': 300,
-                'temperature': 0.7
-            },
-            timeout=30
-        )
-
-        response.raise_for_status()
-        data = response.json()
-        insights_text = data['choices'][0]['message']['content']
-        insights = []
-
-        for line in insights_text.split('\n'):
-            if '|' in line:
-                text, confidence = line.split('|', 1)
-                try:
-                    conf_num = int(confidence.strip())
-                except:
-                    conf_num = random.randint(75, 90)
-
-                insights.append({
-                    'id': f'ai-{hash(text) % 10000}',
-                    'text': text.strip(),
-                    'source': 'AI Betting Model',
-                    'category': categorize_betting_text(text),
-                    'confidence': conf_num,
-                    'scraped_at': datetime.now(timezone.utc).isoformat(),
-                    'tags': extract_tags_from_text(text)
-                })
-
-        return insights[:3]
-
-    except Exception as e:
-        print(f"⚠️ AI insights generation failed: {e}")
-        return []
-
-
 # ------------------------------------------------------------------------------
 # Enhanced Betting Insights (fallback mock)
 # ------------------------------------------------------------------------------
@@ -5877,23 +6335,6 @@ def get_local_players(sport):
         return players_data_list
 
 
-def get_full_team_name(team_abbrev):
-    """Convert NBA team abbreviation to full name (fallback to abbrev)."""
-    nba_teams = {
-        'LAL': 'Los Angeles Lakers',
-        'GSW': 'Golden State Warriors',
-        'BOS': 'Boston Celtics',
-        'PHX': 'Phoenix Suns',
-        'MIL': 'Milwaukee Bucks',
-        'DEN': 'Denver Nuggets',
-        'DAL': 'Dallas Mavericks',
-        'MIA': 'Miami Heat',
-        'PHI': 'Philadelphia 76ers',
-        'LAC': 'Los Angeles Clippers'
-    }
-    return nba_teams.get(team_abbrev, team_abbrev)
-
-
 # ------------------------------------------------------------------------------
 # Injury Helpers
 # ------------------------------------------------------------------------------
@@ -6042,110 +6483,6 @@ def scrape_team_injuries(sport, team):
     except Exception as e:
         print(f"⚠️ Scraping error: {e}")
     return injuries
-
-
-def scrape_espn_betting_tips():
-    """Scrape actual betting tips from ESPN."""
-    try:
-        url = "https://www.espn.com/nba/lines"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        phrases = []
-        spread_elements = soup.find_all(['div', 'td'], class_=re.compile(r'spread|line|odds', re.I))
-        for element in spread_elements[:8]:
-            text = element.get_text(strip=True)
-            if text and any(term in text.lower() for term in ['favorite', 'underdog', 'over', 'under', 'spread', 'moneyline', 'o/u']):
-                confidence = random.randint(65, 85)
-                phrases.append({
-                    'id': f'espn-{hash(text) % 10000}',
-                    'text': f"ESPN odds: {text}",
-                    'source': 'ESPN Betting',
-                    'category': categorize_betting_text(text),
-                    'confidence': confidence,
-                    'scraped_at': datetime.now(timezone.utc).isoformat(),
-                    'tags': extract_tags_from_text(text)
-                })
-        # Add curated tips
-        curated_tips = [
-            {'text': 'Home underdogs of 3-6 points cover spread 58% of the time in conference games', 'category': 'trend', 'confidence': 78},
-            {'text': 'Teams on 3+ game winning streak are 12-5 ATS as underdogs', 'category': 'expert_prediction', 'confidence': 82},
-            {'text': 'Over hits 63% when total is 220-225 and both teams played yesterday', 'category': 'trend', 'confidence': 75}
-        ]
-        for tip in curated_tips:
-            phrases.append({
-                'id': f'espn-curated-{hash(tip["text"]) % 10000}',
-                'text': tip['text'],
-                'source': 'ESPN Analytics',
-                'category': tip['category'],
-                'confidence': tip['confidence'],
-                'scraped_at': datetime.now(timezone.utc).isoformat(),
-                'tags': extract_tags_from_text(tip['text'])
-            })
-        return phrases
-    except Exception as e:
-        print(f"⚠️ ESPN betting scraping failed: {e}")
-        return []
-
-
-def scrape_action_network():
-    """Scrape from Action Network - dedicated betting site."""
-    try:
-        url = "https://www.actionnetwork.com/nba/odds"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        phrases = []
-        insights = soup.find_all(['div', 'p'], class_=re.compile(r'insight|analysis|trend', re.I))
-        for insight in insights[:5]:
-            text = insight.get_text(strip=True)
-            if text and 20 < len(text) < 150:
-                if any(term in text.lower() for term in ['cover', 'spread', 'bet', 'odds', 'under', 'over']):
-                    phrases.append({
-                        'id': f'action-{hash(text) % 10000}',
-                        'text': text,
-                        'source': 'Action Network',
-                        'category': categorize_betting_text(text),
-                        'confidence': random.randint(70, 88),
-                        'scraped_at': datetime.now(timezone.utc).isoformat(),
-                        'tags': extract_tags_from_text(text)
-                    })
-        return phrases
-    except Exception as e:
-        print(f"⚠️ Action Network scraping failed: {e}")
-        return []
-
-
-def scrape_rotowire_betting():
-    """Scrape from RotoWire betting insights."""
-    try:
-        url = "https://www.rotowire.com/betting/nba/"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        phrases = []
-        articles = soup.find_all(['article', 'div'], class_=re.compile(r'article|insight|tip', re.I))
-        for article in articles[:5]:
-            headline = article.find(['h2', 'h3', 'h4'])
-            if headline:
-                text = headline.get_text(strip=True)
-                if text and any(term in text.lower() for term in ['bet', 'odds', 'pick', 'prediction']):
-                    phrases.append({
-                        'id': f'rotowire-{hash(text) % 10000}',
-                        'text': text,
-                        'source': 'RotoWire Betting',
-                        'category': 'expert_prediction',
-                        'confidence': random.randint(65, 85),
-                        'scraped_at': datetime.now(timezone.utc).isoformat(),
-                        'tags': extract_tags_from_text(text)
-                    })
-        return phrases
-    except Exception as e:
-        print(f"⚠️ RotoWire scraping failed: {e}")
-        return []
-
 
 # ------------------------------------------------------------------------------
 # Game & Odds Helpers
@@ -6695,7 +7032,7 @@ def health():
             "news_api": bool(NEWS_API_KEY)
         },
         "endpoints": [
-            "/api/players", 
+            "/api/players",
             "/api/fantasy/teams",
             "/api/prizepicks/selections",
             "/api/sports-wire",
@@ -6709,7 +7046,6 @@ def health():
             "/api/parlay/suggestions",
             "/api/players/trends",
             "/api/predictions/outcomes",
-            "/api/secret/phrases",
             "/api/nfl/games",
             "/api/nhl/games",
             "/api/deepseek/analyze",
@@ -6721,7 +7057,12 @@ def health():
             "/api/scraper/news",
             "/api/fantasy/players",
             "/api/info",
-            "/api/health"
+            "/api/health",
+            # New NCAAB endpoints
+            "/api/ncaab/conferences",
+            "/api/ncaab/teams",
+            "/api/ncaab/players",
+            "/api/ncaab/games"
         ],
         "message": "Fantasy API with Real Data - All endpoints registered"
     })
@@ -6815,173 +7156,6 @@ def get_kalshi_predictions():
             }
         ]
     })
-
-@app.route('/api/players')
-def get_players():
-    """Get players – returns real or enhanced mock data with realistic stats."""
-    try:
-        sport = flask_request.args.get('sport', 'nba').lower()
-        limit = int(flask_request.args.get('limit', '200'))
-        use_realtime = flask_request.args.get('realtime', 'true').lower() == 'true'
-
-        print(f"🎯 GET /api/players: sport={sport}, limit={limit}, realtime={use_realtime}", flush=True)
-
-        # 1. For NBA with realtime, try Balldontlie
-        if sport == 'nba' and use_realtime and BALLDONTLIE_API_KEY:
-            print("🏀 Attempting Balldontlie real-time players...", flush=True)
-            nba_players = fetch_nba_from_balldontlie(limit)
-            if nba_players:
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "players": nba_players,
-                        "is_real_data": True,
-                        "data_source": "Balldontlie GOAT"
-                    },
-                    "message": f'Loaded {len(nba_players)} real-time players',
-                    "sport": sport
-                })
-            else:
-                print("⚠️ Balldontlie failed – falling back", flush=True)
-
-        # 2. Static 2026 NBA data fallback (if available)
-        if sport == 'nba' and NBA_PLAYERS_2026:
-            print("📦 Using static 2026 NBA data for /api/players", flush=True)
-            data_source = NBA_PLAYERS_2026
-            source_name = "NBA 2026 Static"
-        else:
-            # 3. Existing static data sources for other sports
-            if sport == 'nfl':
-                data_source = nfl_players_data
-                source_name = "NFL"
-            elif sport == 'mlb':
-                data_source = mlb_players_data
-                source_name = "MLB"
-            elif sport == 'nhl':
-                data_source = nhl_players_data
-                source_name = "NHL"
-            elif sport == 'tennis':
-                data_source = TENNIS_PLAYERS.get('ATP', []) + TENNIS_PLAYERS.get('WTA', [])
-                source_name = "Tennis (mock)"
-            elif sport == 'golf':
-                data_source = GOLF_PLAYERS.get('PGA', []) + GOLF_PLAYERS.get('LPGA', [])
-                source_name = "Golf (mock)"
-            else:  # default to NBA (generic list)
-                data_source = players_data_list
-                source_name = "NBA"
-
-        # Ensure data_source is a list; if empty, generate mock players
-        if not data_source:
-            print(f"⚠️ No static data for {sport}, generating mock players", flush=True)
-            data_source = generate_mock_players(sport, 100)
-            source_name = f"{sport.upper()} (generated)"
-
-        total_available = len(data_source)
-        print(f"📊 Found {total_available} {source_name} players in fallback", flush=True)
-
-        # Apply limit
-        players_to_use = data_source if limit <= 0 else data_source[:min(limit, total_available)]
-
-        enhanced_players = []
-        for i, player in enumerate(players_to_use):
-            p = player.copy() if isinstance(player, dict) else {}
-
-            # If using NBA 2026 static data, map per‑game stats and compute salary/fantasy points with FanDuel formula
-            if source_name == "NBA 2026 Static":
-                # Map to standard keys expected by frontend
-                p['points'] = p.get('pts_per_game', 0)
-                p['rebounds'] = p.get('reb_per_game', 0)
-                p['assists'] = p.get('ast_per_game', 0)
-                p['steals'] = p.get('stl_per_game', 0)
-                p['blocks'] = p.get('blk_per_game', 0)
-                p['turnovers'] = p.get('to_per_game', 0)
-                p['minutes'] = p.get('min_per_game', random.uniform(20, 40))
-                p['games_played'] = p.get('games', 0)
-                p['injury_status'] = p.get('injury_status', 'Healthy')
-
-                # Fantasy points – use precomputed if available, otherwise compute a simple formula
-                fp = p.get('fantasy_points')
-                if fp is None:
-                    fp = (p['points'] + 1.2 * p['rebounds'] + 1.5 * p['assists'] +
-                          2 * p['steals'] + 2 * p['blocks'] - p['turnovers'])
-                p['fantasy_points'] = fp
-
-                # FanDuel salary calculation (same as in /api/fantasy/players)
-                BASE_SALARY_MIN = 3000
-                BASE_SALARY_MAX = 11000
-                FP_TARGET = 48.0
-                if fp >= FP_TARGET:
-                    base_salary = BASE_SALARY_MAX
-                else:
-                    slope = (BASE_SALARY_MAX - BASE_SALARY_MIN) / FP_TARGET
-                    base_salary = BASE_SALARY_MIN + slope * fp
-
-                pos_mult = {'PG': 0.95, 'SG': 1.0, 'SF': 1.05, 'PF': 1.1, 'C': 1.15,
-                            'G': 1.0, 'F': 1.1}.get(p.get('position', ''), 1.0)
-                rand_factor = random.uniform(0.9, 1.1)
-                salary = int(base_salary * pos_mult * rand_factor)
-                salary = max(3000, min(15000, salary))
-                value = fp / (salary / 1000) if salary > 0 else 0
-
-                p['salary'] = salary
-                p['value'] = value
-                p['projected_points'] = round(fp, 1)
-
-                # ID generation consistent with other endpoints
-                player_id = f"nba-static-{p['name'].replace(' ', '-')}-{p['team']}"
-            else:
-                # For other sources, use the existing enhancement function
-                p = enhance_player_data(p)
-                player_id = p.get('id') or p.get('player_id') or f'player-{i}'
-
-            # Build final formatted player object
-            formatted = {
-                'id': player_id,
-                'name': p.get('name', f'Player_{i}'),
-                'team': p.get('team', 'Unknown'),
-                'position': p.get('position', 'Unknown'),
-                'sport': sport.upper(),
-                'age': p.get('age', random.randint(21, 38)),
-                'games_played': p.get('games_played', 0),
-                'points': round(p.get('points', 0), 1),
-                'rebounds': round(p.get('rebounds', 0), 1),
-                'assists': round(p.get('assists', 0), 1),
-                'steals': round(p.get('steals', 0), 1),
-                'blocks': round(p.get('blocks', 0), 1),
-                'minutes': round(p.get('minutes', 0), 1),
-                'fantasy_points': round(p.get('fantasy_points', 0), 1),
-                'projected_points': round(p.get('projected_points', p.get('fantasy_points', 0)), 1),
-                'salary': p.get('salary', 5000),
-                'value': round(p.get('value', 0), 2),
-                'stats': p.get('stats', {}),
-                'injury_status': p.get('injury_status', 'Healthy'),
-                'is_real_data': source_name == "NBA 2026 Static",
-                'data_source': source_name,
-                'is_enhanced': True
-            }
-            enhanced_players.append(formatted)
-
-        enhanced_players = [p for p in enhanced_players if p is not None]
-
-        print(f"✅ Enhanced {len(enhanced_players)} players for {sport}", flush=True)
-        return jsonify({
-            "success": True,
-            "data": {
-                "players": enhanced_players,
-                "is_real_data": source_name == "NBA 2026 Static"
-            },
-            "message": f'Loaded and enhanced {len(enhanced_players)} {source_name} players',
-            "sport": sport
-        })
-
-    except Exception as e:
-        print(f"❌ Error in /api/players: {e}", flush=True)
-        traceback.print_exc()
-        return jsonify({
-            "success": False,
-            "data": {"players": []},
-            "message": f'Error fetching players: {str(e)}'
-        })
 
 @app.route('/api/fantasy/players')
 def get_fantasy_players():
@@ -9638,27 +9812,393 @@ def get_enhanced_sports_wire():
             }
         })
 
-def get_real_news(sport):
+import requests
+from datetime import datetime
+
+RAPIDAPI_HOST = "your-rapidapi-host"  # e.g. "nhl-api.p.rapidapi.com"
+
+
+def get_real_nhl_games(date=None):
+    """Fetch real NHL games from RapidAPI /nhlscoreboard."""
+    if not RAPIDAPI_KEY:
+        print("⚠️ RAPIDAPI_KEY not set – cannot fetch real NHL games")
+        return []
+
+    # Use today's date if none provided
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    else:
+        # Ensure date is YYYY-MM-DD
+        try:
+            dt = datetime.fromisoformat(date)
+            date = dt.strftime("%Y-%m-%d")
+        except:
+            date = datetime.now().strftime("%Y-%m-%d")
+
+    year, month, day = date.split('-')
+
+    url = f"https://{RAPIDAPI_NHL_HOST}/nhlscoreboard"
+    querystring = {
+        "year": year,
+        "month": month,
+        "day": day,
+        "limit": "50"
+    }
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_NHL_HOST
+    }
+
     try:
-        query = f"{sport} basketball" if sport == 'nba' else f"{sport} football"
-        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
+        response = requests.get(url, headers=headers, params=querystring)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"❌ Error calling RapidAPI NHL scoreboard: {e}")
+        return []
+
+    games = []
+    # Adjust mapping based on actual JSON structure – this is a common format
+    for game in data.get('data', {}).get('games', []):
+        games.append({
+            'id': game.get('gameId'),
+            'home_team': game.get('homeTeam', {}).get('abbrev', 'N/A'),
+            'away_team': game.get('awayTeam', {}).get('abbrev', 'N/A'),
+            'home_score': game.get('homeTeam', {}).get('score'),
+            'away_score': game.get('awayTeam', {}).get('score'),
+            'status': _map_nhl_game_state(game.get('gameState', 'PRE')),
+            'period': game.get('periodDescriptor', {}).get('periodType'),
+            'time_remaining': game.get('clock', {}).get('timeRemaining'),
+            'venue': game.get('venue', {}).get('default', 'N/A'),
+            'tv': game.get('broadcast', {}).get('network', 'N/A'),
+            'date': game.get('gameDate'),
+            'is_real_data': True
+        })
+    return games
+
+import requests
+from datetime import datetime
+
+# Simple in-memory cache with TTL
+_cache = {}
+_cache_timestamp = {}
+
+def _get_cached(key):
+    return _cache.get(key) if _is_cache_valid(key) else None
+
+def _set_cache(key, value):
+    _cache[key] = value
+    _cache_timestamp[key] = datetime.now()
+
+RAPIDAPI_NHL_HOST = "nhl-api5.p.rapidapi.com"
+
+# ----------------------------------------------------------------------
+# Team list
+# ----------------------------------------------------------------------
+def get_nhl_team_list(limit=50):
+    """Fetch all NHL teams from RapidAPI and extract them from the nested response."""
+    cache_key = f"team_list_{limit}"
+    cached = _get_cached(cache_key)
+    if cached:
+        print(f"   Using cached teams ({len(cached)} teams)")
+        return cached
+
+    if not RAPIDAPI_KEY:
+        print("❌ RAPIDAPI_KEY is not set")
+        return []
+
+    url = f"https://{RAPIDAPI_NHL_HOST}/nhlteamlist"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_NHL_HOST
+    }
+    params = {"limit": limit}
+
+    try:
+        print(f"📡 Fetching team list from {url}")
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        print(f"   Response status: {response.status_code}")
+        print(f"   Response preview: {response.text[:300]}")
+        response.raise_for_status()
+        data = response.json()
+
+        # Extract teams from the nested structure
+        teams = []
+        if 'sports' in data and len(data['sports']) > 0:
+            sport = data['sports'][0]
+            if 'leagues' in sport and len(sport['leagues']) > 0:
+                league = sport['leagues'][0]
+                if 'teams' in league:
+                    teams = [item['team'] for item in league['teams'] if 'team' in item]
+
+        print(f"   Extracted {len(teams)} teams")
+        if teams:
+            print(f"   First team ID: {teams[0].get('id')}, name: {teams[0].get('name')}")
+        _set_cache(cache_key, teams)
+        return teams
+    except Exception as e:
+        print(f"❌ Exception in get_nhl_team_list: {e}")
+        return []
+
+# ----------------------------------------------------------------------
+# Team players (basic info)
+# ----------------------------------------------------------------------
+def get_nhl_team_players(team_espn_id, team_abbrev=None):
+    """Fetch players for a specific team using /players/id. Tries teamId first, then abbrev."""
+    cache_key = f"team_players_{team_espn_id}"
+    cached = _get_cached(cache_key)
+    if cached:
+        return cached
+
+    # First try with teamId (ESPN ID)
+    param_attempts = [('teamId', team_espn_id)]
+    if team_abbrev:
+        param_attempts.append(('abbrev', team_abbrev))
+
+    for param_name, param_value in param_attempts:
+        players = _fetch_team_players_by_param(param_name, param_value)
+        if players:
+            _set_cache(cache_key, players)
+            return players
+        else:
+            print(f"⚠️ No players found using {param_name}={param_value}")
+
+    return []
+
+def _fetch_team_players_by_param(param_name, param_value):
+    """Call /players/id with a given parameter."""
+    url = f"https://{RAPIDAPI_NHL_HOST}/players/id"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_NHL_HOST
+    }
+    params = {param_name: param_value}
+
+    try:
+        print(f"🔍 Fetching players from /players/id with {param_name}={param_value}")
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        print(f"   Response status: {response.status_code}")
+        print(f"   Response preview: {response.text[:300]}")
+        response.raise_for_status()
+        data = response.json()
+
+        # The response may be a list directly, or under 'data'
+        if isinstance(data, list):
+            players = data
+        else:
+            players = data.get('data', [])
+            if not players and isinstance(data, dict):
+                players = data.get('players', [])
+
+        print(f"   Got {len(players)} player records")
+        if players and len(players) > 0:
+            print(f"   First player keys: {players[0].keys() if isinstance(players[0], dict) else 'N/A'}")
+        return players
+    except Exception as e:
+        print(f"❌ Error fetching players for {param_name}={param_value}: {e}")
+        return []
+
+# ----------------------------------------------------------------------
+# Player detailed stats
+# ----------------------------------------------------------------------
+def get_nhl_player_stats(player_id):
+    """Fetch detailed statistics for a player and flatten all relevant fields."""
+    cache_key = f"player_stats_{player_id}"
+    cached = _get_cached(cache_key)
+    if cached:
+        print(f"   Using cached stats for player {player_id}")
+        return cached
+
+    url = f"https://{RAPIDAPI_NHL_HOST}/player-statistic"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": RAPIDAPI_NHL_HOST
+    }
+    params = {"playerId": player_id}
+
+    try:
+        print(f"📊 Fetching stats for player {player_id}")
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        print(f"   Response status: {response.status_code}")
         
-        response = requests.get(url, timeout=10)
+        # Print full response for debugging (limit to first 1000 chars if needed)
+        full_text = response.text
+        print(f"   Full response (first 1000 chars): {full_text[:1000]}")
+        
         response.raise_for_status()
         data = response.json()
         
-        return jsonify({
-            'success': True,
-            'news': data.get('articles', [])[:10],
-            'count': len(data.get('articles', [])),
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'source': 'newsapi',
-            'sport': sport
-        })
+        # Log the entire parsed JSON for the first player
+        if player_id == "3120307":  # log for a known player
+            print("🔍 Full stats JSON for player 3120307:")
+            import json
+            print(json.dumps(data, indent=2)[:2000])  # print first 2000 chars
+        
+        # Start with top-level fields we care about
+        flat_stats = {}
+        top_fields = ['teamAbbrev', 'position', 'teamId', 'jerseyNum', 'fullName', 'team', 'positionName']
+        for field in top_fields:
+            if field in data:
+                flat_stats[field] = data[field]
+        
+        # Flatten all stats from categories
+        categories = data.get('categories', [])
+        for cat in categories:
+            stats_list = cat.get('stats', [])
+            for stat in stats_list:
+                stat_name = stat.get('name')
+                stat_value = stat.get('value')
+                if stat_name is not None and stat_value is not None:
+                    try:
+                        if isinstance(stat_value, str) and '.' in stat_value:
+                            flat_stats[stat_name] = float(stat_value)
+                        else:
+                            flat_stats[stat_name] = int(stat_value)
+                    except (ValueError, TypeError):
+                        flat_stats[stat_name] = stat_value
+        
+        print(f"   Flattened stats keys: {list(flat_stats.keys())}")
+        _set_cache(cache_key, flat_stats)
+        return flat_stats
     except Exception as e:
-        print(f"⚠️ News API failed: {e}")
-        # Fallback to player data news
-        return get_sports_wire()
+        print(f"❌ Error fetching stats for player {player_id}: {e}")
+        return {}
+
+# ----------------------------------------------------------------------
+# Transform player + stats to frontend format
+# ----------------------------------------------------------------------
+def transform_nhl_player(player_info, stats=None, team_abbrev=None):
+    name = (player_info.get('fullName') or 
+            player_info.get('displayName') or 
+            f"{player_info.get('firstName', '')} {player_info.get('lastName', '')}".strip() or
+            f"Player {player_info.get('playerId')}")
+
+    player = {
+        'id': str(player_info.get('playerId')),
+        'name': name,
+        'team': team_abbrev if team_abbrev else '',  # set team from roster context
+        'position': stats.get('position', '') if stats else '',  # still try stats
+        'sport': 'nhl',
+        'is_real_data': True,
+    }
+
+    # If we have stats, add all available fields
+    if stats:
+        # Skater stats
+        if stats.get('gamesPlayed'): player['games_played'] = stats['gamesPlayed']
+        if stats.get('goals'): player['goals'] = stats['goals']
+        if stats.get('assists'): player['assists'] = stats['assists']
+        if stats.get('points'): player['points'] = stats['points']
+        if stats.get('plusMinus'): player['plus_minus'] = stats['plusMinus']
+        if stats.get('penaltyMinutes'): player['penalty_minutes'] = stats['penaltyMinutes']
+        if stats.get('powerPlayGoals'): player['power_play_goals'] = stats['powerPlayGoals']
+        if stats.get('shorthandedGoals'): player['shorthanded_goals'] = stats['shorthandedGoals']
+        if stats.get('gameWinningGoals'): player['game_winning_goals'] = stats['gameWinningGoals']
+        if stats.get('shots'): player['shots'] = stats['shots']
+        if stats.get('shootingPctg'): player['shooting_pct'] = stats['shootingPctg']
+        if stats.get('avgTimeOnIce'): player['time_on_ice_avg'] = stats['avgTimeOnIce']
+
+        # Goalie stats
+        if stats.get('wins'): player['wins'] = stats['wins']
+        if stats.get('losses'): player['losses'] = stats['losses']
+        if stats.get('otLosses'): player['otl'] = stats['otLosses']
+        if stats.get('goalsAgainstAvg'): player['goals_against_avg'] = stats['goalsAgainstAvg']
+        if stats.get('savePctg'): player['save_pct'] = stats['savePctg']
+        if stats.get('shutouts'): player['shutouts'] = stats['shutouts']
+
+        # Fantasy (if provided by API or calculated)
+        if stats.get('fantasyPoints'): player['fantasy_points'] = stats['fantasyPoints']
+        if stats.get('value'): player['value'] = stats['value']
+
+    return player
+
+# ----------------------------------------------------------------------
+# Main orchestrator
+# ----------------------------------------------------------------------
+import statistics
+from datetime import datetime, timedelta
+
+# ----------------------------------------------------------------------
+# NHL defensive stats helper (needs to be defined before the endpoint)
+# ----------------------------------------------------------------------
+
+
+
+def compute_nhl_league_averages(defensive_stats_map):
+    """Compute league averages for goals against, shots against, etc."""
+    if not defensive_stats_map:
+        return {'goals': 3.0, 'shots': 30.0, 'assists': 3.0}  # rough NHL averages
+
+    goals = [stats['goals_against_per_game'] for stats in defensive_stats_map.values() if 'goals_against_per_game' in stats]
+    # You can expand with shots if you collect them
+    return {
+        'goals': statistics.mean(goals) if goals else 3.0,
+        'shots': 30.0,   # placeholder; you can compute shots if available
+        'assists': statistics.mean(goals) if goals else 3.0,
+    }
+
+
+# Optional: static fallback factors (if you want to use them when no real data)
+NHL_DEFENSIVE_FACTORS = {
+    'BOS': {'goals': 0.88, 'shots': 0.92, 'assists': 0.95},
+    'COL': {'goals': 1.12, 'shots': 1.08, 'assists': 1.10},
+    # ... add all teams
+}
+
+def fetch_nhl_from_rapidapi(limit=30):
+    """Orchestrate fetching NHL players until limit is reached."""
+    print("🏒 fetch_nhl_from_rapidapi started")
+    if not RAPIDAPI_KEY:
+        print("❌ RAPIDAPI_KEY is not set")
+        return []
+    
+    teams = get_nhl_team_list(limit=10)
+    print(f"📋 get_nhl_team_list returned {len(teams)} teams")
+    if not teams:
+        print("⚠️ No teams retrieved – check RapidAPI key or network")
+        return []
+    
+    all_players = []
+    
+    for team in teams[:5]:  # Limit to first 5 teams to avoid rate limits
+        team_espn_id = team.get('id')
+        team_abbrev = team.get('abbreviation')  # e.g., "BOS"
+        if not team_espn_id:
+            continue
+        
+        print(f"🔍 Fetching players for team {team_abbrev} (ID: {team_espn_id})")
+        team_players = get_nhl_team_players(team_espn_id, team_abbrev)
+        if not team_players:
+            continue
+        
+        for player_info in team_players[:10]:
+            player_id = player_info.get('playerId')
+            if not player_id:
+                continue
+            
+            stats = get_nhl_player_stats(player_id)
+            # Pass team_abbrev to transform function
+            player = transform_nhl_player(player_info, stats, team_abbrev)
+            all_players.append(player)
+            
+            if len(all_players) >= limit:
+                break
+        
+        if len(all_players) >= limit:
+            break
+    
+    print(f"✅ fetch_nhl_from_rapidapi returning {len(all_players)} players")
+    return all_players
+
+def _map_nhl_game_state(state):
+    """Convert RapidAPI gameState to frontend status."""
+    state_map = {
+        'FINAL': 'final',
+        'LIVE': 'live',
+        'PRE': 'scheduled',
+        'CRIT': 'live',
+    }
+    return state_map.get(state, 'scheduled')
 
 @app.route('/api/beat-writers')
 def get_beat_writers():
@@ -10432,167 +10972,667 @@ def get_player_details(player_id):
         return api_response(success=False, data={}, message=str(e))
 
 # ------------------------------------------------------------------------------
-# Tennis
+# ATP ENDPOINTS (balldontlie)
 # ------------------------------------------------------------------------------
-@app.route('/api/tennis/players')
-def get_tennis_players():
-    """Get tennis players by tour (ATP/WTA)"""
+
+@app.route('/api/atp/players')
+def get_atp_players():
+    """Search ATP players by name."""
+    if is_rate_limited(request.remote_addr, '/api/atp/players', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    search = request.args.get('search', '')
+    params = {'search': search} if search else {}
+    data, error = balldontlie_request('players', params)
+    if error is None:
+        return api_response(success=True, data=data, message='ATP players retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+
+@app.route('/api/atp/players/<int:player_id>')
+def get_atp_player(player_id):
+    """Get a single ATP player by ID."""
+    if is_rate_limited(request.remote_addr, f'/api/atp/players/{player_id}', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    data, error = balldontlie_request(f'players/{player_id}')
+    if error is None:
+        return api_response(success=True, data=data, message='ATP player retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+
+@app.route('/api/atp/tournaments')
+def get_atp_tournaments():
+    """List ATP tournaments with optional filters."""
+    if is_rate_limited(request.remote_addr, '/api/atp/tournaments', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    allowed_params = ['cursor', 'per_page', 'tournament_ids', 'season', 'surface', 'category']
+    params = {k: request.args.get(k) for k in allowed_params if request.args.get(k) is not None}
+
+    if 'tournament_ids' in params:
+        # Accept comma-separated values
+        params['tournament_ids'] = params['tournament_ids'].split(',')
+
+    data, error = balldontlie_request('tournaments', params)
+    if error is None:
+        return api_response(success=True, data=data, message='ATP tournaments retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+
+@app.route('/api/atp/tournaments/<int:tournament_id>')
+def get_atp_tournament(tournament_id):
+    """Get a specific ATP tournament by ID, optionally with season filter."""
+    if is_rate_limited(request.remote_addr, f'/api/atp/tournaments/{tournament_id}', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    params = {}
+    if request.args.get('season'):
+        params['season'] = request.args.get('season')
+
+    data, error = balldontlie_request(f'tournaments/{tournament_id}', params)
+    if error is None:
+        return api_response(success=True, data=data, message='ATP tournament retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+
+@app.route('/api/atp/rankings')
+def get_atp_rankings():
+    """Get ATP rankings with optional filters."""
+    if is_rate_limited(request.remote_addr, '/api/atp/rankings', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    allowed_params = ['cursor', 'per_page', 'player_ids', 'date']
+    params = {k: request.args.get(k) for k in allowed_params if request.args.get(k) is not None}
+
+    if 'player_ids' in params:
+        params['player_ids'] = params['player_ids'].split(',')
+
+    data, error = balldontlie_request('rankings', params)
+    if error is None:
+        return api_response(success=True, data=data, message='ATP rankings retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+
+@app.route('/api/atp/matches')
+def get_atp_matches():
+    """Get ATP matches with filters."""
+    if is_rate_limited(request.remote_addr, '/api/atp/matches', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    allowed_params = ['cursor', 'per_page', 'tournament_ids', 'season', 'round']
+    params = {}
+    for k in allowed_params:
+        val = request.args.get(k)
+        if val:
+            params[k] = val
+
+    # Handle tournament_ids as array
+    if 'tournament_ids' in request.args:
+        t_ids = request.args.getlist('tournament_ids')
+        if len(t_ids) == 1 and ',' in t_ids[0]:
+            t_ids = t_ids[0].split(',')
+        params['tournament_ids'] = t_ids
+
+    data, error = balldontlie_request('matches', params)
+    if error is None:
+        return api_response(success=True, data=data, message='ATP matches retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+
+@app.route('/api/atp/atp_race')
+def get_atp_race():
+    """Get ATP race rankings."""
+    if is_rate_limited(request.remote_addr, '/api/atp/atp_race', limit=30, window=60):
+        return jsonify({'success': False, 'error': 'Rate limit exceeded. Please wait 1 minute.'}), 429
+
+    allowed_params = ['cursor', 'per_page']
+    params = {k: request.args.get(k) for k in allowed_params if request.args.get(k) is not None}
+
+    data, error = balldontlie_request('atp_race', params)
+    if error is None:
+        return api_response(success=True, data=data, message='ATP race retrieved')
+    else:
+        return api_response(success=False, data={}, message=error), 500
+
+def call_balldontlie(endpoint, params=None):
+    """Make an authenticated request to the balldontlie PGA API."""
+    if not BALLDONTLIE_API_KEY:
+        return None, "API key not configured"
+    
+    headers = {'Authorization': BALLDONTLIE_API_KEY}
+    url = f"{BALLDONTLIE_BASE_URL}/{endpoint}"
+    
     try:
-        tour = flask_request.args.get('tour', 'ATP').upper()
-        if tour not in TENNIS_PLAYERS:
-            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
-
-        # Try real data first, else mock
-        if tennis_players_data:
-            # Filter by tour if data includes tour field
-            players = [p for p in tennis_players_data if p.get('tour', '').upper() == tour]
-            if not players:
-                players = TENNIS_PLAYERS[tour]
-        else:
-            players = TENNIS_PLAYERS[tour]
-
-        return api_response(
-            success=True,
-            data={"players": players, "tour": tour, "is_real_data": bool(tennis_players_data)},
-            message=f'Retrieved {len(players)} tennis players for {tour}',
-            tour=tour
-        )
-    except Exception as e:
-        print(f"❌ Error in tennis players: {e}")
-        return api_response(success=False, data={}, message=str(e))
-
-@app.route('/api/tennis/tournaments')
-def get_tennis_tournaments():
-    """Get list of major tennis tournaments"""
-    try:
-        tour = flask_request.args.get('tour', 'ATP').upper()
-        if tour not in TENNIS_TOURNAMENTS:
-            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
-
-        return api_response(
-            success=True,
-            data={"tournaments": TENNIS_TOURNAMENTS[tour], "tour": tour, "is_real_data": False},
-            message=f'Retrieved {len(TENNIS_TOURNAMENTS[tour])} tournaments for {tour}'
-        )
-    except Exception as e:
-        print(f"❌ Error in tennis tournaments: {e}")
-        return api_response(success=False, data={}, message=str(e))
-
-@app.route('/api/tennis/matches')
-def get_tennis_matches():
-    """Get current/upcoming tennis matches (mock)"""
-    try:
-        tour = flask_request.args.get('tour', 'ATP').upper()
-        date = flask_request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
-
-        # Generate mock matches
-        matches = []
-        players = TENNIS_PLAYERS.get(tour, [])
-        if players:
-            for i in range(0, len(players)-1, 2):
-                if i+1 < len(players):
-                    match = {
-                        'id': f"tennis-match-{tour}-{i}",
-                        'tour': tour,
-                        'player1': players[i]['name'],
-                        'player2': players[i+1]['name'],
-                        'date': date,
-                        'time': f"{random.randint(10, 20)}:00",
-                        'round': random.choice(['Quarterfinal', 'Semifinal', 'Final', 'Round of 16']),
-                        'tournament': random.choice(TENNIS_TOURNAMENTS[tour]),
-                        'surface': random.choice(['Hard', 'Clay', 'Grass']),
-                        'status': random.choice(['scheduled', 'live', 'completed']),
-                        'score': '6-3, 3-6, 6-4' if random.random() > 0.5 else ''
-                    }
-                    matches.append(match)
-
-        return api_response(
-            success=True,
-            data={"matches": matches, "tour": tour, "date": date, "is_real_data": False},
-            message=f'Retrieved {len(matches)} tennis matches for {tour} on {date}'
-        )
-    except Exception as e:
-        print(f"❌ Error in tennis matches: {e}")
-        return api_response(success=False, data={}, message=str(e))
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json(), None
+    except requests.exceptions.RequestException as e:
+        return None, str(e)
 
 # ------------------------------------------------------------------------------
-# Golf
+# NCAA Basketball endpoints (balldontlie proxy)
 # ------------------------------------------------------------------------------
+
+@app.route('/api/ncaab/conferences')
+def ncaab_conferences():
+    """Get all NCAAB conferences."""
+    result = fetch_from_balldontlie("conferences")
+    if isinstance(result, tuple):  # error case
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/teams')
+def ncaab_teams():
+    """Get all NCAAB teams."""
+    result = fetch_from_balldontlie("teams")
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/players')
+def ncaab_players():
+    """Get NCAAB players with optional filters."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+    }
+    # Handle array parameters: team_ids[] and search
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+    search = flask_request.args.get('search')
+    if search:
+        params['search'] = search
+
+    result = fetch_from_balldontlie("players", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/players/<int:player_id>')
+def ncaab_player(player_id):
+    """Get a single NCAAB player by ID."""
+    result = fetch_from_balldontlie(f"players/{player_id}")
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/players/active')
+def ncaab_players_active():
+    """Get active NCAAB players."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+    }
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+    search = flask_request.args.get('search')
+    if search:
+        params['search'] = search
+
+    result = fetch_from_balldontlie("players/active", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/standings')
+def ncaab_standings():
+    """Get NCAAB standings."""
+    params = {
+        'conference_id': flask_request.args.get('conference_id'),
+        'season': flask_request.args.get('season'),
+    }
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+
+    result = fetch_from_balldontlie("standings", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/games')
+def ncaab_games():
+    """Get NCAAB games with filters."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+        'postseason': flask_request.args.get('postseason'),
+        'status': flask_request.args.get('status'),
+    }
+    # Arrays
+    dates = flask_request.args.getlist('dates[]')
+    if dates:
+        params['dates[]'] = dates
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+    seasons = flask_request.args.getlist('seasons[]')
+    if seasons:
+        params['seasons[]'] = seasons
+
+    result = fetch_from_balldontlie("games", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/games/<int:game_id>')
+def ncaab_game(game_id):
+    """Get a single game by ID."""
+    result = fetch_from_balldontlie(f"games/{game_id}")
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/rankings')
+def ncaab_rankings():
+    """Get NCAAB rankings (AP / Coaches poll)."""
+    params = {
+        'season': flask_request.args.get('season'),
+        'week': flask_request.args.get('week'),
+        'poll': flask_request.args.get('poll'),
+    }
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+
+    result = fetch_from_balldontlie("rankings", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/plays')
+def ncaab_plays():
+    """Get plays for a game (game_id required)."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+        'game_id': flask_request.args.get('game_id'),
+    }
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+    player_ids = flask_request.args.getlist('player_ids[]')
+    if player_ids:
+        params['player_ids[]'] = player_ids
+    types = flask_request.args.getlist('types[]')
+    if types:
+        params['types[]'] = types
+
+    result = fetch_from_balldontlie("plays", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/player_stats')
+def ncaab_player_stats():
+    """Get player game-by-game stats."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+    }
+    game_ids = flask_request.args.getlist('game_ids[]')
+    if game_ids:
+        params['game_ids[]'] = game_ids
+    player_ids = flask_request.args.getlist('player_ids[]')
+    if player_ids:
+        params['player_ids[]'] = player_ids
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+
+    result = fetch_from_balldontlie("player_stats", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/team_stats')
+def ncaab_team_stats():
+    """Get team game-by-game stats."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+    }
+    game_ids = flask_request.args.getlist('game_ids[]')
+    if game_ids:
+        params['game_ids[]'] = game_ids
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+
+    result = fetch_from_balldontlie("team_stats", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/player_season_stats')
+def ncaab_player_season_stats():
+    """Get player cumulative stats for a season."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+        'season': flask_request.args.get('season'),
+    }
+    player_ids = flask_request.args.getlist('player_ids[]')
+    if player_ids:
+        params['player_ids[]'] = player_ids
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+
+    result = fetch_from_balldontlie("player_season_stats", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/team_season_stats')
+def ncaab_team_season_stats():
+    """Get team cumulative stats for a season."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+        'season': flask_request.args.get('season'),
+    }
+    team_ids = flask_request.args.getlist('team_ids[]')
+    if team_ids:
+        params['team_ids[]'] = team_ids
+
+    result = fetch_from_balldontlie("team_season_stats", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/bracket')
+def ncaab_bracket():
+    """Get NCAA tournament bracket games."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+        'season': flask_request.args.get('season'),
+    }
+    result = fetch_from_balldontlie("bracket", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+@app.route('/api/ncaab/odds')
+def ncaab_odds():
+    """Get betting odds for games."""
+    params = {
+        'cursor': flask_request.args.get('cursor'),
+        'per_page': flask_request.args.get('per_page', 25),
+        'game_id': flask_request.args.get('game_id'),
+    }
+    dates = flask_request.args.getlist('dates[]')
+    if dates:
+        params['dates[]'] = dates
+
+    result = fetch_from_balldontlie("odds", params)
+    if isinstance(result, tuple):
+        return jsonify(result[0]), result[1]
+    return jsonify(result)
+
+# ------------------------------------------------------------------------------
+# Golf Players
 @app.route('/api/golf/players')
 def get_golf_players():
-    """Get golf players by tour (PGA/LPGA)"""
+    """Get golf players by tour (PGA/LPGA) using balldontlie for PGA."""
     try:
         tour = flask_request.args.get('tour', 'PGA').upper()
-        if tour not in GOLF_PLAYERS:
-            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
+        per_page = flask_request.args.get('per_page', 50)
+        cursor = flask_request.args.get('cursor')
 
-        if golf_players_data:
-            players = [p for p in golf_players_data if p.get('tour', '').upper() == tour]
-            if not players:
-                players = GOLF_PLAYERS[tour]
-        else:
+        if tour == 'PGA':
+            # Use balldontlie API
+            params = {'per_page': per_page}
+            if cursor:
+                params['cursor'] = cursor
+            
+            data, error = call_balldontlie('players', params)
+            if error:
+                # Fallback to mock data if API fails
+                players = GOLF_PLAYERS.get(tour, [])
+                return api_response(
+                    success=True,
+                    data={"players": players, "tour": tour, "is_real_data": False, "error": error},
+                    message=f'Using fallback data for {tour}'
+                )
+            
+            # Transform to match your existing structure (optional)
+            players = []
+            for p in data.get('data', []):
+                players.append({
+                    'name': p['display_name'],
+                    'country': p['country_code'],
+                    'ranking': p.get('owgr'),  # may be None
+                    'age': None,  # not directly provided, could calculate from birth_date
+                    'first_name': p['first_name'],
+                    'last_name': p['last_name'],
+                    'id': p['id'],
+                    # include other fields if needed
+                })
+            
+            return api_response(
+                success=True,
+                data={
+                    "players": players,
+                    "tour": tour,
+                    "is_real_data": True,
+                    "meta": data.get('meta')
+                },
+                message=f'Retrieved {len(players)} PGA players'
+            )
+        
+        elif tour in GOLF_PLAYERS:
+            # LPGA or other tours – use your existing mock data
             players = GOLF_PLAYERS[tour]
-
-        return api_response(
-            success=True,
-            data={"players": players, "tour": tour, "is_real_data": bool(golf_players_data)},
-            message=f'Retrieved {len(players)} golf players for {tour}'
-        )
+            return api_response(
+                success=True,
+                data={"players": players, "tour": tour, "is_real_data": False},
+                message=f'Retrieved {len(players)} golf players for {tour}'
+            )
+        else:
+            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
+    
     except Exception as e:
         print(f"❌ Error in golf players: {e}")
         return api_response(success=False, data={}, message=str(e))
 
+# ------------------------------------------------------------------------------
+# Golf Tournaments
 @app.route('/api/golf/tournaments')
 def get_golf_tournaments():
-    """Get list of major golf tournaments"""
+    """Get golf tournaments – uses balldontlie for PGA, mock for LPGA."""
     try:
         tour = flask_request.args.get('tour', 'PGA').upper()
-        if tour not in GOLF_TOURNAMENTS:
-            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
+        season = flask_request.args.get('season', 2025)  # optional
+        per_page = flask_request.args.get('per_page', 50)
+        cursor = flask_request.args.get('cursor')
 
-        return api_response(
-            success=True,
-            data={"tournaments": GOLF_TOURNAMENTS[tour], "tour": tour, "is_real_data": False},
-            message=f'Retrieved {len(GOLF_TOURNAMENTS[tour])} tournaments for {tour}'
-        )
+        if tour == 'PGA':
+            params = {'per_page': per_page}
+            if season:
+                params['season'] = season
+            if cursor:
+                params['cursor'] = cursor
+
+            data, error = call_balldontlie('tournaments', params)
+            if error:
+                tournaments = GOLF_TOURNAMENTS.get(tour, [])
+                return api_response(
+                    success=True,
+                    data={"tournaments": tournaments, "tour": tour, "is_real_data": False, "error": error},
+                    message=f'Using fallback tournament list for {tour}'
+                )
+            
+            # Transform to a more detailed list
+            tournaments = []
+            for t in data.get('data', []):
+                tournaments.append({
+                    'id': t['id'],
+                    'name': t['name'],
+                    'season': t['season'],
+                    'start_date': t['start_date'],
+                    'end_date': t['end_date'],
+                    'city': t.get('city'),
+                    'state': t.get('state'),
+                    'country': t.get('country'),
+                    'course_name': t.get('course_name'),
+                    'purse': t.get('purse'),
+                    'status': t.get('status'),
+                    'champion': t.get('champion')  # includes player details if available
+                })
+            
+            return api_response(
+                success=True,
+                data={
+                    "tournaments": tournaments,
+                    "tour": tour,
+                    "is_real_data": True,
+                    "meta": data.get('meta')
+                },
+                message=f'Retrieved {len(tournaments)} PGA tournaments'
+            )
+        
+        elif tour in GOLF_TOURNAMENTS:
+            # LPGA fallback
+            tournaments = GOLF_TOURNAMENTS[tour]
+            return api_response(
+                success=True,
+                data={"tournaments": tournaments, "tour": tour, "is_real_data": False},
+                message=f'Retrieved {len(tournaments)} tournaments for {tour}'
+            )
+        else:
+            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
+    
     except Exception as e:
         print(f"❌ Error in golf tournaments: {e}")
         return api_response(success=False, data={}, message=str(e))
 
+# ------------------------------------------------------------------------------
+# Golf Leaderboard (Tournament Results)
 @app.route('/api/golf/leaderboard')
 def get_golf_leaderboard():
-    """Get mock golf leaderboard for a tournament"""
+    """
+    Get tournament leaderboard using balldontlie tournament_results.
+    Expects a tournament_id (or tournament_ids[]) parameter for PGA.
+    For LPGA, falls back to mock leaderboard.
+    """
     try:
         tour = flask_request.args.get('tour', 'PGA').upper()
-        tournament = flask_request.args.get('tournament', random.choice(GOLF_TOURNAMENTS[tour]))
+        tournament_id = flask_request.args.get('tournament_id')
+        tournament_ids = flask_request.args.getlist('tournament_ids[]')  # if multiple
+        per_page = flask_request.args.get('per_page', 50)
+        cursor = flask_request.args.get('cursor')
 
-        players = GOLF_PLAYERS.get(tour, [])
-        leaderboard = []
-        for player in players[:20]:
-            score = random.randint(-10, 5)
-            to_par = f"{score}" if score <= 0 else f"+{score}"
-            leaderboard.append({
-                'position': random.randint(1, 20),
-                'player': player['name'],
-                'country': player['country'],
-                'to_par': to_par,
-                'round1': random.randint(65, 75),
-                'round2': random.randint(65, 75),
-                'round3': random.randint(65, 75),
-                'round4': random.randint(65, 75) if random.random() > 0.5 else '-',
-                'total': random.randint(270, 290)
-            })
-        # Sort by position
-        leaderboard.sort(key=lambda x: x['position'])
+        if tour == 'PGA':
+            # Need at least one tournament ID
+            if not tournament_id and not tournament_ids:
+                return api_response(
+                    success=False,
+                    data={},
+                    message='tournament_id or tournament_ids[] is required for PGA leaderboard'
+                )
+            
+            # Use tournament_ids param (API accepts array)
+            params = {'per_page': per_page}
+            if tournament_ids:
+                # If multiple ids passed as separate params
+                for tid in tournament_ids:
+                    params.setdefault('tournament_ids[]', []).append(tid)
+            else:
+                params['tournament_ids[]'] = [tournament_id]
+            
+            if cursor:
+                params['cursor'] = cursor
 
-        return api_response(
-            success=True,
-            data={"leaderboard": leaderboard, "tour": tour, "tournament": tournament, "is_real_data": False},
-            message=f'Retrieved leaderboard for {tournament}'
-        )
+            data, error = call_balldontlie('tournament_results', params)
+            if error:
+                # Fallback to mock leaderboard
+                return _mock_leaderboard_fallback(tour, error)
+            
+            # Transform results into leaderboard format
+            leaderboard = []
+            for result in data.get('data', []):
+                leaderboard.append({
+                    'position': result['position'],
+                    'position_numeric': result.get('position_numeric'),
+                    'player': result['player']['display_name'],
+                    'player_id': result['player']['id'],
+                    'country': result['player']['country_code'],
+                    'to_par': f"{result['par_relative_score']:+d}" if result['par_relative_score'] is not None else None,
+                    'total_score': result['total_score'],
+                    'earnings': result.get('earnings'),
+                    'tournament': result['tournament']['name']
+                })
+            
+            # Sort by position (ascending, ties handled by position_numeric)
+            leaderboard.sort(key=lambda x: (x['position_numeric'] if x['position_numeric'] else float('inf'), x['position']))
+            
+            return api_response(
+                success=True,
+                data={
+                    "leaderboard": leaderboard,
+                    "tour": tour,
+                    "is_real_data": True,
+                    "meta": data.get('meta')
+                },
+                message=f'Retrieved leaderboard for tournament(s)'
+            )
+        
+        elif tour in GOLF_PLAYERS:
+            # LPGA or other – use mock leaderboard
+            return _mock_leaderboard_fallback(tour)
+        else:
+            return api_response(success=False, data={}, message=f'Invalid tour: {tour}')
+    
     except Exception as e:
         print(f"❌ Error in golf leaderboard: {e}")
         return api_response(success=False, data={}, message=str(e))
+
+def _mock_leaderboard_fallback(tour, error=None):
+    """Generate mock leaderboard for LPGA or fallback."""
+    import random
+    tournament = flask_request.args.get('tournament', random.choice(GOLF_TOURNAMENTS.get(tour, ['Unknown'])))
+    players = GOLF_PLAYERS.get(tour, [])
+    leaderboard = []
+    for player in players[:20]:
+        score = random.randint(-10, 5)
+        to_par = f"{score}" if score <= 0 else f"+{score}"
+        leaderboard.append({
+            'position': random.randint(1, 20),
+            'player': player['name'],
+            'country': player['country'],
+            'to_par': to_par,
+            'round1': random.randint(65, 75),
+            'round2': random.randint(65, 75),
+            'round3': random.randint(65, 75),
+            'round4': random.randint(65, 75) if random.random() > 0.5 else '-',
+            'total': random.randint(270, 290)
+        })
+    leaderboard.sort(key=lambda x: x['position'])
+    
+    response_data = {
+        "leaderboard": leaderboard,
+        "tour": tour,
+        "tournament": tournament,
+        "is_real_data": False
+    }
+    if error:
+        response_data["error"] = error
+    return api_response(
+        success=True,
+        data=response_data,
+        message=f'Using mock leaderboard for {tournament}'
+    )
 
 # ------------------------------------------------------------------------------
 # NFL
@@ -10828,64 +11868,377 @@ def get_nfl_standings():
 # ------------------------------------------------------------------------------
 # NHL
 # ------------------------------------------------------------------------------
-@app.route('/api/nhl/games')
-def get_nhl_games():
-    """REAL DATA: Get NHL games from stats database"""
+@app.route('/api/nhl/props')
+def get_nhl_props():
     try:
-        date = flask_request.args.get('date')
-        
-        if NHL_API_KEY:
-            return get_real_nhl_games(date)
-        
-        # Try to get from player data (teams)
-        nhl_teams = set()
-        for player in nhl_players_data[:50]:
-            team = player.get('team') or player.get('teamAbbrev')
-            if team:
-                nhl_teams.add(team)
-        
-        real_games = []
-        team_list = list(nhl_teams)
-        
-        if len(team_list) >= 4:
-            for i in range(0, len(team_list), 2):
-                if i + 1 < len(team_list):
-                    real_games.append({
-                        'id': f'nhl-real-{i//2}',
-                        'home_team': team_list[i],
-                        'away_team': team_list[i + 1],
-                        'date': date or datetime.now(timezone.utc).isoformat(),
-                        'venue': f"{team_list[i]} Arena",
-                        'tv': random.choice(['ESPN+', 'TNT', 'NHL Network']),
-                        'is_real_data': True
-                    })
-        
-        if real_games:
-            return jsonify({
-                'success': True,
-                'games': real_games,
-                'count': len(real_games),
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'source': 'player_data'
-            })
-        
-        # Fallback
+        game_date = flask_request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        limit = int(flask_request.args.get('limit', 50))
+
+        # 1. Fetch defensive stats
+        defensive_stats_map = fetch_nhl_defensive_stats()
+        league_avgs = compute_nhl_league_averages(defensive_stats_map)
+
+        # 2. Fetch real props from The Odds API
+        props = fetch_nhl_props_from_odds_api(game_date)
+        source = 'the-odds-api'
+
+        # 3. Fallback to mock if none
+        if not props:
+            # Generate mock NHL props (you may have a generator; if not, create one)
+            # For now, we'll create a simple mock list
+            props = generate_mock_nhl_props(limit)
+            source = 'mock'
+
+        # 4. Apply opponent adjustment (if defensive stats available)
+        for prop in props:
+            opponent = prop.get('opponent')
+            stat_type = prop.get('stat', '').lower()  # e.g., 'points', 'assists', 'shots_on_goal'
+
+            if opponent and stat_type in league_avgs:
+                factor = 1.0
+                stat_key_map = {
+                    'points': 'goals',
+                    'goals': 'goals',
+                    'assists': 'assists',
+                    'shots_on_goal': 'shots'
+                }
+                def_key = stat_key_map.get(stat_type)
+                if def_key and defensive_stats_map.get(opponent):
+                    opp_stats = defensive_stats_map[opponent]
+                    if def_key in opp_stats and def_key in league_avgs:
+                        factor = opp_stats[def_key] / league_avgs[def_key]
+                elif def_key and opponent in NHL_DEFENSIVE_FACTORS:
+                    factor = NHL_DEFENSIVE_FACTORS[opponent].get(def_key, 1.0)
+
+                original_proj = prop.get('projection', prop.get('line', 0))
+                adjusted_proj = original_proj * factor
+                prop['projection'] = round(adjusted_proj, 2)
+                prop['opponent_factor'] = round(factor, 3)
+
+                # Edge and confidence
+                line = prop.get('line')
+                if line and line > 0:
+                    edge = ((adjusted_proj - line) / line) * 100
+                    prop['edge'] = round(edge, 1)
+                    if edge > 10:
+                        prop['confidence'] = 'high'
+                    elif edge < -10:
+                        prop['confidence'] = 'low'
+                    else:
+                        prop['confidence'] = 'medium'
+
         return jsonify({
             'success': True,
-            'games': generate_mock_nhl_games(date),
-            'count': 2,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'source': 'mock'
+            'date': game_date,
+            'props': props[:limit],
+            'count': len(props[:limit]),
+            'source': source,
+            'last_updated': datetime.now(timezone.utc).isoformat()
         })
-        
+
     except Exception as e:
-        print(f"❌ Error in nhl/games: {e}")
+        print(f"❌ Error in /api/nhl/props: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/nhl/team-players')
+def get_team_players():
+    team_id = flask_request.args.get('teamId')
+    if not team_id:
+        return jsonify({'error': 'Missing teamId'}), 400
+    players = get_nhl_team_players(team_id)
+    return jsonify({'success': True, 'players': players})
+
+@app.route('/api/nhl/player-statistic')
+def get_player_statistic():
+    player_id = flask_request.args.get('playerId')
+    if not player_id:
+        return jsonify({'error': 'Missing playerId'}), 400
+    stats = get_nhl_player_stats(player_id)
+    return jsonify({'success': True, 'stats': stats})
+
+@app.route('/api/nhl/standings')
+def get_nhl_standings():
+    """REAL DATA: Get NHL standings from RapidAPI"""
+    try:
+        if not NHL_API_KEY:
+            return jsonify({'success': False, 'error': 'API key missing'}), 400
+
+        year = datetime.now().year
+        url = f"https://{RAPIDAPI_HOST}/nhlstandings"
+        querystring = {
+            "year": str(year),
+            "group": "league"  # or 'conference', 'division'
+        }
+        headers = {
+            "X-RapidAPI-Key": NHL_API_KEY,
+            "X-RapidAPI-Host": RAPIDAPI_HOST
+        }
+
+        response = requests.get(url, headers=headers, params=querystring)
+        response.raise_for_status()
+        data = response.json()
+
+        # Transform to frontend NHLStanding format
+        standings = []
+        for team in data.get('data', []):
+            # Map fields according to actual response
+            standings.append({
+                'id': f"nhl-{team.get('teamAbbrev', {}).get('default')}",
+                'team': team.get('teamName', {}).get('default', ''),
+                'abbreviation': team.get('teamAbbrev', {}).get('default', ''),
+                'conference': team.get('conferenceName', ''),
+                'division': team.get('divisionName', ''),
+                'games_played': team.get('gamesPlayed', 0),
+                'wins': team.get('wins', 0),
+                'losses': team.get('losses', 0),
+                'ot_losses': team.get('otLosses', 0),
+                'points': team.get('points', 0),
+                'win_percentage': team.get('pointPctg', 0) / 100 if team.get('pointPctg') else 0,
+                'goals_for': team.get('goalsFor', 0),
+                'goals_against': team.get('goalsAgainst', 0),
+                'goal_differential': team.get('goalDifferential', 0),
+                'streak': team.get('streak', ''),
+                'last_10': team.get('last10', ''),
+                'home_record': team.get('homeRecord', ''),
+                'away_record': team.get('roadRecord', ''),
+                'is_real_data': True
+            })
+        return jsonify({'success': True, 'standings': standings, 'count': len(standings)})
+
+    except Exception as e:
+        print(f"❌ Error in /api/nhl/standings: {e}")
+        return jsonify({'success': False, 'error': str(e), 'standings': []})
+
+@app.route('/api/players')
+def get_players():
+    """Get players – returns real or enhanced mock data with realistic stats."""
+    try:
+        sport = flask_request.args.get('sport', 'nba').lower()
+        limit = int(flask_request.args.get('limit', '200'))
+        use_realtime = flask_request.args.get('realtime', 'true').lower() == 'true'
+
+        print(f"🎯 GET /api/players: sport={sport}, limit={limit}, realtime={use_realtime}", flush=True)
+
+        # 1. For NBA with realtime, try Balldontlie
+        if sport == 'nba' and use_realtime and BALLDONTLIE_API_KEY:
+            print("🏀 Attempting Balldontlie real-time players...", flush=True)
+            nba_players = fetch_nba_from_balldontlie(limit)
+            if nba_players:
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "players": nba_players,
+                        "is_real_data": True,
+                        "data_source": "Balldontlie GOAT"
+                    },
+                    "message": f'Loaded {len(nba_players)} real-time players',
+                    "sport": sport
+                })
+            else:
+                print("⚠️ Balldontlie failed – falling back", flush=True)
+
+        # 2. For NHL with realtime, try RapidAPI
+        elif sport == 'nhl' and use_realtime and RAPIDAPI_KEY:
+            print("🏒 Attempting RapidAPI NHL real-time players...", flush=True)
+            nhl_players = fetch_nhl_from_rapidapi(limit)
+            if nhl_players:
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "players": nhl_players,
+                        "is_real_data": True,
+                        "data_source": "RapidAPI NHL"
+                    },
+                    "message": f'Loaded {len(nhl_players)} real-time players',
+                    "sport": sport
+                })
+            else:
+                print("⚠️ RapidAPI NHL failed – falling back", flush=True)
+
+        # 3. Static 2026 NBA data fallback (if available)
+        if sport == 'nba' and NBA_PLAYERS_2026:
+            print("📦 Using static 2026 NBA data for /api/players", flush=True)
+            data_source = NBA_PLAYERS_2026
+            source_name = "NBA 2026 Static"
+        else:
+            # 4. Existing static data sources for other sports
+            if sport == 'nfl':
+                data_source = nfl_players_data
+                source_name = "NFL"
+            elif sport == 'mlb':
+                data_source = mlb_players_data
+                source_name = "MLB"
+            elif sport == 'nhl':
+                data_source = nhl_players_data
+                source_name = "NHL"
+            elif sport == 'tennis':
+                data_source = TENNIS_PLAYERS.get('ATP', []) + TENNIS_PLAYERS.get('WTA', [])
+                source_name = "Tennis (mock)"
+            elif sport == 'golf':
+                data_source = GOLF_PLAYERS.get('PGA', []) + GOLF_PLAYERS.get('LPGA', [])
+                source_name = "Golf (mock)"
+            else:  # default to NBA (generic list)
+                data_source = players_data_list
+                source_name = "NBA"
+
+        # Ensure data_source is a list; if empty, generate mock players
+        if not data_source:
+            print(f"⚠️ No static data for {sport}, generating mock players", flush=True)
+            data_source = generate_mock_players(sport, 100)
+            source_name = f"{sport.upper()} (generated)"
+
+        total_available = len(data_source)
+        print(f"📊 Found {total_available} {source_name} players in fallback", flush=True)
+
+        # Apply limit
+        players_to_use = data_source if limit <= 0 else data_source[:min(limit, total_available)]
+
+        enhanced_players = []
+        for i, player in enumerate(players_to_use):
+            p = player.copy() if isinstance(player, dict) else {}
+
+            # If using NBA 2026 static data, map per‑game stats and compute salary/fantasy points with FanDuel formula
+            if source_name == "NBA 2026 Static":
+                # Map to standard keys expected by frontend
+                p['points'] = p.get('pts_per_game', 0)
+                p['rebounds'] = p.get('reb_per_game', 0)
+                p['assists'] = p.get('ast_per_game', 0)
+                p['steals'] = p.get('stl_per_game', 0)
+                p['blocks'] = p.get('blk_per_game', 0)
+                p['turnovers'] = p.get('to_per_game', 0)
+                p['minutes'] = p.get('min_per_game', random.uniform(20, 40))
+                p['games_played'] = p.get('games', 0)
+                p['injury_status'] = p.get('injury_status', 'Healthy')
+
+                # Fantasy points – use precomputed if available, otherwise compute a simple formula
+                fp = p.get('fantasy_points')
+                if fp is None:
+                    fp = (p['points'] + 1.2 * p['rebounds'] + 1.5 * p['assists'] +
+                          2 * p['steals'] + 2 * p['blocks'] - p['turnovers'])
+                p['fantasy_points'] = fp
+
+                # FanDuel salary calculation (same as in /api/fantasy/players)
+                BASE_SALARY_MIN = 3000
+                BASE_SALARY_MAX = 11000
+                FP_TARGET = 48.0
+                if fp >= FP_TARGET:
+                    base_salary = BASE_SALARY_MAX
+                else:
+                    slope = (BASE_SALARY_MAX - BASE_SALARY_MIN) / FP_TARGET
+                    base_salary = BASE_SALARY_MIN + slope * fp
+
+                pos_mult = {'PG': 0.95, 'SG': 1.0, 'SF': 1.05, 'PF': 1.1, 'C': 1.15,
+                            'G': 1.0, 'F': 1.1}.get(p.get('position', ''), 1.0)
+                rand_factor = random.uniform(0.9, 1.1)
+                salary = int(base_salary * pos_mult * rand_factor)
+                salary = max(3000, min(15000, salary))
+                value = fp / (salary / 1000) if salary > 0 else 0
+
+                p['salary'] = salary
+                p['value'] = value
+                p['projected_points'] = round(fp, 1)
+
+                # ID generation consistent with other endpoints
+                player_id = f"nba-static-{p['name'].replace(' ', '-')}-{p['team']}"
+            else:
+                # For other sources, use the existing enhancement function
+                p = enhance_player_data(p)
+                player_id = p.get('id') or p.get('player_id') or f'player-{i}'
+
+            # Build final formatted player object
+            formatted = {
+                'id': player_id,
+                'name': p.get('name', f'Player_{i}'),
+                'team': p.get('team', 'Unknown'),
+                'position': p.get('position', 'Unknown'),
+                'sport': sport.upper(),
+                'age': p.get('age', random.randint(21, 38)),
+                'games_played': p.get('games_played', 0),
+                'points': round(p.get('points', 0), 1),
+                'rebounds': round(p.get('rebounds', 0), 1),
+                'assists': round(p.get('assists', 0), 1),
+                'steals': round(p.get('steals', 0), 1),
+                'blocks': round(p.get('blocks', 0), 1),
+                'minutes': round(p.get('minutes', 0), 1),
+                'fantasy_points': round(p.get('fantasy_points', 0), 1),
+                'projected_points': round(p.get('projected_points', p.get('fantasy_points', 0)), 1),
+                'salary': p.get('salary', 5000),
+                'value': round(p.get('value', 0), 2),
+                'stats': p.get('stats', {}),
+                'injury_status': p.get('injury_status', 'Healthy'),
+                'is_real_data': source_name == "NBA 2026 Static",
+                'data_source': source_name,
+                'is_enhanced': True
+            }
+            enhanced_players.append(formatted)
+
+        enhanced_players = [p for p in enhanced_players if p is not None]
+
+        print(f"✅ Enhanced {len(enhanced_players)} players for {sport}", flush=True)
         return jsonify({
-            'success': False,
-            'error': str(e),
-            'games': [],
-            'count': 0
+            "success": True,
+            "data": {
+                "players": enhanced_players,
+                "is_real_data": source_name == "NBA 2026 Static"
+            },
+            "message": f'Loaded and enhanced {len(enhanced_players)} {source_name} players',
+            "sport": sport
         })
+
+    except Exception as e:
+        print(f"❌ Error in /api/players: {e}", flush=True)
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "data": {"players": []},
+            "message": f'Error fetching players: {str(e)}'
+        })
+
+@app.route('/api/nhl/games')
+def get_nhl_games():
+    """Proxy for NHL API scoreboard by date – defaults to today if no date given"""
+    try:
+        date = request.args.get('date')
+        if not date:
+            date = datetime.now().strftime('%Y-%m-%d')
+            print(f"📅 No date provided, defaulting to {date}")
+
+        url = f"https://api-web.nhle.com/v1/scoreboard/{date}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        games = []
+        for date_entry in data.get('gamesByDate', []):
+            for game in date_entry.get('games', []):
+                game_data = {
+                    'id': game['id'],
+                    'home_team': game['homeTeam']['name']['default'],
+                    'away_team': game['awayTeam']['name']['default'],
+                    'home_abbrev': game['homeTeam']['abbrev'],
+                    'away_abbrev': game['awayTeam']['abbrev'],
+                    'home_score': game.get('homeTeam', {}).get('score'),
+                    'away_score': game.get('awayTeam', {}).get('score'),
+                    'status': game['gameState'],
+                    'period': game.get('period'),
+                    'date': game['gameDate'],  # ✅ Renamed from game_date
+                    'venue': game.get('venue', {}).get('default', 'NHL Arena'),
+                    'tv': next((b['network'] for b in game.get('tvBroadcasts', []) if b.get('network')), 'NHL Network'),
+                    'is_real_data': True  # ✅ Add this flag
+                }
+                games.append(game_data)
+
+        return jsonify({
+            'games': games,
+            'count': len(games),
+            'date': date,
+            'source': 'nhl-api'
+        })
+
+    except Exception as e:
+        print(f"❌ Error in /api/nhl/games: {e}")
+        return jsonify({'error': str(e)}), 500
 
 def generate_mock_nhl_games(date=None):
     games = [
@@ -10907,6 +12260,47 @@ def generate_mock_nhl_games(date=None):
         }
     ]
     return games
+
+def generate_mock_nhl_props(limit=50):
+    import random
+    from datetime import datetime
+    print(f"🏒 generate_mock_nhl_props called with limit={limit}")
+    players = [
+        ('Connor McDavid', 'EDM'), ('Auston Matthews', 'TOR'), ('Nathan MacKinnon', 'COL'),
+        ('Leon Draisaitl', 'EDM'), ('David Pastrnak', 'BOS'), ('Cale Makar', 'COL')
+    ]
+    stats = ['points', 'assists', 'shots_on_goal']
+    props = []
+    for i in range(limit):
+        player, team = random.choice(players)
+        stat = random.choice(stats)
+        if stat == 'points':
+            line = round(random.uniform(1.5, 3.5), 1)
+        elif stat == 'assists':
+            line = round(random.uniform(0.5, 2.5), 1)
+        else:
+            line = round(random.uniform(2.5, 4.5), 1)
+        opponent = random.choice(['VGK', 'DAL', 'NYR', 'BOS', 'COL', 'FLA'])
+        over_odds = random.choice(['-115', '-120', '-110', '-130'])
+        under_odds = random.choice(['+105', '+100', '-105', '-115'])
+        prop = {
+            'id': f"mock-nhl-{i}-{random.randint(1000,9999)}",
+            'player': player,
+            'team': team,
+            'opponent': opponent,
+            'stat': stat,
+            'line': line,
+            'projection': round(line * random.uniform(0.9, 1.2), 1),
+            'over_odds': over_odds,
+            'under_odds': under_odds,
+            'bookmaker': 'Mock',
+            'game_date': datetime.now().strftime('%Y-%m-%d'),
+            'source': 'mock',
+            'is_real_data': False
+        }
+        props.append(prop)
+    print(f"🏒 Generated {len(props)} props")
+    return props
 
 def generate_mock_advanced_analytics(sport, needed):
     mock_players = [
@@ -11201,6 +12595,91 @@ def build_roster_context(sport):
     header = f"Current {sport.upper()} player-team affiliations (as of February 18, 2026):\n"
     return header + "\n".join(truncated)
 
+@app.route('/api/mlb/games')
+def get_mlb_games():
+    """Proxy for Tank01 MLB games by date"""
+    try:
+        date = request.args.get('date')
+        if not date:
+            return jsonify({'error': 'Missing date parameter'}), 400
+
+        tank01_date = date.replace('-', '')
+        rapidapi_key = os.getenv('RAPIDAPI_KEY')
+        if not rapidapi_key:
+            return jsonify({'error': 'RAPIDAPI_KEY not configured'}), 500
+
+        url = f"https://tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com/getMLBGamesForDate?gameDate={tank01_date}"
+        headers = {
+            'x-rapidapi-host': 'tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com',
+            'x-rapidapi-key': rapidapi_key
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        # 🐛 DEBUG: log the raw response to see its structure
+        print(f"🔍 MLB raw response for {date}: {data}")
+
+        # Tank01 may return:
+        # - a dict with "body" containing "games"
+        # - a dict with top‑level "games"
+        # - a direct list of games
+        # - an empty list []
+        # - a list containing a single empty list? (e.g., [[]])
+        games_raw = []
+        if isinstance(data, dict):
+            if 'body' in data and isinstance(data['body'], dict):
+                games_raw = data['body'].get('games', [])
+            elif 'games' in data:
+                games_raw = data['games']
+        elif isinstance(data, list):
+            games_raw = data
+
+        # If games_raw is a list of lists, flatten it (unlikely but safe)
+        if games_raw and isinstance(games_raw[0], list):
+            games_raw = [item for sublist in games_raw for item in sublist]
+
+        games = []
+        for game in games_raw:
+            # Skip if game is not a dict (e.g., empty list inside)
+            if not isinstance(game, dict):
+                continue
+            game_data = {
+                'id': game.get('gameID', ''),
+                'home_team': game.get('home', ''),
+                'away_team': game.get('away', ''),
+                'home_abbrev': game.get('home', ''),
+                'away_abbrev': game.get('away', ''),
+                'home_full': game.get('home_full', game.get('home', '')),
+                'away_full': game.get('away_full', game.get('away', '')),
+                'home_score': game.get('homeScore'),
+                'away_score': game.get('awayScore'),
+                'status': game.get('gameStatus', 'Scheduled'),
+                'inning': game.get('inning'),
+                'game_date': game.get('gameDate', tank01_date),
+                'venue': game.get('venue', 'MLB Stadium'),
+                'tv': 'MLB.TV'
+            }
+            games.append(game_data)
+
+        return jsonify({
+            'games': games,
+            'count': len(games),
+            'date': date,
+            'source': 'tank01-mlb'
+        })
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ MLB API request failed: {e}")
+        return jsonify({'error': 'Failed to fetch MLB data'}), 502
+    except Exception as e:
+        print(f"❌ Unexpected error in MLB endpoint: {e}")
+        # Print full traceback for debugging
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/mlb/players')
 def get_mlb_players():
     """Get MLB players. Optional filters: team, position, limit."""
@@ -11265,87 +12744,154 @@ def get_mlb_players():
 # ------------------------------------------------------------------------------
 # /api/mlb/players/<player_id> - Detailed player info with stats
 # ------------------------------------------------------------------------------
+def fetch_tank01_player_detail(player_id, season):
+    """Fetch player info and season stats from Tank01 with detailed logging."""
+    try:
+        print(f"🔍 Fetching player detail for ID {player_id}, season {season}")
+        
+        # --- Get basic player info ---
+        print(f"   Calling getMLBPlayerInfo for player {player_id}")
+        info_data = call_tank01("getMLBPlayerInfo", {"playerID": player_id})
+        print(f"   getMLBPlayerInfo response status: {info_data.get('statusCode')}")
+        
+        body = info_data.get("body", {})
+        print(f"   Body type: {type(body)}")
+        if isinstance(body, dict):
+            print(f"   Body keys: {list(body.keys())[:5]}")
+        else:
+            print(f"   Body content (first 200 chars): {str(body)[:200]}")
+        
+        # For getMLBPlayerInfo, the body is the player object itself
+        player_info = body
+        if not player_info:
+            print(f"   ❌ No player info found for ID {player_id}")
+            return None
+
+        print(f"   Player info found: {player_info.get('longName')} ({player_info.get('pos')})")
+
+        # --- Get season stats (game logs) ---
+        games = []
+        try:
+            print(f"   Calling getMLBPlayerGames for player {player_id}, season {season}")
+            stats_data = call_tank01("getMLBPlayerGames", {"playerID": player_id, "season": season})
+            print(f"   getMLBPlayerGames response status: {stats_data.get('statusCode')}")
+            games = stats_data.get("body", [])
+        except Exception as e:
+            # If 404, it's likely no games for that season – continue with empty list
+            if "404" in str(e):
+                print(f"   ⚠️ No game logs found for season {season} (404) – using empty list")
+            else:
+                # Re-raise other unexpected errors
+                print(f"   ❌ Unexpected error fetching games: {e}")
+                raise
+        print(f"   Received {len(games)} games for season {season}")
+
+        # Determine if pitcher
+        is_pitcher = 'P' in player_info.get('pos', '')
+        print(f"   Player is {'pitcher' if is_pitcher else 'hitter'}")
+
+        # Build base info
+        player = {
+            'id': player_id,
+            'name': player_info.get('longName'),
+            'team': player_info.get('team'),
+            'position': player_info.get('pos'),
+            'age': None,
+            'bats': player_info.get('bat'),
+            'throws': player_info.get('throw'),
+            'jersey': player_info.get('jerseyNum'),
+            'height': player_info.get('height'),
+            'weight': player_info.get('weight'),
+            'birth_date': player_info.get('bDay'),
+            'college': player_info.get('college'),
+            'season': season,
+            'is_real_data': True
+        }
+
+        if is_pitcher:
+            # Aggregate pitching stats
+            stats = {
+                'wins': 0, 'losses': 0, 'era': 0.0, 'games': 0, 'games_started': 0,
+                'saves': 0, 'ip': 0.0, 'hits_allowed': 0, 'earned_runs': 0,
+                'home_runs_allowed': 0, 'walks': 0, 'strikeouts': 0,
+                'whip': 0.0, 'k_per_9': 0.0, 'bb_per_9': 0.0,
+            }
+            for game in games:
+                pitching = game.get('Pitching', {})
+                if pitching:
+                    stats['wins'] += int(pitching.get('Win', 0))
+                    stats['losses'] += int(pitching.get('Loss', 0))
+                    stats['games'] += 1
+                    stats['games_started'] += 1 if game.get('gameStarted') else 0
+                    stats['saves'] += int(pitching.get('Save', 0))
+                    stats['ip'] += float(pitching.get('InningsPitched', 0))
+                    stats['hits_allowed'] += int(pitching.get('Hits', 0))
+                    stats['earned_runs'] += int(pitching.get('EarnedRuns', 0))
+                    stats['home_runs_allowed'] += int(pitching.get('HomeRuns', 0))
+                    stats['walks'] += int(pitching.get('Walks', 0))
+                    stats['strikeouts'] += int(pitching.get('Strikeouts', 0))
+            if stats['ip'] > 0:
+                stats['era'] = round((stats['earned_runs'] * 9) / stats['ip'], 2)
+                stats['whip'] = round((stats['walks'] + stats['hits_allowed']) / stats['ip'], 2)
+                stats['k_per_9'] = round((stats['strikeouts'] * 9) / stats['ip'], 2)
+                stats['bb_per_9'] = round((stats['walks'] * 9) / stats['ip'], 2)
+            player['stats'] = stats
+            print(f"   Aggregated pitching stats: {stats}")
+        else:
+            # Aggregate hitting stats
+            stats = {
+                'games': 0, 'plate_appearances': 0, 'at_bats': 0, 'runs': 0,
+                'hits': 0, 'doubles': 0, 'triples': 0, 'home_runs': 0,
+                'rbi': 0, 'walks': 0, 'strikeouts': 0, 'stolen_bases': 0,
+                'caught_stealing': 0, 'avg': 0.0, 'obp': 0.0, 'slg': 0.0, 'ops': 0.0,
+            }
+            for game in games:
+                hitting = game.get('Hitting', {})
+                if hitting:
+                    stats['games'] += 1
+                    stats['plate_appearances'] += int(hitting.get('PlateAppearances', 0))
+                    stats['at_bats'] += int(hitting.get('AtBats', 0))
+                    stats['runs'] += int(hitting.get('Runs', 0))
+                    stats['hits'] += int(hitting.get('Hits', 0))
+                    stats['doubles'] += int(hitting.get('Doubles', 0))
+                    stats['triples'] += int(hitting.get('Triples', 0))
+                    stats['home_runs'] += int(hitting.get('HomeRuns', 0))
+                    stats['rbi'] += int(hitting.get('RBIs', 0))
+                    stats['walks'] += int(hitting.get('Walks', 0))
+                    stats['strikeouts'] += int(hitting.get('Strikeouts', 0))
+                    stats['stolen_bases'] += int(hitting.get('StolenBases', 0))
+                    stats['caught_stealing'] += int(hitting.get('CaughtStealing', 0))
+            if stats['at_bats'] > 0:
+                stats['avg'] = round(stats['hits'] / stats['at_bats'], 3)
+                total_bases = (stats['hits'] - stats['doubles'] - stats['triples'] - stats['home_runs']) + \
+                              2*stats['doubles'] + 3*stats['triples'] + 4*stats['home_runs']
+                stats['slg'] = round(total_bases / stats['at_bats'], 3)
+            if stats['plate_appearances'] > 0:
+                stats['obp'] = round((stats['hits'] + stats['walks']) / stats['plate_appearances'], 3)
+            if stats['obp'] and stats['slg']:
+                stats['ops'] = round(stats['obp'] + stats['slg'], 3)
+            player['stats'] = stats
+            print(f"   Aggregated hitting stats: {stats}")
+
+        print(f"✅ Successfully built player detail for {player['name']}")
+        return player
+
+    except Exception as e:
+        print(f"❌ Error in fetch_tank01_player_detail: {e}")
+        traceback.print_exc()
+        return None
+
 @app.route('/api/mlb/players/<player_id>')
 def get_mlb_player_detail(player_id):
-    """Get detailed stats for a specific MLB player."""
     try:
         season = flask_request.args.get('season', datetime.now().year)
-        # First, try to find the player in our data
-        # (In production, you'd query a database or API by ID)
-        # For now, we'll generate a mock detail if not found.
-
-        # Mock: assume player_id format like "mlb-mock-123"
-        if player_id.startswith('mlb-mock-'):
-            # Generate consistent mock stats
-            import hashlib
-            seed = int(hashlib.md5(player_id.encode()).hexdigest(), 16) % 1000
-            random.seed(seed)
-            is_pitcher = random.choice([True, False])
-            base = {
-                'id': player_id,
-                'name': f"Player {player_id.split('-')[-1]}",
-                'team': random.choice(['LAD', 'NYY', 'BOS', 'HOU']),
-                'position': random.choice(['SP', 'RP', '1B', 'OF']),
-                'age': random.randint(23, 38),
-                'bats': random.choice(['R', 'L']),
-                'throws': random.choice(['R', 'L']),
-                'season': season,
-            }
-            if is_pitcher:
-                stats = {
-                    'wins': random.randint(5, 18),
-                    'losses': random.randint(4, 12),
-                    'era': round(random.uniform(2.8, 5.2), 2),
-                    'games': random.randint(20, 33),
-                    'games_started': random.randint(20, 33),
-                    'complete_games': random.randint(0, 3),
-                    'shutouts': random.randint(0, 2),
-                    'saves': random.randint(0, 5) if base['position'] == 'RP' else 0,
-                    'ip': round(random.uniform(120, 210), 1),
-                    'hits_allowed': random.randint(90, 180),
-                    'earned_runs': random.randint(40, 90),
-                    'home_runs_allowed': random.randint(10, 30),
-                    'walks': random.randint(30, 70),
-                    'strikeouts': random.randint(120, 250),
-                    'whip': 0.0,
-                    'k_per_9': 0.0,
-                    'bb_per_9': 0.0,
-                }
-                stats['whip'] = round((stats['walks'] + stats['hits_allowed']) / stats['ip'], 2) if stats['ip'] > 0 else 0
-                stats['k_per_9'] = round(stats['strikeouts'] * 9 / stats['ip'], 2) if stats['ip'] > 0 else 0
-                stats['bb_per_9'] = round(stats['walks'] * 9 / stats['ip'], 2) if stats['ip'] > 0 else 0
-            else:
-                stats = {
-                    'games': random.randint(100, 162),
-                    'plate_appearances': random.randint(400, 700),
-                    'at_bats': random.randint(350, 600),
-                    'runs': random.randint(50, 120),
-                    'hits': random.randint(80, 180),
-                    'doubles': random.randint(15, 40),
-                    'triples': random.randint(0, 8),
-                    'home_runs': random.randint(5, 40),
-                    'rbi': random.randint(40, 110),
-                    'walks': random.randint(30, 90),
-                    'strikeouts': random.randint(60, 150),
-                    'stolen_bases': random.randint(0, 30),
-                    'caught_stealing': random.randint(0, 10),
-                    'avg': 0.0,
-                    'obp': 0.0,
-                    'slg': 0.0,
-                    'ops': 0.0,
-                }
-                stats['avg'] = round(stats['hits'] / stats['at_bats'], 3) if stats['at_bats'] > 0 else 0
-                stats['obp'] = round((stats['hits'] + stats['walks']) / stats['plate_appearances'], 3) if stats['plate_appearances'] > 0 else 0
-                total_bases = stats['hits'] + stats['doubles'] + 2*stats['triples'] + 3*stats['home_runs']
-                stats['slg'] = round(total_bases / stats['at_bats'], 3) if stats['at_bats'] > 0 else 0
-                stats['ops'] = round(stats['obp'] + stats['slg'], 3)
-            base['stats'] = stats
-            base['is_real_data'] = False
-            return jsonify({'success': True, 'player': base})
-
-        # If not mock, maybe try to fetch from real API by ID (not implemented)
-        return jsonify({'success': False, 'error': 'Player not found'}), 404
-
+        # Try real data from Tank01
+        player = fetch_tank01_player_detail(player_id, season)
+        if player:
+            return jsonify({'success': True, 'player': player})
+        else:
+            # Fallback to mock if needed (optional)
+            return jsonify({'success': False, 'error': 'Player not found'}), 404
     except Exception as e:
         print(f"❌ Error in /api/mlb/players/<player_id>: {e}")
         traceback.print_exc()
@@ -11353,99 +12899,27 @@ def get_mlb_player_detail(player_id):
 
 @app.route('/api/mlb/stats')
 def get_mlb_stats():
-    """Get MLB statistics: standings, hitting leaders, pitching leaders."""
     try:
-        stat_type = flask_request.args.get('type', 'standings')  # standings, hitting, pitching
+        stat_type = flask_request.args.get('type', 'standings')
         season = flask_request.args.get('season', datetime.now().year)
         limit = int(flask_request.args.get('limit', 10))
 
         result = {}
 
         if stat_type == 'standings':
-            # Try real standings
-            standings = None
-            if API_CONFIG.get('sportsdata_mlb', {}).get('working'):
-                standings = fetch_mlb_stats('standings', season)
-            if not standings:
-                standings = generate_mlb_standings(season)
+            # You can still use fetch_mlb_stats('standings') if you have that
+            # Or use Tank01's schedule/results to compute standings
+            # For simplicity, we keep mock or fallback
+            standings = generate_mlb_standings(season)
             result['standings'] = standings
 
         elif stat_type == 'hitting':
-            # Hitting leaders
-            hitters = []
-            if API_CONFIG.get('sportsdata_mlb', {}).get('working'):
-                hitting_stats = fetch_mlb_stats('season_hitting', season)
-                if hitting_stats:
-                    # Transform to leaderboard
-                    for player in hitting_stats[:limit]:
-                        hitters.append({
-                            'rank': player.get('Rank', len(hitters)+1),
-                            'player': player.get('Name'),
-                            'team': player.get('Team'),
-                            'avg': player.get('BattingAverage'),
-                            'hr': player.get('HomeRuns'),
-                            'rbi': player.get('RunsBattedIn'),
-                            'ops': player.get('OnBasePlusSlugging'),
-                            'hits': player.get('Hits'),
-                            'runs': player.get('Runs'),
-                            'sb': player.get('StolenBases')
-                        })
-            if not hitters:
-                # Generate mock hitting leaders
-                players = generate_mlb_players(limit*2)
-                hitters = []
-                for i, p in enumerate([pl for pl in players if not pl.get('is_pitcher')][:limit]):
-                    hitters.append({
-                        'rank': i+1,
-                        'player': p['name'],
-                        'team': p['team'],
-                        'avg': p.get('avg', 0.250),
-                        'hr': p.get('hr', 15),
-                        'rbi': p.get('rbi', 50),
-                        'ops': p.get('ops', 0.750),
-                        'hits': random.randint(100, 180),
-                        'runs': random.randint(60, 100),
-                        'sb': p.get('sb', 10)
-                    })
-            result['hitting_leaders'] = hitters
+            leaders = get_mlb_leaders(limit)
+            result['hitting_leaders'] = leaders['hitting_leaders']
 
         elif stat_type == 'pitching':
-            # Pitching leaders
-            pitchers = []
-            if API_CONFIG.get('sportsdata_mlb', {}).get('working'):
-                pitching_stats = fetch_mlb_stats('season_pitching', season)
-                if pitching_stats:
-                    for player in pitching_stats[:limit]:
-                        pitchers.append({
-                            'rank': player.get('Rank', len(pitchers)+1),
-                            'player': player.get('Name'),
-                            'team': player.get('Team'),
-                            'era': player.get('EarnedRunAverage'),
-                            'wins': player.get('Wins'),
-                            'losses': player.get('Losses'),
-                            'saves': player.get('Saves'),
-                            'so': player.get('Strikeouts'),
-                            'whip': player.get('WalksAndHitsPerInningPitched'),
-                            'ip': player.get('InningsPitched')
-                        })
-            if not pitchers:
-                # Generate mock pitching leaders
-                players = generate_mlb_players(limit*2)
-                pitchers = []
-                for i, p in enumerate([pl for pl in players if pl.get('is_pitcher')][:limit]):
-                    pitchers.append({
-                        'rank': i+1,
-                        'player': p['name'],
-                        'team': p['team'],
-                        'era': p.get('era', 3.50),
-                        'wins': p.get('wins', 10),
-                        'losses': p.get('losses', 8),
-                        'saves': p.get('saves', 0),
-                        'so': p.get('so', 120),
-                        'whip': p.get('whip', 1.20),
-                        'ip': p.get('ip', 150)
-                    })
-            result['pitching_leaders'] = pitchers
+            leaders = get_mlb_leaders(limit)
+            result['pitching_leaders'] = leaders['pitching_leaders']
 
         else:
             return jsonify({'success': False, 'error': 'Invalid stat type'}), 400
@@ -11468,26 +12942,35 @@ def get_mlb_stats():
 # ------------------------------------------------------------------------------
 @app.route('/api/mlb/props')
 def get_mlb_props():
-    """Get MLB player props (hits, HR, RBI, strikeouts, etc.) for a given date."""
     try:
         game_date = flask_request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
         limit = int(flask_request.args.get('limit', 50))
-
-        # If you have a real props API (e.g., The Odds API), try it first.
-        # For now, we generate mock props.
-        players = generate_mlb_players(100)
-        props = generate_mlb_props(players, game_date)
-
-        # Shuffle and limit
-        random.shuffle(props)
-        props = props[:limit]
-
+        
+        # 1. Try real data from Tank01
+        props = fetch_tank01_props(game_date, limit)
+        source = 'Tank01'
+        
+        # 2. If no real data, fall back to mock
+        if not props:
+            print("⚠️ No real MLB props, falling back to mock")
+            players = generate_mlb_players(100)  # generate some players
+            try:
+                props = generate_mlb_props(players, game_date)
+                print(f"⚾ generate_mlb_props returned {len(props)} props")
+            except Exception as e:
+                print(f"❌ Exception in generate_mlb_props: {e}")
+                traceback.print_exc()
+                props = []  # ensure props is an empty list
+            source = 'mock'
+        
+        # 3. Log the final count and return
+        print(f"⚾ Returning {len(props)} props (source: {source})")
         return jsonify({
             'success': True,
             'date': game_date,
-            'props': props,
-            'count': len(props),
-            'source': 'mock',
+            'props': props[:limit],
+            'count': len(props[:limit]),
+            'source': source,
             'last_updated': datetime.now(timezone.utc).isoformat()
         })
 
@@ -11496,110 +12979,121 @@ def get_mlb_props():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+def map_game_status(status):
+    """Map Tank01 game status to your frontend status."""
+    # Status codes: 0 = scheduled, 1 = in progress, 2 = final, etc.
+    if status == "0":
+        return "scheduled"
+    elif status == "1":
+        return "live"
+    elif status == "2":
+        return "final"
+    else:
+        return "scheduled"
+
+def compute_standings_from_games(games):
+    """Compute standings from spring training games."""
+    from collections import defaultdict
+    teams = defaultdict(lambda: {"wins": 0, "losses": 0, "ties": 0, "games": []})
+    for game in games:
+        if game["status"] != "final":
+            continue
+        away = game["away_team"]
+        home = game["home_team"]
+        away_score = game["away_score"]
+        home_score = game["home_score"]
+        if away_score is None or home_score is None:
+            continue
+        if away_score > home_score:
+            teams[away]["wins"] += 1
+            teams[home]["losses"] += 1
+        elif home_score > away_score:
+            teams[home]["wins"] += 1
+            teams[away]["losses"] += 1
+        else:
+            teams[away]["ties"] += 1
+            teams[home]["ties"] += 1
+    # Build standings list
+    standings = []
+    for team, rec in teams.items():
+        gp = rec["wins"] + rec["losses"] + rec["ties"]
+        win_pct = rec["wins"] / gp if gp > 0 else 0
+        standings.append({
+            "id": f"team-{team}",
+            "team": team,  # full name? maybe need mapping
+            "abbreviation": team,
+            "league": "Grapefruit" if "FL" in team else "Cactus",  # need better logic
+            "wins": rec["wins"],
+            "losses": rec["losses"],
+            "ties": rec["ties"],
+            "win_percentage": round(win_pct, 3),
+            "games_back": 0,  # compute after sorting
+            "home_record": "0-0",
+            "away_record": "0-0",
+            "streak": "-",
+            "last_10": "0-0",
+        })
+    # Sort by win percentage descending
+    standings.sort(key=lambda x: x["win_percentage"], reverse=True)
+    # Compute games back
+    leader_wins = standings[0]["wins"] if standings else 0
+    leader_losses = standings[0]["losses"] if standings else 0
+    for team in standings:
+        team["games_back"] = round(((leader_wins - team["wins"]) + (team["losses"] - leader_losses)) / 2, 1)
+    return standings
+
 @app.route('/api/mlb/spring-training')
 def get_mlb_spring_training():
-    """Return spring training data (games, standings, stats) for MLB."""
     try:
-        year = flask_request.args.get('year', datetime.now().year)
+        year = int(flask_request.args.get('year', datetime.now().year))
         print(f"⚾ GET /api/mlb/spring-training?year={year}")
 
-        # Use your existing MLB data or generate mock players
-        players = []
-        if mlb_players_data:
-            players = mlb_players_data
-        else:
-            players = generate_mlb_players(200)
+        # 1. Fetch real spring training games
+        games = fetch_spring_games(year)
 
-        # Transform MLB players into spring training stats
-        hitters = []
-        pitchers = []
-        prospects = []
+        # If no games found (API returned 404 for all dates), use mock
+        if not games:
+            print("⚠️ No spring training games found from API, using mock data")
+            return jsonify({"success": True, "data": get_mock_spring_training_data()})
 
-        for player in players[:100]:  # limit for performance
-            name = player.get('name') or player.get('playerName') or 'Unknown'
-            team = player.get('team') or player.get('teamAbbrev') or 'FA'
-            position = player.get('position') or player.get('pos') or 'UTIL'
-            is_pitcher = position in ['P', 'SP', 'RP']
-            is_prospect = random.random() < 0.15
+        # 2. Compute standings from games
+        standings = compute_standings_from_games(games)
 
-            if is_pitcher:
-                era = round(random.uniform(2.5, 5.5), 2)
-                whip = round(random.uniform(1.0, 1.5), 2)
-                so = random.randint(5, 25)
-                ip = round(random.uniform(5, 20), 1)
-                pitchers.append({
-                    "id": player.get('id', f"mlb-pitcher-{len(pitchers)}"),
-                    "name": name,
-                    "team": team,
-                    "position": position,
-                    "era": era,
-                    "whip": whip,
-                    "so": so,
-                    "ip": ip,
-                    "is_prospect": is_prospect
-                })
-            else:
-                avg = round(random.uniform(0.180, 0.350), 3)
-                hr = random.randint(0, 8)
-                rbi = random.randint(0, 25)
-                ops = round(avg + random.uniform(0.2, 0.6), 3)
-                hitters.append({
-                    "id": player.get('id', f"mlb-hitter-{len(hitters)}"),
-                    "name": name,
-                    "team": team,
-                    "position": position,
-                    "avg": avg,
-                    "hr": hr,
-                    "rbi": rbi,
-                    "ops": ops,
-                    "is_prospect": is_prospect
-                })
+        # 3. Get hitters and pitchers from ADP+projections
+        leaders = get_mlb_leaders(limit=50)
+        hitters = leaders['hitting_leaders']
+        pitchers = leaders['pitching_leaders']
 
-            if is_prospect:
-                prospects.append({
-                    "id": player.get('id', f"mlb-prospect-{len(prospects)}"),
-                    "name": name,
-                    "team": team,
-                    "position": position,
-                    "avg": avg if not is_pitcher else None,
-                    "hr": hr if not is_pitcher else None,
-                    "rbi": rbi if not is_pitcher else None,
-                    "era": era if is_pitcher else None,
-                    "whip": whip if is_pitcher else None,
-                    "so": so if is_pitcher else None,
-                    "is_prospect": True
-                })
-
-        games = generate_mock_spring_games()
-        standings = generate_mock_spring_standings()
+        # 4. Get prospects using ADP threshold
+        prospects = get_spring_prospects(limit=30)
 
         data = {
             "games": games,
             "standings": standings,
-            "hitters": sorted(hitters, key=lambda x: x.get('avg', 0), reverse=True)[:50],
-            "pitchers": sorted(pitchers, key=lambda x: x.get('era', 10))[:50],
-            "prospects": prospects[:30],
+            "hitters": hitters,
+            "pitchers": pitchers,
+            "prospects": prospects,
             "date_range": {"start": "Feb 20", "end": "Mar 26"},
             "last_updated": datetime.now(timezone.utc).isoformat(),
-            "is_real_data": bool(mlb_players_data)
+            "is_real_data": True
         }
 
         return jsonify({"success": True, "data": data})
-
     except Exception as e:
-        print(f"❌ Error in /api/mlb/spring-training: {e}")
+        print(f"❌ Spring training error: {e}")
         traceback.print_exc()
+        # Fallback to mock
         return jsonify({"success": True, "data": get_mock_spring_training_data()})
 
 # ==============================================================================
 # Enhanced /api/secret-phrases endpoint with filtering, parallel scraping, and improved caching
 # ==============================================================================
-
 @app.route('/api/secret-phrases')
 def get_secret_phrases():
     """
     Return betting insights / secret phrases from multiple sources.
     Supports filtering by sport, category, and limit, with optional cache bypass.
+    Now includes MLB and NHL real data.
     """
     try:
         # ----- Query parameters -----
@@ -11626,22 +13120,124 @@ def get_secret_phrases():
 
         print("🔍 Fetching fresh secret phrases from multiple sources...")
 
-        # ----- Define scraper functions (each returns a list of phrase dicts) -----
-        # These functions are defined elsewhere; we assume they return phrases with:
-        #   id, text, source, category, confidence, tags, scraped_at, sport (optional)
-        scrapers = [
+        # ----- MLB Scrapers (real data) -----
+        def scrape_mlb_props():
+            """Fetch MLB player props from Tank01 or fallback to mock."""
+            phrases = []
+            try:
+                props = fetch_mlb_props(date=datetime.now().strftime('%Y-%m-%d'), limit=100) \
+                        or generate_mlb_props(generate_mlb_players(100), datetime.now().strftime('%Y-%m-%d'))
+                for prop in props:
+                    phrase = _mlb_prop_to_phrase(prop)
+                    if phrase:
+                        phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_mlb_props failed: {e}")
+            return phrases
+
+        def scrape_mlb_standings():
+            """Fetch MLB standings and convert to sharp money / streak insights."""
+            phrases = []
+            try:
+                standings = fetch_mlb_standings() or generate_mlb_standings()
+                for team in standings[:10]:
+                    phrase = _mlb_standing_to_phrase(team)
+                    if phrase:
+                        phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_mlb_standings failed: {e}")
+            return phrases
+
+        def scrape_mlb_games():
+            """Fetch today's MLB games and create line‑move / insider phrases."""
+            phrases = []
+            try:
+                games = get_mlb_games_data() or generate_mock_spring_games()
+                for game in games[:10]:
+                    phrase = _mlb_game_to_phrase(game)
+                    if phrase:
+                        phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_mlb_games failed: {e}")
+            return phrases
+
+        # ----- NHL Scrapers (real data) -----
+        def scrape_nhl_props():
+            """Fetch NHL player props from The Odds API or fallback."""
+            phrases = []
+            try:
+                props = fetch_nhl_props_from_odds_api() or generate_mock_nhl_props(50)
+                for prop in props:
+                    phrase = _nhl_prop_to_phrase(prop)
+                    if phrase:
+                        phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_nhl_props failed: {e}")
+            return phrases
+
+        def scrape_nhl_standings():
+            """Fetch NHL standings and convert to advanced analytics phrases."""
+            phrases = []
+            try:
+                standings = get_real_nhl_standings() or []
+                for team in standings[:10]:
+                    phrase = _nhl_standing_to_phrase(team)
+                    if phrase:
+                        phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_nhl_standings failed: {e}")
+            return phrases
+
+        def scrape_nhl_games():
+            """Fetch today's NHL games and create line‑move / goalie‑fatigue phrases."""
+            phrases = []
+            try:
+                games = get_real_nhl_games() or generate_mock_nhl_games()
+                for game in games[:10]:
+                    phrase = _nhl_game_to_phrase(game)
+                    if phrase:
+                        phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_nhl_games failed: {e}")
+            return phrases
+
+        # ----- NBA Scraper (using PrizePicks props) -----
+        def scrape_nba_props():
+            """Fetch NBA props from PrizePicks via internal endpoint."""
+            phrases = []
+            try:
+                resp = requests.get('http://localhost:8000/api/fantasy/props?sport=nba&source=prizepicks', timeout=5)
+                if resp.status_code == 200:
+                    props = resp.json().get('props', [])
+                    for prop in props[:30]:
+                        phrase = _nba_prop_to_phrase(prop)
+                        if phrase:
+                            phrases.append(phrase)
+            except Exception as e:
+                print(f"⚠️ scrape_nba_props failed: {e}")
+            return phrases
+
+        # Combine all scrapers into one list
+        all_scrapers = [
+            scrape_nba_props,
+            scrape_mlb_props,
+            scrape_mlb_standings,
+            scrape_mlb_games,
+            scrape_nhl_props,
+            scrape_nhl_standings,
+            scrape_nhl_games,
             scrape_espn_betting_tips,
             scrape_action_network,
             scrape_rotowire_betting,
-            scrape_cbs_sports,          # new – implement if desired
-            scrape_sportsline,           # new – implement if desired
-            generate_ai_insights,         # AI‑generated insights
+            scrape_cbs_sports,
+            scrape_sportsline,
+            generate_ai_insights,
         ]
 
-        # Run all scrapers in parallel using ThreadPoolExecutor (I/O bound)
+        # Run all scrapers in parallel
         all_phrases = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(scrapers)) as executor:
-            future_to_scraper = {executor.submit(scraper): scraper.__name__ for scraper in scrapers}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_scrapers)) as executor:
+            future_to_scraper = {executor.submit(scraper): scraper.__name__ for scraper in all_scrapers}
             for future in concurrent.futures.as_completed(future_to_scraper):
                 scraper_name = future_to_scraper[future]
                 try:
@@ -11660,35 +13256,54 @@ def get_secret_phrases():
         else:
             is_mock = False
 
-        # ----- Normalize and enrich phrases -----
+        # ----- Normalize and enrich phrases to match frontend expectations -----
+        normalized_phrases = []
         for p in all_phrases:
-            # Ensure required fields exist
+            # Ensure required fields
             p.setdefault('id', str(uuid.uuid4()))
-            p.setdefault('sport', 'GENERAL')          # default sport
             p.setdefault('category', 'insider_tip')
             p.setdefault('confidence', 70)
             p.setdefault('tags', [])
-            p.setdefault('scraped_at', datetime.now(timezone.utc).isoformat())
             p.setdefault('source', 'unknown')
-            p.setdefault('text', p.get('text') or p.get('description') or 'No text')
+            p.setdefault('analysis', '')
 
-            # If sport is not set, try to infer from text
-            if p['sport'] == 'GENERAL':
-                text_upper = p['text'].upper()
+            # Map scraped_at to timestamp
+            if 'scraped_at' in p:
+                p['timestamp'] = p['scraped_at']
+            else:
+                p['timestamp'] = datetime.now(timezone.utc).isoformat()
+
+            # Map text to phrase
+            if 'phrase' not in p:
+                p['phrase'] = p.get('text', 'No text')
+
+            # Infer sport from text if missing, else ensure lowercase
+            if 'sport' not in p or p['sport'] == 'GENERAL':
+                text_upper = p['phrase'].upper()
                 for sport_key in ['NBA', 'NFL', 'MLB', 'NHL', 'UFC', 'GOLF', 'TENNIS']:
                     if sport_key in text_upper:
-                        p['sport'] = sport_key
+                        p['sport'] = sport_key.lower()
                         break
+                else:
+                    p['sport'] = 'general'
+            else:
+                p['sport'] = p['sport'].lower()
+
+            # Remove temporary keys
+            p.pop('scraped_at', None)
+            p.pop('text', None)
+
+            normalized_phrases.append(p)
 
         # ----- Apply filters -----
-        filtered_phrases = all_phrases
+        filtered_phrases = normalized_phrases
         if sport_filter and sport_filter != 'ALL':
-            filtered_phrases = [p for p in filtered_phrases if p.get('sport', 'GENERAL') == sport_filter]
-        if category_filter:
+            filtered_phrases = [p for p in filtered_phrases if p.get('sport', 'general') == sport_filter.lower()]
+        if category_filter and category_filter != 'all':
             filtered_phrases = [p for p in filtered_phrases if category_filter in p.get('category', '').lower()]
 
-        # Sort by confidence (descending) and then by scraped_at (newest first)
-        filtered_phrases.sort(key=lambda x: (x.get('confidence', 0), x.get('scraped_at', '')), reverse=True)
+        # Sort by confidence (descending) then timestamp
+        filtered_phrases.sort(key=lambda x: (x.get('confidence', 0), x.get('timestamp', '')), reverse=True)
 
         # Apply limit
         limited_phrases = filtered_phrases[:limit]
@@ -11713,7 +13328,13 @@ def get_secret_phrases():
             'cached': False
         }
 
-        # Cache the result (for 15 minutes)
+        # 🔍 DEBUG: Check phrases right before returning
+        if response_data['phrases']:
+            print("🔍 FINAL RESPONSE PHRASES BEFORE RETURN:")
+            for i, p in enumerate(response_data['phrases'][:3]):
+                print(f"   {i}: phrase='{p.get('phrase', 'MISSING')}'")
+
+        # Cache the result (15 minutes)
         general_cache[cache_key] = {
             'data': response_data,
             'timestamp': time.time()
@@ -11736,6 +13357,132 @@ def get_secret_phrases():
             'error': str(e)
         })
 
+# ------------------------------------------------------------------------------
+# Helper conversion functions (ensure they output 'phrase' and 'scraped_at')
+# ------------------------------------------------------------------------------
+def _mlb_prop_to_phrase(prop):
+    player = prop.get('player') or prop.get('playerName') or 'Unknown Player'
+    stat = prop.get('stat') or prop.get('statType') or 'Unknown Stat'
+    line = prop.get('line', '?')
+    team = prop.get('team', '')
+    return {
+        'id': f"mlb-prop-{prop.get('id', str(uuid.uuid4()))}",
+        'phrase': f"{player} {stat} – line {line}",
+        'category': 'prop_value',
+        'sport': 'mlb',
+        'confidence': 75,
+        'source': prop.get('bookmaker', 'MLB API'),
+        'player': player,
+        'team': team,
+        'analysis': '',
+        'tags': ['mlb', 'prop'],
+        'scraped_at': datetime.now(timezone.utc).isoformat()
+    }
+
+def _mlb_standing_to_phrase(team):
+    return {
+        'id': f"mlb-stand-{team.get('team', '').replace(' ', '-')}",
+        'phrase': f"{team.get('team')} on a {team.get('streak', 'N/A')} streak",
+        'category': 'sharp_money',
+        'sport': 'mlb',
+        'confidence': 70,
+        'source': 'MLB Standings',
+        'team': team.get('team'),
+        'analysis': '',
+        'tags': ['mlb', 'standings'],
+        'scraped_at': datetime.now(timezone.utc).isoformat()
+    }
+
+def _mlb_game_to_phrase(game):
+    return {
+        'id': f"mlb-game-{game.get('id', str(uuid.uuid4()))}",
+        'phrase': f"{game.get('away_team')} @ {game.get('home_team')} – {game.get('status', 'scheduled')}",
+        'category': 'line_move',
+        'sport': 'mlb',
+        'confidence': 65,
+        'source': 'MLB Schedule',
+        'game': f"{game.get('away_team')} @ {game.get('home_team')}",
+        'analysis': '',
+        'tags': ['mlb', 'game'],
+        'scraped_at': game.get('game_date', datetime.now(timezone.utc).isoformat())
+    }
+
+def _nhl_prop_to_phrase(prop):
+    player = prop.get('player') or prop.get('playerName') or 'Unknown Player'
+    stat = prop.get('stat') or prop.get('statType') or 'Unknown Stat'
+    line = prop.get('line', '?')
+    team = prop.get('team', '')
+    return {
+        'id': f"nhl-prop-{prop.get('id', str(uuid.uuid4()))}",
+        'phrase': f"{player} {stat} – line {line}",
+        'category': 'prop_value',
+        'sport': 'nhl',
+        'confidence': 75,
+        'source': prop.get('bookmaker', 'NHL API'),
+        'player': player,
+        'team': team,
+        'analysis': '',
+        'tags': ['nhl', 'prop'],
+        'scraped_at': datetime.now(timezone.utc).isoformat()
+    }
+
+def _nhl_standing_to_phrase(team):
+    return {
+        'id': f"nhl-stand-{team.get('abbreviation', '')}",
+        'phrase': f"{team.get('team')} – {team.get('points')} pts, goal diff {team.get('goal_differential')}",
+        'category': 'advanced_analytics',
+        'sport': 'nhl',
+        'confidence': 80,
+        'source': 'NHL Standings',
+        'team': team.get('team'),
+        'analysis': '',
+        'tags': ['nhl', 'standings'],
+        'scraped_at': datetime.now(timezone.utc).isoformat()
+    }
+
+def _nhl_game_to_phrase(game):
+    return {
+        'id': f"nhl-game-{game.get('id', str(uuid.uuid4()))}",
+        'phrase': f"{game.get('away_team')} @ {game.get('home_team')} – {game.get('status', 'scheduled')}",
+        'category': 'line_move',
+        'sport': 'nhl',
+        'confidence': 65,
+        'source': 'NHL Schedule',
+        'game': f"{game.get('away_team')} @ {game.get('home_team')}",
+        'analysis': '',
+        'tags': ['nhl', 'game'],
+        'scraped_at': game.get('date', datetime.now(timezone.utc).isoformat())
+    }
+
+def _nba_prop_to_phrase(prop):
+    # Debug: log incoming prop
+    print(f"🔍 _nba_prop_to_phrase: prop keys = {list(prop.keys())}")
+    print(f"🔍 _nba_prop_to_phrase: prop values = {prop}")
+
+    player = prop.get('player', 'Unknown Player')
+    # 'stat' is the correct key; fallback to 'stat_type' or 'Unknown Stat'
+    stat = prop.get('stat') or prop.get('stat_type') or 'Unknown Stat'
+    line = prop.get('line', '?')
+    team = prop.get('team', '')
+
+    phrase_text = f"{player} {stat} – line {line}"
+    print(f"🔍 _nba_prop_to_phrase: generated phrase = '{phrase_text}'")
+
+    result = {
+        'id': f"nba-prop-{prop.get('id', str(uuid.uuid4()))}",
+        'phrase': phrase_text,
+        'category': 'prop_value',
+        'sport': 'nba',
+        'confidence': 75,
+        'source': 'PrizePicks',
+        'player': player,
+        'team': team,
+        'analysis': '',
+        'tags': ['prop', 'nba'],
+        'scraped_at': datetime.now(timezone.utc).isoformat()
+    }
+    print(f"🔍 _nba_prop_to_phrase: returning dict with phrase = '{result['phrase']}'")
+    return result
 
 # ------------------------------------------------------------------------------
 # Additional scraper stubs (implement as needed)
@@ -12192,6 +13939,10 @@ def get_stats_database():
 # ==============================================================================
 # 16. DEBUG ENDPOINTS (for troubleshooting)
 # ==============================================================================
+@app.route('/debug/balldontlie-url')
+def debug_url():
+    return {'base_url': os.environ.get('BALLDONTLIE_BASE_URL', 'https://api.balldontlie.io/atp/v1')}
+
 @app.route('/api/debug/player-stats/<sport>/<player_name>')
 def debug_player_stats(sport, player_name):
     if sport.lower() == 'nba':
@@ -12254,6 +14005,10 @@ def debug_odds_config():
             'debug': '/api/debug/odds-config (you are here)'
         }
     })
+
+@app.route('/api/test-version')
+def test_version():
+    return jsonify({"build_props_response_source": str(build_props_response.__code__)[:200]})
 
 @app.route('/api/test/balldontlie_debug')
 def test_balldontlie_debug():
