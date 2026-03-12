@@ -1,15 +1,15 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 # Fix parlay/suggestions
-parlay_pattern = r'@app\.route\(\'/api/parlay/suggestions\'\).*?def parlay_suggestions\(\):(.*?)(?=\n@app\.route|\ndef get_|@app\.route)'
+parlay_pattern = r"@app\.route\(\'/api/parlay/suggestions\'\).*?def parlay_suggestions\(\):(.*?)(?=\n@app\.route|\ndef get_|@app\.route)"
 parlay_match = re.search(parlay_pattern, content, re.DOTALL)
 
 if parlay_match:
     print("Found parlay/suggestions function, updating...")
-    
+
     new_parlay = '''@app.route('/api/parlay/suggestions')
 def parlay_suggestions():
     """Get parlay suggestions - FIXED VERSION"""
@@ -71,17 +71,17 @@ def parlay_suggestions():
             'count': 0,
             'has_data': False
         })'''
-    
+
     content = content.replace(parlay_match.group(0), new_parlay)
     print("✅ Fixed /api/parlay/suggestions endpoint")
 
 # Fix odds/games
-odds_pattern = r'@app\.route\(\'/api/odds/games\'\).*?def get_odds_games\(\):(.*?)(?=\n@app\.route|\ndef get_|@app\.route)'
+odds_pattern = r"@app\.route\(\'/api/odds/games\'\).*?def get_odds_games\(\):(.*?)(?=\n@app\.route|\ndef get_|@app\.route)"
 odds_match = re.search(odds_pattern, content, re.DOTALL)
 
 if odds_match:
     print("Found odds/games function, updating...")
-    
+
     new_odds = '''@app.route('/api/odds/games')
 def get_odds_games():
     """Get odds games - FIXED VERSION"""
@@ -164,9 +164,9 @@ def get_odds_games():
             'count': 0,
             'has_data': False
         })'''
-    
+
     content = content.replace(odds_match.group(0), new_odds)
     print("✅ Fixed /api/odds/games endpoint")
 
-with open('app.py', 'w') as f:
+with open("app.py", "w") as f:
     f.write(content)

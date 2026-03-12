@@ -1,14 +1,14 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 print("🔍 Checking for missing endpoints...")
 
 # Check if parlay/suggestions endpoint exists
-if '@app.route(\'/api/parlay/suggestions\')' not in content:
+if "@app.route('/api/parlay/suggestions')" not in content:
     print("❌ /api/parlay/suggestions not found, adding...")
-    
+
     parlay_endpoint = '''
 @app.route('/api/parlay/suggestions')
 def parlay_suggestions():
@@ -59,17 +59,17 @@ def parlay_suggestions():
             'has_data': False
         })
 '''
-    
+
     # Insert before the main block
-    main_pos = content.find('if __name__ == \'__main__\'')
+    main_pos = content.find("if __name__ == '__main__'")
     if main_pos != -1:
-        content = content[:main_pos] + parlay_endpoint + '\n' + content[main_pos:]
+        content = content[:main_pos] + parlay_endpoint + "\n" + content[main_pos:]
         print("✅ Added parlay/suggestions endpoint")
 
 # Check if odds/games endpoint exists
-if '@app.route(\'/api/odds/games\')' not in content:
+if "@app.route('/api/odds/games')" not in content:
     print("❌ /api/odds/games not found, adding...")
-    
+
     odds_endpoint = '''
 @app.route('/api/odds/games')
 def get_odds_games():
@@ -126,17 +126,17 @@ def get_odds_games():
             'has_data': False
         })
 '''
-    
+
     # Insert before the main block
-    main_pos = content.find('if __name__ == \'__main__\'')
+    main_pos = content.find("if __name__ == '__main__'")
     if main_pos != -1:
-        content = content[:main_pos] + odds_endpoint + '\n' + content[main_pos:]
+        content = content[:main_pos] + odds_endpoint + "\n" + content[main_pos:]
         print("✅ Added odds/games endpoint")
 
 # Fix health endpoint to include all endpoints
 if 'endpoints": [' in content:
     # Make sure health endpoint lists all 12 endpoints
-    health_content = '''        "endpoints": [
+    health_content = """        "endpoints": [
             "/api/health",
             "/api/players",
             "/api/fantasy/teams",
@@ -149,15 +149,16 @@ if 'endpoints": [' in content:
             "/api/players/trends",
             "/api/predictions/outcomes",
             "/api/secret/phrases"
-        ],'''
-    
+        ],"""
+
     # Replace the endpoints list in health
     import re
+
     pattern = r'"endpoints": \[[^\]]+\]'
     content = re.sub(pattern, health_content, content)
     print("✅ Updated health endpoint with all endpoints")
 
-with open('app.py', 'w') as f:
+with open("app.py", "w") as f:
     f.write(content)
 
 print("🎉 All endpoints should now be registered")

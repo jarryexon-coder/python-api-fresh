@@ -16,28 +16,28 @@ endpoints = [
     ("/api/odds/games", {"region": "today"}),
     ("/api/players/trends", {"sport": "nba"}),
     ("/api/predictions/outcomes", {"sport": "nba"}),
-    ("/api/secret/phrases", {})
+    ("/api/secret/phrases", {}),
 ]
 
 for endpoint, params in endpoints:
     try:
         response = requests.get(BASE_URL + endpoint, params=params, timeout=30)
         data = response.json()
-        
+
         print(f"\n🔍 {endpoint}:")
         print(f"   Status: {response.status_code}")
         print(f"   Success: {data.get('success', False)}")
         print(f"   Count: {data.get('count', 'N/A')}")
         print(f"   has_data: {data.get('has_data', 'N/A')}")
         print(f"   is_real_data: {data.get('is_real_data', 'N/A')}")
-        
-        if data.get('success') and data.get('count', 0) > 0:
+
+        if data.get("success") and data.get("count", 0) > 0:
             print(f"   ✅ WORKING WITH DATA")
-        elif data.get('success'):
+        elif data.get("success"):
             print(f"   ⚠️  WORKING BUT NO DATA")
         else:
             print(f"   ❌ FAILED")
-            
+
     except Exception as e:
         print(f"\n❌ {endpoint} ERROR: {e}")
 

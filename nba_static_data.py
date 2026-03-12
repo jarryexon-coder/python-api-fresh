@@ -369,44 +369,72 @@ Round	Rank	Value	Name	Team	Pos	Inj	g	min	pts	reb	ast	stl	blk	fg%	fga	ft%	fta	to	
 30	360	-0.77	Caleb Martin	DAL	F		50	719.8	182	16	124	78	38	11	.452	155	.634	41	33	12.8	-2.29	-1.38	-1.42	-1.05	-0.68	-0.94	-0.19	-0.45	1.46
 """
 
+
 def parse_nba_player_table(table_str: str) -> List[Dict]:
     """Parse the NBA player table (30 columns)."""
-    lines = table_str.strip().split('\n')
-    
+    lines = table_str.strip().split("\n")
+
     # Hardcoded 30 headers (including '3')
     headers = [
-        'Round', 'Rank', 'Value', 'Name', 'Team', 'Pos', 'Inj', 'g', 'min', 'pts',
-        '3', 'reb', 'ast', 'stl', 'blk', 'fg%', 'fga', 'ft%', 'fta', 'to', 'USG',
-        'pV', '3V', 'rV', 'aV', 'sV', 'bV', 'fg%V', 'ft%V', 'toV'
+        "Round",
+        "Rank",
+        "Value",
+        "Name",
+        "Team",
+        "Pos",
+        "Inj",
+        "g",
+        "min",
+        "pts",
+        "3",
+        "reb",
+        "ast",
+        "stl",
+        "blk",
+        "fg%",
+        "fga",
+        "ft%",
+        "fta",
+        "to",
+        "USG",
+        "pV",
+        "3V",
+        "rV",
+        "aV",
+        "sV",
+        "bV",
+        "fg%V",
+        "ft%V",
+        "toV",
     ]
     header_map = {
-        'Name': 'name',
-        'Team': 'team',
-        'Pos': 'position',
-        'Inj': 'injury',
-        'g': 'games',
-        'min': 'minutes',
-        'pts': 'points',
-        '3': 'threes',          # extra column, stored but not used in fantasy points
-        'reb': 'rebounds',
-        'ast': 'assists',
-        'stl': 'steals',
-        'blk': 'blocks',
-        'fg%': 'fg_pct',
-        'fga': 'fga',
-        'ft%': 'ft_pct',
-        'fta': 'fta',
-        'to': 'turnovers',
-        'USG': 'usage',
-        'pV': 'pV',
-        '3V': '3V',
-        'rV': 'rV',
-        'aV': 'aV',
-        'sV': 'sV',
-        'bV': 'bV',
-        'fg%V': 'fg%V',
-        'ft%V': 'ft%V',
-        'toV': 'toV'
+        "Name": "name",
+        "Team": "team",
+        "Pos": "position",
+        "Inj": "injury",
+        "g": "games",
+        "min": "minutes",
+        "pts": "points",
+        "3": "threes",  # extra column, stored but not used in fantasy points
+        "reb": "rebounds",
+        "ast": "assists",
+        "stl": "steals",
+        "blk": "blocks",
+        "fg%": "fg_pct",
+        "fga": "fga",
+        "ft%": "ft_pct",
+        "fta": "fta",
+        "to": "turnovers",
+        "USG": "usage",
+        "pV": "pV",
+        "3V": "3V",
+        "rV": "rV",
+        "aV": "aV",
+        "sV": "sV",
+        "bV": "bV",
+        "fg%V": "fg%V",
+        "ft%V": "ft%V",
+        "toV": "toV",
     }
 
     players = []
@@ -417,92 +445,111 @@ def parse_nba_player_table(table_str: str) -> List[Dict]:
         # Only process lines that start with a digit (player data)
         if not line[0].isdigit():
             continue
-        
+
         # Split by tabs
-        fields = line.split('\t')
+        fields = line.split("\t")
         # If there's a trailing empty field due to extra tab, drop it
-        if len(fields) == 31 and fields[-1] == '':
+        if len(fields) == 31 and fields[-1] == "":
             fields = fields[:-1]
-        
+
         if len(fields) != len(headers):
-            print(f"⚠️ Skipping line – unexpected column count: {len(fields)} vs {len(headers)}")
+            print(
+                f"⚠️ Skipping line – unexpected column count: {len(fields)} vs {len(headers)}"
+            )
             continue
-        
+
         player = {}
         for i, header in enumerate(headers):
             key = header_map.get(header, header.lower())
             raw_val = fields[i].strip()
-            if raw_val.endswith('$'):
+            if raw_val.endswith("$"):
                 raw_val = raw_val[:-1]
-            
+
             # Convert numeric fields
-            if key in ['games', 'points', 'threes', 'rebounds', 'assists', 'steals', 'blocks',
-                       'fga', 'fta', 'turnovers', 'minutes', 'usage']:
-                raw_val = raw_val.replace(',', '')
+            if key in [
+                "games",
+                "points",
+                "threes",
+                "rebounds",
+                "assists",
+                "steals",
+                "blocks",
+                "fga",
+                "fta",
+                "turnovers",
+                "minutes",
+                "usage",
+            ]:
+                raw_val = raw_val.replace(",", "")
                 try:
                     val = float(raw_val) if raw_val else 0.0
                 except ValueError:
                     val = 0.0
-            elif key in ['fg_pct', 'ft_pct']:
-                if raw_val.startswith('.'):
-                    raw_val = '0' + raw_val
+            elif key in ["fg_pct", "ft_pct"]:
+                if raw_val.startswith("."):
+                    raw_val = "0" + raw_val
                 try:
                     val = float(raw_val) if raw_val else 0.0
                 except ValueError:
                     val = 0.0
             else:
                 val = raw_val
-            
+
             player[key] = val
 
         # ----- File 1 integration: per‑game averages and fantasy points -----
-        g = player.get('games', 1)
+        g = player.get("games", 1)
         if g == 0:
             g = 1
 
-        player['points'] = player.get('points', 0) / g
-        player['rebounds'] = player.get('rebounds', 0) / g
-        player['assists'] = player.get('assists', 0) / g
-        player['steals'] = player.get('steals', 0) / g
-        player['blocks'] = player.get('blocks', 0) / g
-        player['turnovers'] = player.get('turnovers', 0) / g
-        player['fantasy_points'] = (
-            player['points'] +
-            1.2 * player['rebounds'] +
-            1.5 * player['assists'] +
-            2 * player['steals'] +
-            2 * player['blocks'] -
-            player['turnovers']
+        player["points"] = player.get("points", 0) / g
+        player["rebounds"] = player.get("rebounds", 0) / g
+        player["assists"] = player.get("assists", 0) / g
+        player["steals"] = player.get("steals", 0) / g
+        player["blocks"] = player.get("blocks", 0) / g
+        player["turnovers"] = player.get("turnovers", 0) / g
+        player["fantasy_points"] = (
+            player["points"]
+            + 1.2 * player["rebounds"]
+            + 1.5 * player["assists"]
+            + 2 * player["steals"]
+            + 2 * player["blocks"]
+            - player["turnovers"]
         )
 
         # Injury status mapping
-        inj = str(player.get('injury', '')).lower()
-        if 'inj' in inj or 'out' in inj or 'off inj' in inj:
-            player['injury_status'] = 'injured'
-        elif 'q' in inj or 'questionable' in inj:
-            player['injury_status'] = 'questionable'
-        elif 'd' in inj or 'day' in inj or 'probable' in inj:
-            player['injury_status'] = 'day-to-day'
-        elif 'x' in inj:
-            player['injury_status'] = 'out'
-        elif 'susp' in inj:
-            player['injury_status'] = 'suspended'
+        inj = str(player.get("injury", "")).lower()
+        if "inj" in inj or "out" in inj or "off inj" in inj:
+            player["injury_status"] = "injured"
+        elif "q" in inj or "questionable" in inj:
+            player["injury_status"] = "questionable"
+        elif "d" in inj or "day" in inj or "probable" in inj:
+            player["injury_status"] = "day-to-day"
+        elif "x" in inj:
+            player["injury_status"] = "out"
+        elif "susp" in inj:
+            player["injury_status"] = "suspended"
         else:
-            player['injury_status'] = 'healthy'
+            player["injury_status"] = "healthy"
 
         players.append(player)
-    
+
     print(f"✅ Parsed {len(players)} players from NBA_TABLE")
     if players:
-        print(f"   Sample: {players[0].get('name')} – {players[0].get('team')} – FP: {players[0].get('fantasy_points'):.1f}")
+        print(
+            f"   Sample: {players[0].get('name')} – {players[0].get('team')} – FP: {players[0].get('fantasy_points'):.1f}"
+        )
     return players
+
 
 # Load once
 NBA_PLAYERS_2026 = parse_nba_player_table(NBA_TABLE)
 
 if __name__ == "__main__":
     print(f"Loaded {len(NBA_PLAYERS_2026)} NBA players from static table")
-    top_players = sorted(NBA_PLAYERS_2026, key=lambda x: x.get('fantasy_points', 0), reverse=True)[:5]
+    top_players = sorted(
+        NBA_PLAYERS_2026, key=lambda x: x.get("fantasy_points", 0), reverse=True
+    )[:5]
     print("\nTop 5 Players by Fantasy Points:")
     for p in top_players:
         print(f"  {p['name']} ({p['team']}): {p['fantasy_points']:.1f} FP/game")

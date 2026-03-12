@@ -17,24 +17,26 @@ endpoints = [
     ("Odds Games", "/api/odds/games", {"region": "today"}),
     ("Player Trends", "/api/players/trends", {"sport": "nba"}),
     ("Prediction Outcomes", "/api/predictions/outcomes", {"sport": "nba"}),
-    ("Secret Phrases", "/api/secret/phrases", {})
+    ("Secret Phrases", "/api/secret/phrases", {}),
 ]
 
 all_working = True
 for name, endpoint, params in endpoints:
     try:
         response = requests.get(BASE_URL + endpoint, params=params, timeout=30)
-        
+
         if response.status_code == 200:
             try:
                 data = response.json()
-                success = data.get('success', False)
-                count = data.get('count', 0)
-                
+                success = data.get("success", False)
+                count = data.get("count", 0)
+
                 if success:
                     print(f"✅ {name}: Status {response.status_code}, Count: {count}")
                 else:
-                    print(f"❌ {name}: Status {response.status_code}, Error: {data.get('error', 'Unknown')}")
+                    print(
+                        f"❌ {name}: Status {response.status_code}, Error: {data.get('error', 'Unknown')}"
+                    )
                     all_working = False
             except json.JSONDecodeError:
                 print(f"❌ {name}: Invalid JSON response")
@@ -42,7 +44,7 @@ for name, endpoint, params in endpoints:
         else:
             print(f"❌ {name}: Status {response.status_code}")
             all_working = False
-            
+
     except Exception as e:
         print(f"❌ {name}: Connection error - {e}")
         all_working = False
@@ -55,7 +57,7 @@ if all_working:
     print("\n📋 Your React app pages will now show:")
     print("   • FantasyHub: Players & Teams ✅")
     print("   • PlayerStats: Sports News ✅")
-    print("   • DailyPicks: (Fix React FormControl error)") 
+    print("   • DailyPicks: (Fix React FormControl error)")
     print("   • ParlayArchitect: Parlay Suggestions ✅")
     print("   • AdvancedAnalytics: Analytics Data ✅")
     print("   • PredictionsOutcome: Outcomes Data ✅")

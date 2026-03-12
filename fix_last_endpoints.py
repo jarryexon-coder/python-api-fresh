@@ -1,17 +1,17 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 print("🔧 Fixing parlay/suggestions and odds/games endpoints...")
 
 # Fix 1: Replace parlay/suggestions endpoint
-parlay_pattern = r'@app\.route\(\'/api/parlay/suggestions\'\).*?def parlay_suggestions\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)'
+parlay_pattern = r"@app\.route\(\'/api/parlay/suggestions\'\).*?def parlay_suggestions\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)"
 parlay_match = re.search(parlay_pattern, content, re.DOTALL)
 
 if parlay_match:
     print("Found parlay/suggestions, replacing...")
-    
+
     new_parlay = '''@app.route('/api/parlay/suggestions')
 def parlay_suggestions():
     """Get parlay suggestions - WORKING VERSION"""
@@ -81,16 +81,16 @@ def parlay_suggestions():
             'count': 0,
             'has_data': False
         })'''
-    
+
     content = content.replace(parlay_match.group(0), new_parlay)
 
 # Fix 2: Replace odds/games endpoint
-odds_pattern = r'@app\.route\(\'/api/odds/games\'\).*?def get_odds_games\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)'
+odds_pattern = r"@app\.route\(\'/api/odds/games\'\).*?def get_odds_games\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)"
 odds_match = re.search(odds_pattern, content, re.DOTALL)
 
 if odds_match:
     print("Found odds/games, replacing...")
-    
+
     new_odds = '''@app.route('/api/odds/games')
 def get_odds_games():
     """Get odds games - WORKING VERSION"""
@@ -175,11 +175,11 @@ def get_odds_games():
             'count': 0,
             'has_data': False
         })'''
-    
+
     content = content.replace(odds_match.group(0), new_odds)
 
 # Write the fixed content
-with open('app.py', 'w') as f:
+with open("app.py", "w") as f:
     f.write(content)
 
 print("✅ Fixed parlay/suggestions and odds/games endpoints")

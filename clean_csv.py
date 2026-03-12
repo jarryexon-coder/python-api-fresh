@@ -1,10 +1,11 @@
 import csv
 
-input_file = 'nba_players.csv'   # your original CSV
-output_file = 'nba_players_clean.csv'
+input_file = "nba_players.csv"  # your original CSV
+output_file = "nba_players_clean.csv"
 
-with open(input_file, 'r', encoding='utf-8') as infile, \
-     open(output_file, 'w', newline='', encoding='utf-8') as outfile:
+with open(input_file, "r", encoding="utf-8") as infile, open(
+    output_file, "w", newline="", encoding="utf-8"
+) as outfile:
     reader = csv.reader(infile)
     writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL)
     for row in reader:

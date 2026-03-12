@@ -1,15 +1,15 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 # Find the get_fantasy_teams function
-pattern = r'@app\.route\(\'/api/fantasy/teams\'\)\s+def get_fantasy_teams\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)'
+pattern = r"@app\.route\(\'/api/fantasy/teams\'\)\s+def get_fantasy_teams\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)"
 match = re.search(pattern, content, re.DOTALL)
 
 if match:
     print("Found existing get_fantasy_teams function")
-    
+
     # Replace with working version
     fixed_function = '''@app.route('/api/fantasy/teams')
 def get_fantasy_teams():
@@ -82,10 +82,10 @@ def get_fantasy_teams():
 
     # Replace the function
     new_content = content.replace(match.group(0), fixed_function)
-    
-    with open('app.py', 'w') as f:
+
+    with open("app.py", "w") as f:
         f.write(new_content)
-    
+
     print("✅ Updated /api/fantasy/teams endpoint")
 else:
     print("❌ Could not find get_fantasy_teams function")

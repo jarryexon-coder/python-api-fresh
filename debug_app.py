@@ -1,6 +1,6 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     lines = f.readlines()
 
 print("🔍 DEBUGGING app.py FOR LIMITING ISSUES")
@@ -8,11 +8,11 @@ print("=" * 60)
 
 # Look for limiting patterns
 patterns = [
-    (r'\[:(\d+)\]', 'Slicing to first X items'),
-    (r'\.slice\(', 'JavaScript slice method'),
-    (r'outcomes\[:', 'Outcomes array slicing'),
-    (r'data_source = .*\[:', 'Data source slicing'),
-    (r'players_data.*\[:', 'Player data slicing'),
+    (r"\[:(\d+)\]", "Slicing to first X items"),
+    (r"\.slice\(", "JavaScript slice method"),
+    (r"outcomes\[:", "Outcomes array slicing"),
+    (r"data_source = .*\[:", "Data source slicing"),
+    (r"players_data.*\[:", "Player data slicing"),
 ]
 
 found_issues = []
@@ -39,7 +39,7 @@ print("📋 Checking data flow in get_predictions_outcome...")
 # Find the function
 func_start = None
 for i, line in enumerate(lines):
-    if 'def get_predictions_outcome' in line:
+    if "def get_predictions_outcome" in line:
         func_start = i
         break
 
@@ -49,7 +49,11 @@ if func_start:
     in_func = False
     for i in range(func_start, min(func_start + 100, len(lines))):
         line = lines[i].rstrip()
-        if 'def ' in line and i != func_start:
+        if "def " in line and i != func_start:
             break
-        if 'data_source = ' in line or 'outcomes = ' in line or 'return jsonify' in line:
+        if (
+            "data_source = " in line
+            or "outcomes = " in line
+            or "return jsonify" in line
+        ):
             print(f"Line {i}: {line}")

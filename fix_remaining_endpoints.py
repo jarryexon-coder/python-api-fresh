@@ -1,13 +1,13 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 # Add missing endpoints if they don't exist
 endpoints_to_add = []
 
 # Check for players/trends
-if '@app.route(\'/api/players/trends\')' not in content:
+if "@app.route('/api/players/trends')" not in content:
     endpoints_to_add.append('''
 @app.route('/api/players/trends')
 def get_players_trends():
@@ -48,7 +48,7 @@ def get_players_trends():
         })''')
 
 # Check for predictions/outcomes
-if '@app.route(\'/api/predictions/outcomes\')' not in content:
+if "@app.route('/api/predictions/outcomes')" not in content:
     endpoints_to_add.append('''
 @app.route('/api/predictions/outcomes')
 def get_predictions_outcomes():
@@ -87,7 +87,7 @@ def get_predictions_outcomes():
         })''')
 
 # Check for secret/phrases
-if '@app.route(\'/api/secret/phrases\')' not in content:
+if "@app.route('/api/secret/phrases')" not in content:
     endpoints_to_add.append('''
 @app.route('/api/secret/phrases')
 def get_secret_phrases_endpoint():
@@ -123,10 +123,15 @@ def get_secret_phrases_endpoint():
 # Add missing endpoints before the main block
 if endpoints_to_add:
     # Find the right place to insert (before if __name__ == '__main__')
-    insert_point = content.find('if __name__ == \'__main__\'')
+    insert_point = content.find("if __name__ == '__main__'")
     if insert_point != -1:
-        new_content = content[:insert_point] + '\n'.join(endpoints_to_add) + '\n\n' + content[insert_point:]
-        with open('app.py', 'w') as f:
+        new_content = (
+            content[:insert_point]
+            + "\n".join(endpoints_to_add)
+            + "\n\n"
+            + content[insert_point:]
+        )
+        with open("app.py", "w") as f:
             f.write(new_content)
         print(f"✅ Added {len(endpoints_to_add)} missing endpoints")
     else:

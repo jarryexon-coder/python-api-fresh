@@ -2,10 +2,7 @@ import requests
 import time
 
 url = "https://python-api-fresh-production.up.railway.app/api/admin/update-nba-manual"
-headers = {
-    "X-API-Key": "test123",
-    "Content-Type": "application/json"
-}
+headers = {"X-API-Key": "test123", "Content-Type": "application/json"}
 
 print(f"Testing {url}")
 print("Waiting for deployment to complete...")

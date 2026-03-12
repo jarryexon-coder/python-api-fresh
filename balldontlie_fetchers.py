@@ -8,48 +8,67 @@ from typing import Optional, List, Dict
 # ========== INTERNAL CACHE SETUP ==========
 _cache = {}
 CACHE_TTL_BALLDONTLIE = {
-    'props': 300,
-    'trends': 3600,
-    'player_details': 3600,
-    'lineup': 300,
-    'injuries': 3600,
-    'odds': 300,
-    'games': 300,
-    'season_avgs': 3600,
-    'recent_stats': 300,
-    'player_info': 3600,
-    'active_players': 3600,
+    "props": 300,
+    "trends": 3600,
+    "player_details": 3600,
+    "lineup": 300,
+    "injuries": 3600,
+    "odds": 300,
+    "games": 300,
+    "season_avgs": 3600,
+    "recent_stats": 300,
+    "player_info": 3600,
+    "active_players": 3600,
 }
+
 
 def get_cached(key):
     entry = _cache.get(key)
-    if entry and time.time() - entry['timestamp'] < CACHE_TTL_BALLDONTLIE.get(key.split(':')[0], 300):
-        return entry['data']
+    if entry and time.time() - entry["timestamp"] < CACHE_TTL_BALLDONTLIE.get(
+        key.split(":")[0], 300
+    ):
+        return entry["data"]
     return None
 
+
 def set_cache(key, data):
-    _cache[key] = {'data': data, 'timestamp': time.time()}
+    _cache[key] = {"data": data, "timestamp": time.time()}
+
 
 # ========== BALLDONTLIE API CONFIGURATION ==========
 print("🔧 balldontlie_fetchers.py loaded", flush=True)
-BALLDONTLIE_API_KEY = os.environ.get('BALLDONTLIE_API_KEY')
+BALLDONTLIE_API_KEY = os.environ.get("BALLDONTLIE_API_KEY")
 if not BALLDONTLIE_API_KEY:
-    print("❌ BALLDONTLIE_FETCHERS: BALLDONTLIE_API_KEY not set in environment", flush=True)
+    print(
+        "❌ BALLDONTLIE_FETCHERS: BALLDONTLIE_API_KEY not set in environment",
+        flush=True,
+    )
 else:
-    print(f"🔑 BALLDONTLIE_FETCHERS: Key loaded (starts with {BALLDONTLIE_API_KEY[:8]}...)", flush=True)
+    print(
+        f"🔑 BALLDONTLIE_FETCHERS: Key loaded (starts with {BALLDONTLIE_API_KEY[:8]}...)",
+        flush=True,
+    )
 
 BALLDONTLIE_BASE_URL = "https://api.balldontlie.io"
 BALLDONTLIE_HEADERS = {"Authorization": BALLDONTLIE_API_KEY}
 
-def make_request(endpoint: str, params: Optional[Dict] = None, timeout: Optional[int] = None) -> Optional[Dict]:
+
+def make_request(
+    endpoint: str, params: Optional[Dict] = None, timeout: Optional[int] = None
+) -> Optional[Dict]:
     if not BALLDONTLIE_API_KEY:
         print("❌ BALLDONTLIE_API_KEY not set")
         return None
     url = f"{BALLDONTLIE_BASE_URL}{endpoint}"
     try:
-        print(f"📡 Making Balldontlie request to {endpoint} with params {params}", flush=True)
+        print(
+            f"📡 Making Balldontlie request to {endpoint} with params {params}",
+            flush=True,
+        )
         timeout_val = timeout if timeout is not None else 10
-        resp = requests.get(url, headers=BALLDONTLIE_HEADERS, params=params, timeout=timeout_val)
+        resp = requests.get(
+            url, headers=BALLDONTLIE_HEADERS, params=params, timeout=timeout_val
+        )
         print(f"📡 Response status: {resp.status_code}", flush=True)
         if resp.status_code != 200:
             print(f"⚠️ Response body: {resp.text[:200]}", flush=True)
@@ -59,8 +78,11 @@ def make_request(endpoint: str, params: Optional[Dict] = None, timeout: Optional
         print(f"❌ Balldontlie API error on {endpoint}: {e}", flush=True)
         return None
 
+
 # ========== PLAYER FETCHING ==========
-def fetch_multiple_player_recent_stats(player_ids: List[int], last_n: int = 5) -> Dict[int, List[Dict]]:
+def fetch_multiple_player_recent_stats(
+    player_ids: List[int], last_n: int = 5
+) -> Dict[int, List[Dict]]:
     """
     Fetch last N game stats for multiple players in one request.
     Returns dict mapping player_id -> list of game stats.
@@ -70,28 +92,31 @@ def fetch_multiple_player_recent_stats(player_ids: List[int], last_n: int = 5) -
     end_date = datetime.now()
     start_date = end_date - timedelta(days=last_n * 3)
     params = {
-        'player_ids[]': player_ids,
-        'start_date': start_date.strftime("%Y-%m-%d"),
-        'end_date': end_date.strftime("%Y-%m-%d"),
-        'per_page': last_n * len(player_ids)
+        "player_ids[]": player_ids,
+        "start_date": start_date.strftime("%Y-%m-%d"),
+        "end_date": end_date.strftime("%Y-%m-%d"),
+        "per_page": last_n * len(player_ids),
     }
     response = make_request("/v1/stats", params)
-    if not response or 'data' not in response:
+    if not response or "data" not in response:
         return {}
-    stats_list = response['data']
+    stats_list = response["data"]
     by_player = {}
     for stat in stats_list:
-        pid = stat.get('player_id')
+        pid = stat.get("player_id")
         if pid:
             by_player.setdefault(pid, []).append(stat)
     result = {}
     for pid, games in by_player.items():
-        games.sort(key=lambda x: x.get('game', {}).get('date', ''), reverse=True)
+        games.sort(key=lambda x: x.get("game", {}).get("date", ""), reverse=True)
         result[pid] = games[:last_n]
     print(f"✅ Fetched recent stats for {len(result)} players in batch", flush=True)
     return result
 
-def fetch_active_players(per_page: int = 100, cache: bool = True, timeout: Optional[int] = None) -> Optional[List[Dict]]:
+
+def fetch_active_players(
+    per_page: int = 100, cache: bool = True, timeout: Optional[int] = None
+) -> Optional[List[Dict]]:
     """Fetch active NBA players from Balldontlie. Results cached for 1 hour."""
     cache_key = f"active_players:{per_page}"
     if cache:
@@ -100,12 +125,13 @@ def fetch_active_players(per_page: int = 100, cache: bool = True, timeout: Optio
             print(f"✅ Using cached active players (first {per_page})", flush=True)
             return cached
 
-    params = {'per_page': per_page, 'cursor': 0}
+    params = {"per_page": per_page, "cursor": 0}
     data = make_request("/v1/players", params, timeout=timeout)
-    players = data.get('data') if data else None
+    players = data.get("data") if data else None
     if players and cache:
         set_cache(cache_key, players)
     return players
+
 
 def fetch_all_active_players() -> List[Dict]:
     """Fetch ALL active NBA players using pagination (v1)."""
@@ -114,16 +140,16 @@ def fetch_all_active_players() -> List[Dict]:
     page = 1
     while True:
         print(f"📡 Fetching players page {page} with cursor {cursor}", flush=True)
-        params = {'per_page': 100, 'cursor': cursor}
-        response = make_request('/v1/players', params)
-        if not response or 'data' not in response:
+        params = {"per_page": 100, "cursor": cursor}
+        response = make_request("/v1/players", params)
+        if not response or "data" not in response:
             break
-        players = response['data']
+        players = response["data"]
         if not players:
             break
         all_players.extend(players)
-        meta = response.get('meta', {})
-        next_cursor = meta.get('next_cursor')
+        meta = response.get("meta", {})
+        next_cursor = meta.get("next_cursor")
         if next_cursor is None:
             break
         cursor = next_cursor
@@ -132,10 +158,9 @@ def fetch_all_active_players() -> List[Dict]:
     print(f"✅ Fetched total {len(all_players)} players", flush=True)
     return all_players
 
+
 def fetch_player_season_averages(
-    player_ids: List[int],
-    season: int = 2025,
-    timeout: Optional[int] = None
+    player_ids: List[int], season: int = 2025, timeout: Optional[int] = None
 ) -> Dict[int, Dict]:
     """
     Fetch season averages for a list of player IDs in one batch request.
@@ -143,19 +168,17 @@ def fetch_player_season_averages(
     """
     if not player_ids:
         return {}
-    params = {
-        'season': season,
-        'player_ids[]': player_ids
-    }
-    response = make_request('/v1/season_averages', params, timeout=timeout)
+    params = {"season": season, "player_ids[]": player_ids}
+    response = make_request("/v1/season_averages", params, timeout=timeout)
     avg_map = {}
-    if response and 'data' in response:
-        for avg in response['data']:
-            pid = avg.get('player_id')
+    if response and "data" in response:
+        for avg in response["data"]:
+            pid = avg.get("player_id")
             if pid:
                 avg_map[pid] = avg
     print(f"✅ Fetched season averages for {len(avg_map)} players in batch", flush=True)
     return avg_map
+
 
 # ========== INJURIES ==========
 def fetch_player_injuries(season: Optional[int] = None) -> Optional[List[Dict]]:
@@ -166,13 +189,14 @@ def fetch_player_injuries(season: Optional[int] = None) -> Optional[List[Dict]]:
         return cached
     params = {}
     if season:
-        params['season'] = season
-    response = make_request('/v1/player_injuries', params=params)
-    if response and 'data' in response:
-        injuries = response['data']
+        params["season"] = season
+    response = make_request("/v1/player_injuries", params=params)
+    if response and "data" in response:
+        injuries = response["data"]
         set_cache(cache_key, injuries)
         return injuries
     return None
+
 
 # ========== RECENT STATS ==========
 def fetch_player_recent_stats(player_id: int, last_n: int = 5) -> Optional[List[Dict]]:
@@ -184,19 +208,22 @@ def fetch_player_recent_stats(player_id: int, last_n: int = 5) -> Optional[List[
     end_date = datetime.now()
     start_date = end_date - timedelta(days=last_n * 3)
     params = {
-        'player_ids[]': player_id,
-        'start_date': start_date.strftime("%Y-%m-%d"),
-        'end_date': end_date.strftime("%Y-%m-%d"),
-        'per_page': last_n
+        "player_ids[]": player_id,
+        "start_date": start_date.strftime("%Y-%m-%d"),
+        "end_date": end_date.strftime("%Y-%m-%d"),
+        "per_page": last_n,
     }
     data = make_request("/v1/stats", params)
-    stats = data.get('data') if data else None
+    stats = data.get("data") if data else None
     if stats:
         set_cache(cache_key, stats)
-        print(f"📊 Fetched {len(stats)} recent games for player {player_id}", flush=True)
+        print(
+            f"📊 Fetched {len(stats)} recent games for player {player_id}", flush=True
+        )
     else:
         print(f"⚠️ No recent stats for player {player_id}", flush=True)
     return stats
+
 
 # ========== PLAYER INFO ==========
 def fetch_player_info(player_id: int) -> Optional[Dict]:
@@ -206,13 +233,14 @@ def fetch_player_info(player_id: int) -> Optional[Dict]:
     if cached:
         return cached
     data = make_request(f"/v1/players/{player_id}")
-    if data and 'data' in data:
-        player = data['data']
+    if data and "data" in data:
+        player = data["data"]
         set_cache(cache_key, player)
         print(f"👤 Fetched info for player {player_id}", flush=True)
         return player
     print(f"⚠️ No info found for player {player_id}", flush=True)
     return None
+
 
 # ========== TODAY'S GAMES ==========
 def fetch_todays_games() -> List[Dict]:
@@ -225,12 +253,12 @@ def fetch_todays_games() -> List[Dict]:
 
     today = datetime.now().strftime("%Y-%m-%d")
     params = {
-        'dates[]': today,
-        'per_page': 20
+        "dates[]": today,
+        "per_page": 20,
         # 'postseason' removed – it's not accepted by the API
     }
     data = make_request("/v1/games", params)
-    games = data.get('data') if data else []
+    games = data.get("data") if data else []
     if games:
         set_cache(cache_key, games)
         print(f"📅 Fetched {len(games)} games for {today}", flush=True)
@@ -238,28 +266,29 @@ def fetch_todays_games() -> List[Dict]:
         print(f"⚠️ No games found for {today}", flush=True)
     return games
 
+
 # ========== GAME ODDS ==========
-def fetch_game_odds(sport: str = 'nba') -> List[Dict]:
+def fetch_game_odds(sport: str = "nba") -> List[Dict]:
     """Fetch odds from The Odds API."""
-    ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
+    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
     if not ODDS_API_KEY:
         print("⚠️ ODDS_API_KEY not set – cannot fetch odds", flush=True)
         return []
 
     sport_map = {
-        'nba': 'basketball_nba',
-        'nfl': 'americanfootball_nfl',
-        'mlb': 'baseball_mlb',
-        'nhl': 'icehockey_nhl'
+        "nba": "basketball_nba",
+        "nfl": "americanfootball_nfl",
+        "mlb": "baseball_mlb",
+        "nhl": "icehockey_nhl",
     }
     sport_key = sport_map.get(sport, sport)
 
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
-        'apiKey': ODDS_API_KEY,
-        'regions': 'us',
-        'markets': 'h2h,spreads',
-        'oddsFormat': 'american'
+        "apiKey": ODDS_API_KEY,
+        "regions": "us",
+        "markets": "h2h,spreads",
+        "oddsFormat": "american",
     }
 
     cache_key = f"odds:{sport}"
@@ -279,19 +308,20 @@ def fetch_game_odds(sport: str = 'nba') -> List[Dict]:
         print(f"❌ Error fetching odds: {e}", flush=True)
         return []
 
-def fetch_game_odds_by_id(game_id, sport='basketball_nba'):
+
+def fetch_game_odds_by_id(game_id, sport="basketball_nba"):
     """Fetch odds for a specific game using The Odds API events endpoint."""
-    ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
+    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
     if not ODDS_API_KEY:
         print("⚠️ ODDS_API_KEY not set – cannot fetch odds", flush=True)
         return None
 
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{game_id}/odds"
     params = {
-        'apiKey': ODDS_API_KEY,
-        'regions': 'us',
-        'markets': 'h2h,spreads',
-        'oddsFormat': 'american'
+        "apiKey": ODDS_API_KEY,
+        "regions": "us",
+        "markets": "h2h,spreads",
+        "oddsFormat": "american",
     }
     try:
         resp = requests.get(url, params=params, timeout=15)
@@ -301,8 +331,11 @@ def fetch_game_odds_by_id(game_id, sport='basketball_nba'):
         print(f"❌ Error fetching odds for game {game_id}: {e}")
         return None
 
+
 # ========== BALLDONTLIE V2 PROPS (by player/game) ==========
-def fetch_balldontlie_props(player_id: Optional[int] = None, game_id: Optional[int] = None) -> Optional[List[Dict]]:
+def fetch_balldontlie_props(
+    player_id: Optional[int] = None, game_id: Optional[int] = None
+) -> Optional[List[Dict]]:
     """Fetch player props from Balldontlie v2 (by player_id and/or game_id)."""
     cache_key = f"player_props:p{player_id or 'all'}:g{game_id or 'all'}"
     cached = get_cached(cache_key)
@@ -311,32 +344,33 @@ def fetch_balldontlie_props(player_id: Optional[int] = None, game_id: Optional[i
 
     params = {}
     if player_id:
-        params['player_id'] = player_id
+        params["player_id"] = player_id
     if game_id:
-        params['game_id'] = game_id
+        params["game_id"] = game_id
 
-    response = make_request('/v2/odds/player_props', params=params)
-    if response and 'data' in response:
-        props = response['data']
+    response = make_request("/v2/odds/player_props", params=params)
+    if response and "data" in response:
+        props = response["data"]
         set_cache(cache_key, props)
         print(f"📊 Fetched {len(props)} Balldontlie v2 props", flush=True)
         return props
     return None
 
+
 # ========== THE ODDS API PLAYER PROPS (by sport) ==========
-def fetch_player_props(sport: str = 'nba', source: str = 'theoddsapi') -> List[Dict]:
+def fetch_player_props(sport: str = "nba", source: str = "theoddsapi") -> List[Dict]:
     print(f"🔍 fetch_player_props called for sport={sport}")
-    ODDS_API_KEY = os.environ.get('ODDS_API_KEY')
+    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
     if not ODDS_API_KEY:
         print("⚠️ ODDS_API_KEY not set")
         return []
 
     # Map common sport names to The Odds API sport keys
     sport_map = {
-        'nba': 'basketball_nba',
-        'nfl': 'americanfootball_nfl',
-        'mlb': 'baseball_mlb',
-        'nhl': 'icehockey_nhl'
+        "nba": "basketball_nba",
+        "nfl": "americanfootball_nfl",
+        "mlb": "baseball_mlb",
+        "nhl": "icehockey_nhl",
     }  # ← Closing brace added
     sport_key = sport_map.get(sport, sport)  # ← Now properly indented inside function
     print(f"   Using sport_key: {sport_key}")
@@ -348,12 +382,14 @@ def fetch_player_props(sport: str = 'nba', source: str = 'theoddsapi') -> List[D
         return cached
 
     # Define the markets you want (adjust as needed)
-    markets = ['player_points', 'player_rebounds', 'player_assists']  # ← Replaced [...]
+    markets = ["player_points", "player_rebounds", "player_assists"]  # ← Replaced [...]
 
     print(f"   Fetching events from The Odds API...")
     try:
         events_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events"
-        events_resp = requests.get(events_url, params={'apiKey': ODDS_API_KEY}, timeout=10)
+        events_resp = requests.get(
+            events_url, params={"apiKey": ODDS_API_KEY}, timeout=10
+        )
         print(f"   Events response status: {events_resp.status_code}")
         events_resp.raise_for_status()
         events = events_resp.json()
@@ -362,14 +398,16 @@ def fetch_player_props(sport: str = 'nba', source: str = 'theoddsapi') -> List[D
         all_props = []
         # Process up to 5 events to avoid rate limits
         for i, event in enumerate(events[:5]):
-            event_id = event['id']
-            print(f"   Fetching props for event {i+1}: {event_id} ({event.get('home_team')} vs {event.get('away_team')})")
+            event_id = event["id"]
+            print(
+                f"   Fetching props for event {i+1}: {event_id} ({event.get('home_team')} vs {event.get('away_team')})"
+            )
             props_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{event_id}/odds"
             params = {
-                'apiKey': ODDS_API_KEY,
-                'regions': 'us',
-                'markets': ','.join(markets),
-                'oddsFormat': 'american'
+                "apiKey": ODDS_API_KEY,
+                "regions": "us",
+                "markets": ",".join(markets),
+                "oddsFormat": "american",
             }
             try:
                 props_resp = requests.get(props_url, params=params, timeout=10)
@@ -381,14 +419,18 @@ def fetch_player_props(sport: str = 'nba', source: str = 'theoddsapi') -> List[D
                 event_props = props_resp.json()
 
                 # Count how many bookmakers have markets
-                total_markets = sum(len(b.get('markets', [])) for b in event_props.get('bookmakers', []))
-                print(f"      Got {len(event_props.get('bookmakers', []))} bookmakers with {total_markets} markets")
+                total_markets = sum(
+                    len(b.get("markets", [])) for b in event_props.get("bookmakers", [])
+                )
+                print(
+                    f"      Got {len(event_props.get('bookmakers', []))} bookmakers with {total_markets} markets"
+                )
 
                 # Optionally attach event details (replace with actual fields you need)
-                event_props['event_details'] = {
-                    'home_team': event.get('home_team'),
-                    'away_team': event.get('away_team'),
-                    'commence_time': event.get('commence_time')
+                event_props["event_details"] = {
+                    "home_team": event.get("home_team"),
+                    "away_team": event.get("away_team"),
+                    "commence_time": event.get("commence_time"),
                 }
                 all_props.append(event_props)
                 time.sleep(0.2)  # Be kind to the API
@@ -409,9 +451,10 @@ def fetch_player_props(sport: str = 'nba', source: str = 'theoddsapi') -> List[D
         print(f"❌ fetch_player_props error: {e}")
         return []
 
+
 def fetch_player_projections(sport: str, date: Optional[str] = None) -> List[Dict]:
     """Fetch player projections from Balldontlie season averages (NBA only)."""
-    if sport != 'nba':
+    if sport != "nba":
         print(f"⚠️ Projections only supported for NBA, got {sport}", flush=True)
         return []
 
@@ -419,34 +462,40 @@ def fetch_player_projections(sport: str, date: Optional[str] = None) -> List[Dic
     if not players:
         return []
 
-    player_ids = [p['id'] for p in players if p.get('id')]
+    player_ids = [p["id"] for p in players if p.get("id")]
     avg_map = fetch_player_season_averages(player_ids, season=2025)
 
     projections = []
     for player in players:
-        pid = player['id']
+        pid = player["id"]
         avg = avg_map.get(pid, {})
-        pts = avg.get('pts', 0)
-        reb = avg.get('reb', 0)
-        ast = avg.get('ast', 0)
+        pts = avg.get("pts", 0)
+        reb = avg.get("reb", 0)
+        ast = avg.get("ast", 0)
         fantasy_pts = pts * 1.0 + reb * 1.2 + ast * 1.5
 
-        projections.append({
-            "PlayerID": pid,
-            "Name": f"{player.get('first_name', '')} {player.get('last_name', '')}".strip(),
-            "Team": player.get('team', {}).get('abbreviation', 'FA'),
-            "Position": player.get('position', 'N/A'),
-            "Points": round(pts, 1),
-            "Rebounds": round(reb, 1),
-            "Assists": round(ast, 1),
-            "FantasyPoints": round(fantasy_pts, 1),
-            "InjuryStatus": "healthy",
-            "Salary": 0,
-            "Value": 0
-        })
+        projections.append(
+            {
+                "PlayerID": pid,
+                "Name": f"{player.get('first_name', '')} {player.get('last_name', '')}".strip(),
+                "Team": player.get("team", {}).get("abbreviation", "FA"),
+                "Position": player.get("position", "N/A"),
+                "Points": round(pts, 1),
+                "Rebounds": round(reb, 1),
+                "Assists": round(ast, 1),
+                "FantasyPoints": round(fantasy_pts, 1),
+                "InjuryStatus": "healthy",
+                "Salary": 0,
+                "Value": 0,
+            }
+        )
 
-    print(f"✅ Generated {len(projections)} projections from Balldontlie season averages", flush=True)
+    print(
+        f"✅ Generated {len(projections)} projections from Balldontlie season averages",
+        flush=True,
+    )
     return projections
+
 
 # ========== MAIN EXPORT FUNCTION ==========
 def fetch_nba_from_balldontlie(limit: int) -> Optional[List[Dict]]:
@@ -463,7 +512,7 @@ def fetch_nba_from_balldontlie(limit: int) -> Optional[List[Dict]]:
         return None
     print(f"✅ fetch_active_players returned {len(players_data)} players", flush=True)
 
-    player_ids = [p['id'] for p in players_data if p.get('id')]
+    player_ids = [p["id"] for p in players_data if p.get("id")]
     if not player_ids:
         print("❌ No valid player IDs found", flush=True)
         return None
@@ -482,10 +531,10 @@ def fetch_nba_from_balldontlie(limit: int) -> Optional[List[Dict]]:
     injury_map = {}
     if injuries_data and isinstance(injuries_data, list):
         for item in injuries_data:
-            player_info = item.get('player') or {}
-            pid = player_info.get('id')
+            player_info = item.get("player") or {}
+            pid = player_info.get("id")
             if pid:
-                injury_map[pid] = item.get('status', 'healthy')
+                injury_map[pid] = item.get("status", "healthy")
         print(f"📊 Found injuries for {len(injury_map)} players", flush=True)
     else:
         print("⚠️ No injuries data returned", flush=True)
@@ -506,22 +555,26 @@ def fetch_nba_from_balldontlie(limit: int) -> Optional[List[Dict]]:
     transformed = []
     for idx, player in enumerate(players_data):
         try:
-            pid = player.get('id')
+            pid = player.get("id")
             if not pid:
                 continue
 
-            first = player.get('first_name', '')
-            last = player.get('last_name', '')
+            first = player.get("first_name", "")
+            last = player.get("last_name", "")
             name = f"{first} {last}".strip() or "Unknown Player"
 
-            team_obj = player.get('team')
-            team = team_obj.get('abbreviation', 'FA') if isinstance(team_obj, dict) else 'FA'
-            position = player.get('position', 'N/A')
+            team_obj = player.get("team")
+            team = (
+                team_obj.get("abbreviation", "FA")
+                if isinstance(team_obj, dict)
+                else "FA"
+            )
+            position = player.get("position", "N/A")
 
             avg = avg_map.get(pid, {})
-            pts = avg.get('pts', 0)
-            reb = avg.get('reb', 0)
-            ast = avg.get('ast', 0)
+            pts = avg.get("pts", 0)
+            reb = avg.get("reb", 0)
+            ast = avg.get("ast", 0)
 
             if name in star_stats:
                 star = star_stats[name]
@@ -535,38 +588,48 @@ def fetch_nba_from_balldontlie(limit: int) -> Optional[List[Dict]]:
             try:
                 if fantasy_pts > 0:
                     base_salary = fantasy_pts * 350
-                    pos_mult = {'PG': 0.9, 'SG': 0.95, 'SF': 1.0, 'PF': 1.05, 'C': 1.1}.get(position, 1.0)
+                    pos_mult = {
+                        "PG": 0.9,
+                        "SG": 0.95,
+                        "SF": 1.0,
+                        "PF": 1.05,
+                        "C": 1.1,
+                    }.get(position, 1.0)
                     rand_factor = random.uniform(0.85, 1.15)
-                    salary = int(max(3000, min(15000, base_salary * pos_mult * rand_factor)))
+                    salary = int(
+                        max(3000, min(15000, base_salary * pos_mult * rand_factor))
+                    )
                 else:
                     salary = random.randint(4000, 8000)
             except Exception:
                 salary = 5000
 
             value = fantasy_pts / (salary / 1000) if salary > 0 else 0
-            injury_status = injury_map.get(pid, 'healthy')
+            injury_status = injury_map.get(pid, "healthy")
 
-            transformed.append({
-                "id": pid,
-                "name": name,
-                "team": team,
-                "position": position,
-                "salary": salary,
-                "fantasy_points": round(fantasy_pts, 1),
-                "projected_points": round(fantasy_pts, 1),
-                "value": round(value, 2),
-                "points": round(pts, 1),
-                "rebounds": round(reb, 1),
-                "assists": round(ast, 1),
-                "injury_status": injury_status,
-                "is_real_data": True,
-                "data_source": "Balldontlie (enriched)"
-            })
+            transformed.append(
+                {
+                    "id": pid,
+                    "name": name,
+                    "team": team,
+                    "position": position,
+                    "salary": salary,
+                    "fantasy_points": round(fantasy_pts, 1),
+                    "projected_points": round(fantasy_pts, 1),
+                    "value": round(value, 2),
+                    "points": round(pts, 1),
+                    "rebounds": round(reb, 1),
+                    "assists": round(ast, 1),
+                    "injury_status": injury_status,
+                    "is_real_data": True,
+                    "data_source": "Balldontlie (enriched)",
+                }
+            )
         except Exception as e:
             print(f"❌ Error processing player {idx}: {e}", flush=True)
             continue
 
-    transformed.sort(key=lambda x: x['fantasy_points'], reverse=True)
+    transformed.sort(key=lambda x: x["fantasy_points"], reverse=True)
     top_players = transformed[:limit]
     print(f"🏁 Returning top {len(top_players)} players by fantasy points", flush=True)
     return top_players

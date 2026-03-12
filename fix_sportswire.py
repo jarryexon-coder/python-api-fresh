@@ -1,15 +1,15 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 # Find the sports-wire function
-pattern = r'@app\.route\(\'/api/sports-wire\'\).*?def get_sports_wire\(\):(.*?)(?=\n@app\.route|\ndef get_|@app\.route)'
+pattern = r"@app\.route\(\'/api/sports-wire\'\).*?def get_sports_wire\(\):(.*?)(?=\n@app\.route|\ndef get_|@app\.route)"
 match = re.search(pattern, content, re.DOTALL)
 
 if match:
     print("Found sports-wire function, updating...")
-    
+
     # Replace with improved version
     new_function = '''@app.route('/api/sports-wire')
 def get_sports_wire():
@@ -76,12 +76,12 @@ def get_sports_wire():
             'count': 0,
             'has_data': False
         })'''
-    
+
     content = content.replace(match.group(0), new_function)
-    
-    with open('app.py', 'w') as f:
+
+    with open("app.py", "w") as f:
         f.write(content)
-    
+
     print("✅ Fixed /api/sports-wire endpoint")
 else:
     print("❌ Could not find sports-wire function")

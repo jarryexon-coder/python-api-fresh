@@ -5,14 +5,14 @@ class OddsConverter:
             return (american_odds / 100) + 1
         else:
             return (100 / abs(american_odds)) + 1
-    
+
     @staticmethod
     def decimal_to_american(decimal_odds):
         if decimal_odds >= 2:
             return f"+{int((decimal_odds - 1) * 100)}"
         else:
             return f"-{int(100 / (decimal_odds - 1))}"
-    
+
     @staticmethod
     def calculate_parlay_odds(legs_odds):
         """Calculate total parlay odds from individual legs"""
@@ -20,7 +20,7 @@ class OddsConverter:
         for odds in legs_odds:
             decimal_odds *= OddsConverter.american_to_decimal(odds)
         return OddsConverter.decimal_to_american(decimal_odds)
-    
+
     @staticmethod
     def implied_probability(american_odds):
         """Calculate implied win probability"""

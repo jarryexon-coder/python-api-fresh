@@ -24,8 +24,11 @@ if not API_KEY:
 
 SEASON = "2026"
 PLAYERS_FILE = Path(__file__).parent.parent / "players_data_comprehensive_fixed.json"
-PLAYER_STATS_URL = f"https://api.sportsdata.io/v3/nba/stats/json/PlayerSeasonStats/{SEASON}"
+PLAYER_STATS_URL = (
+    f"https://api.sportsdata.io/v3/nba/stats/json/PlayerSeasonStats/{SEASON}"
+)
 HEADERS = {"Ocp-Apim-Subscription-Key": API_KEY}
+
 
 # ----------------------------------------------------------------------
 # Name normalization
@@ -35,15 +38,18 @@ def normalize_name(name):
     if not name:
         return ""
     # Normalize unicode (e.g., é -> e)
-    nfkd_form = unicodedata.normalize('NFKD', name)
-    only_ascii = nfkd_form.encode('ASCII', 'ignore').decode('utf-8')
+    nfkd_form = unicodedata.normalize("NFKD", name)
+    only_ascii = nfkd_form.encode("ASCII", "ignore").decode("utf-8")
     # Remove common suffixes (Jr., Sr., III, IV, etc.)
-    only_ascii = re.sub(r'\b(Jr|Sr|I{1,3}|IV|V|VI?)\b\.?', '', only_ascii, flags=re.IGNORECASE)
+    only_ascii = re.sub(
+        r"\b(Jr|Sr|I{1,3}|IV|V|VI?)\b\.?", "", only_ascii, flags=re.IGNORECASE
+    )
     # Remove punctuation except hyphen
-    only_ascii = re.sub(r'[^\w\s-]', '', only_ascii)
+    only_ascii = re.sub(r"[^\w\s-]", "", only_ascii)
     # Collapse multiple spaces and trim
-    only_ascii = re.sub(r'\s+', ' ', only_ascii).strip().lower()
+    only_ascii = re.sub(r"\s+", " ", only_ascii).strip().lower()
     return only_ascii
+
 
 # ----------------------------------------------------------------------
 # Load existing players
@@ -92,7 +98,9 @@ for player in existing_players:
         player["assists"] = api_player.get("Assists", player.get("assists", 0))
         player["steals"] = api_player.get("Steals", player.get("steals", 0))
         player["blocks"] = api_player.get("BlockedShots", player.get("blocks", 0))
-        player["threePointers"] = api_player.get("ThreePointersMade", player.get("threePointers", 0))
+        player["threePointers"] = api_player.get(
+            "ThreePointersMade", player.get("threePointers", 0)
+        )
         player["gamesPlayed"] = api_player.get("Games", player.get("gamesPlayed", 0))
 
         # Projection / fantasy points
@@ -115,7 +123,9 @@ for player in existing_players:
         player["pos"] = player["position"]
 
         # Minutes projected
-        player["minutesProjected"] = api_player.get("Minutes", player.get("minutesProjected", 0))
+        player["minutesProjected"] = api_player.get(
+            "Minutes", player.get("minutesProjected", 0)
+        )
 
         # Injury status – keep existing or set default
         if "injuryStatus" not in player or not player["injuryStatus"]:

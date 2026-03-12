@@ -2,9 +2,10 @@
 """
 Fix all data source limits in app.py
 """
+
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     lines = f.readlines()
 
 print("🔧 FIXING DATA LIMITS IN app.py")
@@ -35,29 +36,37 @@ fixes = [
 
 for line_num, old, new in fixes:
     if line_num <= len(lines):
-        old_line = lines[line_num-1].rstrip()
+        old_line = lines[line_num - 1].rstrip()
         if old in old_line:
             new_line = old_line.replace(old, new)
-            lines[line_num-1] = new_line + '\n'
+            lines[line_num - 1] = new_line + "\n"
             changes.append((line_num, old, new))
             print(f"Line {line_num}: {old} → {new}")
 
 # Also check for generic [:10] on player data lines
 for i, line in enumerate(lines):
-    if any(pattern in line for pattern in ['players_data_list[:', 'nfl_players_data[:', 'mlb_players_data[:', 'nhl_players_data[:']):
+    if any(
+        pattern in line
+        for pattern in [
+            "players_data_list[:",
+            "nfl_players_data[:",
+            "mlb_players_data[:",
+            "nhl_players_data[:",
+        ]
+    ):
         # Find [:X] pattern
-        match = re.search(r'\[:(\d+)\]', line)
+        match = re.search(r"\[:(\d+)\]", line)
         if match:
             limit = int(match.group(1))
             if limit < 30:
                 new_limit = 50
-                new_line = re.sub(r'\[:(\d+)\]', f'[:{new_limit}]', line)
+                new_line = re.sub(r"\[:(\d+)\]", f"[:{new_limit}]", line)
                 lines[i] = new_line
-                changes.append((i+1, f'[:{limit}]', f'[:{new_limit}]'))
+                changes.append((i + 1, f"[:{limit}]", f"[:{new_limit}]"))
                 print(f"Line {i+1}: Increased limit from {limit} to {new_limit}")
 
 # Write back
-with open('app.py', 'w') as f:
+with open("app.py", "w") as f:
     f.writelines(lines)
 
 print(f"\n✅ Made {len(changes)} changes")
@@ -67,10 +76,13 @@ print("=" * 60)
 print("\n🔍 Checking get_predictions_outcome function...")
 func_found = False
 for i, line in enumerate(lines):
-    if 'def get_predictions_outcome' in line:
+    if "def get_predictions_outcome" in line:
         func_found = True
         print(f"\nFunction at line {i+1}:")
-    if func_found and i >= i and i < i+50:
-        if 'data_source = ' in line or 'outcomes = ' in line or 'return jsonify' in line:
+    if func_found and i >= i and i < i + 50:
+        if (
+            "data_source = " in line
+            or "outcomes = " in line
+            or "return jsonify" in line
+        ):
             print(f"  Line {i+1}: {line.rstrip()}")
-

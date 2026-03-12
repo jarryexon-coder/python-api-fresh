@@ -18,7 +18,7 @@ endpoints = [
     ("Odds Games", "/api/odds/games", {"region": "today"}),
     ("Player Trends", "/api/players/trends", {"sport": "nba"}),
     ("Prediction Outcomes", "/api/predictions/outcomes", {"sport": "nba"}),
-    ("Secret Phrases", "/api/secret/phrases", {})
+    ("Secret Phrases", "/api/secret/phrases", {}),
 ]
 
 print("\n📊 Testing all endpoints...")
@@ -26,14 +26,18 @@ all_working = True
 for name, endpoint, params in endpoints:
     try:
         response = requests.get(BASE_URL + endpoint, params=params, timeout=30)
-        
+
         if response.status_code == 200:
             try:
                 data = response.json()
-                if data.get('success'):
-                    print(f"✅ {name}: Status {response.status_code}, Count: {data.get('count', 'N/A')}")
+                if data.get("success"):
+                    print(
+                        f"✅ {name}: Status {response.status_code}, Count: {data.get('count', 'N/A')}"
+                    )
                 else:
-                    print(f"❌ {name}: Status {response.status_code}, Error: {data.get('error', 'Unknown')}")
+                    print(
+                        f"❌ {name}: Status {response.status_code}, Error: {data.get('error', 'Unknown')}"
+                    )
                     all_working = False
             except json.JSONDecodeError:
                 print(f"❌ {name}: Invalid JSON response")
@@ -46,11 +50,11 @@ for name, endpoint, params in endpoints:
         else:
             print(f"❌ {name}: Status {response.status_code}")
             all_working = False
-            
+
     except Exception as e:
         print(f"❌ {name}: Connection error - {e}")
         all_working = False
-    
+
     # Small delay between requests
     time.sleep(0.5)
 
@@ -58,7 +62,9 @@ for name, endpoint, params in endpoints:
 print("\n🛡️ Testing rate limiting on PrizePicks...")
 for i in range(12):  # Try 12 requests (limit is 10/min)
     try:
-        response = requests.get(BASE_URL + "/api/prizepicks/selections", params={"sport": "nba"}, timeout=10)
+        response = requests.get(
+            BASE_URL + "/api/prizepicks/selections", params={"sport": "nba"}, timeout=10
+        )
         if response.status_code == 429:
             print(f"  Request {i+1}: Rate limited ✅ (as expected)")
             break

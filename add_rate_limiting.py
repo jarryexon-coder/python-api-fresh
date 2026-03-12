@@ -3,25 +3,31 @@ from datetime import datetime, timedelta
 import time
 from collections import defaultdict
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 print("🛡️ Adding rate limiting to app.py...")
 
 # Add imports at the top if not present
 imports_to_add = []
-if 'from datetime import datetime' in content and 'timedelta' not in content:
-    content = content.replace('from datetime import datetime', 'from datetime import datetime, timedelta')
+if "from datetime import datetime" in content and "timedelta" not in content:
+    content = content.replace(
+        "from datetime import datetime", "from datetime import datetime, timedelta"
+    )
     print("✅ Added timedelta import")
 
-if 'from collections import defaultdict' not in content:
+if "from collections import defaultdict" not in content:
     # Find where imports end
-    import_section_end = content.find('\n\n')
+    import_section_end = content.find("\n\n")
     if import_section_end == -1:
-        import_section_end = content.find('\n@app')
-    
+        import_section_end = content.find("\n@app")
+
     if import_section_end != -1:
-        content = content[:import_section_end] + '\nfrom collections import defaultdict' + content[import_section_end:]
+        content = (
+            content[:import_section_end]
+            + "\nfrom collections import defaultdict"
+            + content[import_section_end:]
+        )
         print("✅ Added defaultdict import")
 
 # Add rate limiting storage and functions
@@ -91,17 +97,17 @@ def log_request():
 '''
 
 # Insert rate limiting code before the first endpoint
-first_route_pos = content.find('@app.route')
+first_route_pos = content.find("@app.route")
 if first_route_pos != -1:
     content = content[:first_route_pos] + rate_limit_code + content[first_route_pos:]
     print("✅ Added rate limiting middleware")
 
 # Update health endpoint to show rate limits
-health_rate_info = '''        "rate_limits": {
+health_rate_info = """        "rate_limits": {
             "general": "30 requests/minute",
             "prizepicks_selections": "10 requests/minute",
             "parlay_suggestions": "5 requests/minute"
-        },'''
+        },"""
 
 # Add rate limits to health response
 if '"message":' in content:
@@ -109,12 +115,17 @@ if '"message":' in content:
     message_pos = content.find('"message":')
     if message_pos != -1:
         # Find the next comma after message
-        comma_pos = content.find(',', message_pos)
+        comma_pos = content.find(",", message_pos)
         if comma_pos != -1:
-            content = content[:comma_pos+1] + '\n        ' + health_rate_info + content[comma_pos+1:]
+            content = (
+                content[: comma_pos + 1]
+                + "\n        "
+                + health_rate_info
+                + content[comma_pos + 1 :]
+            )
             print("✅ Added rate limit info to health endpoint")
 
-with open('app.py', 'w') as f:
+with open("app.py", "w") as f:
     f.write(content)
 
 print("🛡️ Rate limiting added successfully!")

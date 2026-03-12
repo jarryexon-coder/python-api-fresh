@@ -1,16 +1,16 @@
 import re
 
-with open('app.py', 'r') as f:
+with open("app.py", "r") as f:
     content = f.read()
 
 # Find the get_players function
-pattern = r'@app\.route\(\'/api/players\'\)\s+def get_players\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)'
+pattern = r"@app\.route\(\'/api/players\'\)\s+def get_players\(\):(.*?)(?=\n@app\.route|\ndef |\nif __name__)"
 match = re.search(pattern, content, re.DOTALL)
 
 if match:
     print("Found existing get_players function:")
     print(match.group(0)[:500] + "..." if len(match.group(0)) > 500 else match.group(0))
-    
+
     # Replace with fixed version
     fixed_function = '''@app.route('/api/players')
 def get_players():
@@ -99,10 +99,10 @@ def get_players():
 
     # Replace the function in the content
     new_content = content.replace(match.group(0), fixed_function)
-    
-    with open('app.py', 'w') as f:
+
+    with open("app.py", "w") as f:
         f.write(new_content)
-    
+
     print("✅ Updated /api/players endpoint")
 else:
     print("❌ Could not find get_players function")

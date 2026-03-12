@@ -23,13 +23,20 @@ if not API_KEY:
     raise ValueError("❌ SPORTSDATA_NHL_API_KEY environment variable not set.")
 
 SEASON = "2026"  # adjust as needed (e.g., "2025" for completed season)
-PLAYERS_FILE = Path(__file__).parent.parent / "data" / "nhl_players_data_comprehensive_fixed.json"
+PLAYERS_FILE = (
+    Path(__file__).parent.parent / "data" / "nhl_players_data_comprehensive_fixed.json"
+)
 # If file is in root, adjust:
 if not PLAYERS_FILE.exists():
-    PLAYERS_FILE = Path(__file__).parent.parent / "nhl_players_data_comprehensive_fixed.json"
+    PLAYERS_FILE = (
+        Path(__file__).parent.parent / "nhl_players_data_comprehensive_fixed.json"
+    )
 
-PLAYER_STATS_URL = f"https://api.sportsdata.io/v3/nhl/stats/json/PlayerSeasonStats/{SEASON}"
+PLAYER_STATS_URL = (
+    f"https://api.sportsdata.io/v3/nhl/stats/json/PlayerSeasonStats/{SEASON}"
+)
 HEADERS = {"Ocp-Apim-Subscription-Key": API_KEY}
+
 
 # ----------------------------------------------------------------------
 # Name normalization (same as NBA script)
@@ -37,12 +44,15 @@ HEADERS = {"Ocp-Apim-Subscription-Key": API_KEY}
 def normalize_name(name):
     if not name:
         return ""
-    nfkd_form = unicodedata.normalize('NFKD', name)
-    only_ascii = nfkd_form.encode('ASCII', 'ignore').decode('utf-8')
-    only_ascii = re.sub(r'\b(Jr|Sr|I{1,3}|IV|V|VI?)\b\.?', '', only_ascii, flags=re.IGNORECASE)
-    only_ascii = re.sub(r'[^\w\s-]', '', only_ascii)
-    only_ascii = re.sub(r'\s+', ' ', only_ascii).strip().lower()
+    nfkd_form = unicodedata.normalize("NFKD", name)
+    only_ascii = nfkd_form.encode("ASCII", "ignore").decode("utf-8")
+    only_ascii = re.sub(
+        r"\b(Jr|Sr|I{1,3}|IV|V|VI?)\b\.?", "", only_ascii, flags=re.IGNORECASE
+    )
+    only_ascii = re.sub(r"[^\w\s-]", "", only_ascii)
+    only_ascii = re.sub(r"\s+", " ", only_ascii).strip().lower()
     return only_ascii
+
 
 # ----------------------------------------------------------------------
 # Load existing players
@@ -94,12 +104,16 @@ for player in existing_players:
         player["goals"] = api_player.get("Goals", player.get("goals", 0))
         player["assists"] = api_player.get("Assists", player.get("assists", 0))
         player["plusMinus"] = api_player.get("PlusMinus", player.get("plusMinus", 0))
-        player["penaltyMinutes"] = api_player.get("PenaltyMinutes", player.get("penaltyMinutes", 0))
+        player["penaltyMinutes"] = api_player.get(
+            "PenaltyMinutes", player.get("penaltyMinutes", 0)
+        )
         player["shots"] = api_player.get("Shots", player.get("shots", 0))
         player["gamesPlayed"] = api_player.get("Games", player.get("gamesPlayed", 0))
 
         # Fantasy points (if available)
-        fantasy_pts = api_player.get("FantasyPoints", api_player.get("FantasyPointsFanDuel", 0))
+        fantasy_pts = api_player.get(
+            "FantasyPoints", api_player.get("FantasyPointsFanDuel", 0)
+        )
         player["projection"] = fantasy_pts
         player["projFP"] = fantasy_pts
         player["fantasyScore"] = fantasy_pts

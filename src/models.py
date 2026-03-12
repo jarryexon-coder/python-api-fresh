@@ -1,7 +1,9 @@
 """Data models for 2026 fantasy sports"""
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
+
 
 @dataclass
 class Player2026:
@@ -15,7 +17,8 @@ class Player2026:
     is_rookie: bool = False
     injury_status: str = "active"
     season: str = "2025-26"
-    
+
+
 @dataclass
 class Parlay2026:
     id: str
@@ -27,7 +30,8 @@ class Parlay2026:
     payout: float
     created_at: datetime
     correlation_bonus: float = 0.0
-    
+
+
 @dataclass
 class PropBet2026:
     id: str
