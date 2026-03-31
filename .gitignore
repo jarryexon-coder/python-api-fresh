@@ -30,3 +30,4 @@ python
 # Test files (optional - keep if you want them tracked)
 # test_*.py
 # debug_*.py
+firebase-service-account.json
