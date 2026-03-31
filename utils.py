@@ -8,6 +8,74 @@ import requests
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, Dict, Any, List, Tuple
+import jwt
+from flask import request, jsonify
+import firebase_admin
+from firebase_admin import auth
+
+def generate_token(user_id):
+    """Generate a JWT token for internal use (if needed)."""
+    secret = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+    return jwt.encode(
+        {'user_id': user_id},
+        secret,
+        algorithm='HS256'
+    )
+
+def verify_token(token):
+    """Verify a JWT token (internal)."""
+    try:
+        secret = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+        payload = jwt.decode(token, secret, algorithms=['HS256'])
+        return payload.get('user_id')
+    except jwt.InvalidTokenError:
+        return None
+
+def verify_firebase_token(token):
+    """Verify a Firebase ID token (client‑side token)."""
+    try:
+        # token may come with "Bearer " prefix
+        if token.startswith('Bearer '):
+            token = token.split(' ')[1]
+        decoded = auth.verify_id_token(token)
+        return decoded.get('uid')
+    except Exception as e:
+        print(f"Firebase token verification failed: {e}")
+        return None
+
+def login_required(f):
+    """Decorator that checks for a valid Firebase token in the Authorization header."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({'error': 'Missing Authorization header'}), 401
+        # Extract token
+        token = auth_header.replace('Bearer ', '')
+        user_id = verify_firebase_token(token)
+        if not user_id:
+            return jsonify({'error': 'Invalid or expired token'}), 401
+        # Store user_id in request context for downstream use
+        request.user_id = user_id
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    """Decorator that checks for admin privileges (requires user to exist in Firestore with role='admin')."""
+    @wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        # Get user from Firestore
+        user_id = request.user_id
+        # Replace 'users' with your actual collection name
+        doc = firestore.client().collection('users').document(user_id).get()
+        if not doc.exists:
+            return jsonify({'error': 'User not found'}), 403
+        user_data = doc.to_dict()
+        if user_data.get('role') != 'admin':
+            return jsonify({'error': 'Admin access required'}), 403
+        return f(*args, **kwargs)
+    return decorated_function
 
 # -------------------- API Configurations --------------------
 API_CONFIG = {

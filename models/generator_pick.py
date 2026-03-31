@@ -1,0 +1,2 @@
+class GeneratorPick:
+    pass
