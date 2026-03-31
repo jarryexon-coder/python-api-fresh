@@ -1,9 +1,8 @@
 import stripe
-from models.promo import PromoCode, PromoReferral
+from models.promo import PromoCode, PromoReferral, promo_codes_db, referrals_db
 from datetime import datetime
 import random
 import string
-import stripe
 
 def generate_promo_code(influencer_name):
     """Generate a unique promo code for an influencer"""

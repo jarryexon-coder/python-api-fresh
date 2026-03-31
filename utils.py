@@ -9,9 +9,56 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, Dict, Any, List, Tuple
 import jwt
-from flask import request, jsonify
 import firebase_admin
 from firebase_admin import auth
+from flask import g, request, jsonify
+
+def verify_firebase_token(token):
+    """Verify Firebase ID token. Returns dict with 'valid' and 'payload'."""
+    try:
+        if token.startswith('Bearer '):
+            token = token.split(' ')[1]
+        decoded = auth.verify_id_token(token)
+        return {'valid': True, 'payload': decoded}
+    except Exception as e:
+        print(f"Firebase token verification failed: {e}")
+        return {'valid': False, 'error': str(e)}
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        print("🔐 login_required called")
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({'error': 'Missing Authorization header'}), 401
+        token = auth_header.replace('Bearer ', '')
+        result = verify_firebase_token(token)
+        if not result.get('valid'):
+            return jsonify({'error': result.get('error', 'Invalid token')}), 401
+        payload = result['payload']
+        user_id = payload.get('uid')
+        user_email = payload.get('email')
+        if not user_id:
+            return jsonify({'error': 'User ID not found in token'}), 401
+        g.user_id = user_id
+        g.user_email = user_email
+        print(f"🔐 g.user_id={user_id}, g.user_email={user_email}")
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        user_id = g.user_id
+        doc = firestore.client().collection('users').document(user_id).get()
+        if not doc.exists:
+            return jsonify({'error': 'User not found'}), 403
+        user_data = doc.to_dict()
+        if user_data.get('role') != 'admin':
+            return jsonify({'error': 'Admin access required'}), 403
+        return f(*args, **kwargs)
+    return decorated_function
 
 def generate_token(user_id):
     """Generate a JWT token for internal use (if needed)."""
@@ -30,52 +77,6 @@ def verify_token(token):
         return payload.get('user_id')
     except jwt.InvalidTokenError:
         return None
-
-def verify_firebase_token(token):
-    """Verify a Firebase ID token (client‑side token)."""
-    try:
-        # token may come with "Bearer " prefix
-        if token.startswith('Bearer '):
-            token = token.split(' ')[1]
-        decoded = auth.verify_id_token(token)
-        return decoded.get('uid')
-    except Exception as e:
-        print(f"Firebase token verification failed: {e}")
-        return None
-
-def login_required(f):
-    """Decorator that checks for a valid Firebase token in the Authorization header."""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({'error': 'Missing Authorization header'}), 401
-        # Extract token
-        token = auth_header.replace('Bearer ', '')
-        user_id = verify_firebase_token(token)
-        if not user_id:
-            return jsonify({'error': 'Invalid or expired token'}), 401
-        # Store user_id in request context for downstream use
-        request.user_id = user_id
-        return f(*args, **kwargs)
-    return decorated_function
-
-def admin_required(f):
-    """Decorator that checks for admin privileges (requires user to exist in Firestore with role='admin')."""
-    @wraps(f)
-    @login_required
-    def decorated_function(*args, **kwargs):
-        # Get user from Firestore
-        user_id = request.user_id
-        # Replace 'users' with your actual collection name
-        doc = firestore.client().collection('users').document(user_id).get()
-        if not doc.exists:
-            return jsonify({'error': 'User not found'}), 403
-        user_data = doc.to_dict()
-        if user_data.get('role') != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        return f(*args, **kwargs)
-    return decorated_function
 
 # -------------------- API Configurations --------------------
 API_CONFIG = {

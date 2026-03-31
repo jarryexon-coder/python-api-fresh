@@ -8030,47 +8030,59 @@ def get_user_profile():
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
-    
+
     try:
         # Get authorization header
         auth_header = flask_request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             print("❌ No Bearer token found")
             response = make_response(jsonify({'error': 'No Bearer token found'}), 401)
-            # CORS handled by Flask-CORS
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
-        
+
         token = auth_header.split(' ')[1]
-        
+
         # Verify Firebase token
         result = verify_firebase_token(token)
-        if not result['valid']:
-            print(f"❌ Token verification failed: {result.get('error')}")
-            response = make_response(jsonify({'error': result.get('error')}), 401)
-            # CORS handled by Flask-CORS
+
+        # Safety check: ensure result is a dict
+        if not isinstance(result, dict):
+            print(f"❌ Unexpected token verification result type: {type(result)}")
+            response = make_response(jsonify({'error': 'Internal authentication error'}), 500)
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
-        
-        user_id = result['payload']['user_id']
+
+        if not result.get('valid'):
+            print(f"❌ Token verification failed: {result.get('error')}")
+            response = make_response(jsonify({'error': result.get('error', 'Invalid token')}), 401)
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response
+
+        # Firebase token payload uses 'uid', not 'user_id'
+        user_id = result['payload'].get('uid')
         user_email = result['payload'].get('email')
-        
+
+        if not user_id:
+            print("❌ No user ID in token payload")
+            response = make_response(jsonify({'error': 'Invalid token payload'}), 401)
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response
+
         print(f"🔍 Getting profile for user: {user_id} ({user_email})")
-        
+
         if not db:
             response = make_response(jsonify({'error': 'Database not available'}), 500)
-            # CORS handled by Flask-CORS
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
-        
+
         user_ref = db.collection('users').document(user_id)
         user_doc = user_ref.get()
-        
+
         if user_doc.exists:
             user_data = user_doc.to_dict()
             print(f"✅ Found user: {user_data.get('email')}")
             print(f"   Plan: {user_data.get('plan')}")
-            
+
             response_data = {
                 'id': user_id,
                 'email': user_data.get('email', user_email),
@@ -8100,17 +8112,15 @@ def get_user_profile():
             response_data = user_data
             response_data['id'] = user_id
             print(f"✅ Created new user: {user_id}")
-        
+
         response = make_response(jsonify(response_data), 200)
-        # CORS handled by Flask-CORS
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
-            
+
     except Exception as e:
         print(f"❌ Get profile error: {e}")
         traceback.print_exc()
         response = make_response(jsonify({'error': str(e)}), 500)
-        # CORS handled by Flask-CORS
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
 
@@ -8168,45 +8178,47 @@ def get_user_activity():
 def get_my_subscription():
     """Get current user's subscription from Firestore"""
     try:
-        user_id = g.user_id
+        # Try both g and request (for compatibility)
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
+            user_id = getattr(request, 'user_id', None)
+        if not user_id:
+            print("❌ No user_id in g or request")
+            return jsonify({'error': 'User not authenticated'}), 401
+
         print(f"🔍 Getting subscription for user: {user_id}")
-        
+
         if not db:
             return jsonify({'success': True, 'subscription': None})
-        
+
         user_ref = db.collection('users').document(user_id)
         user_doc = user_ref.get()
-        
+
         if user_doc.exists:
             user_data = user_doc.to_dict()
             print(f"✅ Found user in Firestore")
             print(f"   Plan: {user_data.get('plan')}")
             print(f"   Subscription ID: {user_data.get('subscription_id')}")
             print(f"   Status: {user_data.get('subscription_status')}")
-            
-            # Determine the highest plan the user has access to
-            # If user has Analytics plan, they also have Starter features
-            plan = user_data.get('plan', 'free')
-            
-            # Ensure we're returning the actual plan tier
+
             subscription_data = {
                 'id': user_data.get('subscription_id'),
-                'plan_id': plan,  # 'starter', 'analytics', or 'generator'
+                'plan_id': user_data.get('plan', 'free'),
                 'status': user_data.get('subscription_status', 'active'),
                 'current_period_start': user_data.get('current_period_start').isoformat() if user_data.get('current_period_start') else None,
                 'current_period_end': user_data.get('current_period_end').isoformat() if user_data.get('current_period_end') else None
             }
-            
+
             return jsonify({
                 'success': True,
                 'subscription': subscription_data
             })
-        
+
         return jsonify({
             'success': True,
             'subscription': None
         })
-        
+
     except Exception as e:
         print(f"❌ Get subscription error: {e}")
         traceback.print_exc()
