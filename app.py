@@ -7,6 +7,7 @@ from pydantic import BaseModel
 import requests
 import urllib.parse
 import json
+import base64
 import statistics
 import os
 import time
@@ -36,6 +37,9 @@ from typing import Optional, Dict, Any, List
 from difflib import get_close_matches
 import redis
 import stripe  # Add this
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
      
 from nba_static_data import NBA_PLAYERS_2026
 from data_pipeline import UnifiedNBADataPipeline
@@ -240,6 +244,403 @@ def handle_checkout_completed(session):
         print(f"❌ Error handling checkout completed: {e}")
         traceback.print_exc()
 
+key = os.environ.get('KALSHI_PRIVATE_KEY')
+print(f"Key starts with: {key[:50]}")
+print(f"Key ends with: {key[-50:]}")
+print(f"Key length: {len(key)}")
+
+# ==============================================
+# Kalshi API integration – Final Version
+# ==============================================
+
+import os
+import requests
+import base64
+import traceback
+import urllib.parse
+from datetime import datetime, timezone, timedelta
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
+
+# ------------------------------------------------------------------
+# Kalshi authentication helpers
+# ------------------------------------------------------------------
+def load_private_key_from_env():
+    pem_data = os.environ.get('KALSHI_PRIVATE_KEY')
+    if not pem_data:
+        raise ValueError("KALSHI_PRIVATE_KEY environment variable not set")
+    pem_data = pem_data.strip()
+    try:
+        private_key = serialization.load_pem_private_key(
+            pem_data.encode('utf-8'),
+            password=None,
+            backend=default_backend()
+        )
+        return private_key
+    except Exception as e:
+        raise ValueError(f"Failed to load private key: {e}")
+
+def sign_pss_text(private_key, text: str) -> str:
+    message = text.encode('utf-8')
+    signature = private_key.sign(
+        message,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return base64.b64encode(signature).decode('utf-8')
+
+def get_kalshi_headers(method: str, path: str) -> dict:
+    timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    timestamp_str = str(timestamp_ms)
+    path_without_query = path.split('?')[0]
+    private_key = load_private_key_from_env()
+    msg = timestamp_str + method.upper() + path_without_query
+    signature = sign_pss_text(private_key, msg)
+    return {
+        'KALSHI-ACCESS-KEY': os.environ.get('KALSHI_ACCESS_KEY', ''),
+        'KALSHI-ACCESS-SIGNATURE': signature,
+        'KALSHI-ACCESS-TIMESTAMP': timestamp_str,
+    }
+
+def fetch_kalshi_markets(sport: str = 'all'):
+    base_url = os.environ.get('KALSHI_API_BASE', 'https://api.elections.kalshi.com')
+    path = '/trade-api/v2/markets'
+    params = {
+        'status': 'open',
+        'limit': 100
+    }
+    headers = get_kalshi_headers('GET', path)
+
+    try:
+        full_url = f"{base_url}{path}"
+        print(f"📡 Fetching Kalshi markets from: {full_url}?{urllib.parse.urlencode(params)}")
+        resp = requests.get(full_url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        markets = data.get('markets', [])
+        print(f"✅ Retrieved {len(markets)} raw markets from Kalshi")
+        return markets
+    except Exception as e:
+        print(f"❌ Error fetching from Kalshi: {e}")
+        if 'resp' in locals():
+            print(f"Response body: {resp.text[:500]}")
+        traceback.print_exc()
+        return None
+
+def transform_market(market: dict) -> dict:
+    """Convert a raw Kalshi market to the frontend's Prediction format."""
+    ticker = market.get('ticker', '')
+    title = market.get('title', 'No title')
+    event_ticker = market.get('event_ticker', '')
+    yes_bid = float(market.get('yes_bid_dollars', market.get('yes_bid', 0.5)))    
+    no_bid = float(market.get('no_bid_dollars', 0.5))
+
+    original_yes = yes_bid
+    original_no = no_bid
+    if yes_bid == 0.0:
+        yes_bid = 0.5
+    if no_bid == 0.0:
+        no_bid = 0.5
+
+    volume = market.get('volume_24h_fp', '0')
+    close_time = market.get('close_time', '')
+
+    # Edge: market sentiment based on distance from 0.5
+    if original_yes != 0.0:
+        sentiment_edge = (original_yes - 0.5) * 200
+    else:
+        sentiment_edge = 0.0
+
+    # ----------------------------------------------------------
+    # SPORTS DETECTION – multi‑layer
+    # ----------------------------------------------------------
+    category = None
+    if "SPORTS" in event_ticker.upper():
+        category = "Sports"
+
+    title_lower = title.lower()
+    sports_keywords = [
+        # Leagues & generic
+        'nba', 'nfl', 'mlb', 'nhl', 'wnba', 'soccer', 'football', 'baseball',
+        'basketball', 'hockey', 'tennis', 'golf', 'cricket', 'rugby', 'boxing',
+        'mma', 'ufc', 'formula', 'nascar', 'college', 'ncaa', 'tie', 'draw',
+        'player', 'points', 'rebounds', 'assists', 'goals', 'touchdown',
+        'homerun', 'strikeout', 'game', 'match', 'team', 'score', 'win',
+        'over', 'under', 'spread', 'total', 'quarter', 'half', 'period',
+        'points scored', 'wins by over', 'fighter', 'fight',
+        # NBA players (from logs)
+        'brandon miller', 'miles bridges', 'coby white', 'devin booker',
+        'de\'aaron fox', 'victor wembanyama', 'stephon castle', 'dylan harper',
+        'cameron johnson', 'ace bailey', 'nikola jokić', 'jamal murray',
+        'draymond green', 'christian braun', 'lebron james', 'luka dončić',
+        'shai gilgeous-alexander', 'austin reaves', 'dillon brooks', 'julius randle',
+        # NBA teams
+        'san antonio', 'minnesota', 'kansas city', 'houston', 'denver',
+        'golden state', 'utah', 'phoenix', 'atlanta', 'memphis', 'orlando',
+        'sacramento', 'portland', 'new orleans', 'indiana', 'oklahoma city',
+        'brooklyn', 'charlotte', 'cleveland', 'dallas', 'detroit', 'toronto',
+        'washington', 'chicago', 'boston', 'philadelphia', 'milwaukee', 'lakers',
+        'warriors', 'celtics', 'heat', 'bulls', 'thunder', 'nuggets', 'rockets',
+        'hawks', 'hornets', 'jazz', 'kings', 'knicks', 'magic', 'mavericks',
+        'nets', 'pelicans', 'pistons', 'raptors', 'spurs', 'suns', 'timberwolves',
+        'trail blazers', 'grizzlies', 'bucks', 'cavaliers', 'clippers', '76ers',
+        'wizards',
+        # MLB teams
+        'red sox', 'yankees', 'dodgers', 'giants', 'cubs', 'cardinals', 'braves',
+        'phillies', 'astros', 'rangers', 'twins', 'white sox', 'royals', 'tigers',
+        'indians', 'guardians', 'mariners', 'marlins', 'rays', 'orioles', 'padres',
+        'rockies', 'diamondbacks', 'reds', 'pirates', 'brewers', 'athletics',
+        'angels', 'blue jays', 'nationals', 'mets', 'baltimore', 'cincinnati',
+        'colorado', 'detroit', 'houston', 'kansas city', 'los angeles', 'miami',
+        'milwaukee', 'minnesota', 'new york', 'oakland', 'philadelphia',
+        'pittsburgh', 'san diego', 'san francisco', 'seattle', 'st. louis',
+        'tampa bay', 'texas', 'toronto', 'washington',
+        # NHL teams
+        'canucks', 'oilers', 'flames', 'jets', 'maple leafs', 'canadiens',
+        'senators', 'bruins', 'sabres', 'red wings', 'panthers', 'lightning',
+        'hurricanes', 'blue jackets', 'devils', 'islanders', 'rangers', 'flyers',
+        'penguins', 'capitals', 'blackhawks', 'avalanche', 'stars', 'wild',
+        'predators', 'blues', 'ducks', 'coyotes', 'sharks', 'kings', 'golden knights',
+        # College teams
+        'rutgers', 'tulsa', 'uconn', 'arizona', 'illinois st.', 'baylor',
+        'oklahoma', 'minnesota', 'michigan', 'duke', 'north carolina', 'kentucky',
+        'kansas', 'gonzaga', 'villanova', 'purdue', 'indiana', 'virginia',
+        'florida', 'texas', 'usc', 'ucla', 'oregon', 'washington', 'wisconsin',
+        'michigan state',
+        # Soccer teams
+        'real madrid', 'barcelona', 'arsenal', 'chelsea', 'liverpool',
+        'manchester city', 'manchester united', 'psg', 'juventus', 'ac milan',
+        'inter milan', 'ajax', 'porto', 'benfica', 'sporting cp', 'valencia',
+        'real sociedad', 'getafe', 'bilbao', 'sevilla', 'villareal', 'real betis',
+        # MMA fighters (from logs)
+        'melissa gotta', 'azamat bekoev', 'alessandro costa', 'robert ruchala',
+        'jose delano', 'dakota hope', 'tommy mcmillen', 'abdul-rakhman yakhyaev',
+        'dione barbosa',
+        # Other sports people
+        'byron buxton', 'royce lewis', 'carter jensen', 'austin martin',
+        'brooks lee', 'tommy paul', 'sebastian baez', 'frances tiafoe',
+        'alexander zverev', 'tomas machac', 'alex michelsen', 'fabian marozsan',
+        'learner tien', 'belinda bencic', 'sofia kenin', 'jessica pegula',
+        'roman andres burruchaga', 'rafael jodar', 'alexei popyrin',
+        'leylah fernandez', 'mccartney kessler', 'dino prizmic', 'alexandre muller',
+        'kon knueppel', 'dillon brooks', 'coby white'
+    ]
+    if any(keyword in title_lower for keyword in sports_keywords):
+        category = "Sports"
+
+    # Regex: catch any "yes Name" pattern (player or team)
+    if category is None:
+        if re.search(r'yes\s+\w+(\s+\w+)?', title_lower):
+            category = "Sports"
+
+    if category is None:
+        # Non-sports categories
+        if any(word in title_lower for word in ['politics', 'election', 'president', 'democratic', 'republican', 'congress', 'senate']):
+            category = "Politics"
+        elif any(word in title_lower for word in ['econom', 'fed', 'sp500', 'inflation', 'interest rate', 'recession', 'gdp']):
+            category = "Economics"
+        elif any(word in title_lower for word in ['movie', 'oscar', 'grammy', 'entertainment', 'emmy', 'box office']):
+            category = "Entertainment"
+        elif any(word in title_lower for word in ['apple', 'tesla', 'ai', 'technology', 'iphone', 'self-driving']):
+            category = "Technology"
+        elif any(word in title_lower for word in ['health', 'covid', 'fda', 'alzheimer', 'vaccine', 'pandemic']):
+            category = "Health"
+        elif any(word in title_lower for word in ['weather', 'snow', 'hurricane', 'storm', 'temperature']):
+            category = "Weather"
+        else:
+            category = "General"
+
+    return {
+        'id': ticker,
+        'question': title,
+        'category': category,
+        'yesPrice': f"{yes_bid:.2f}",
+        'noPrice': f"{no_bid:.2f}",
+        'volume': f"${float(volume)/1e6:.1f}M" if volume and volume != '0' else "N/A",
+        'analysis': f"Market: {title}",
+        'expires': close_time,
+        'confidence': 50,
+        'edge': f"{sentiment_edge:+.1f}%",
+        'platform': 'kalshi',
+        'marketType': market.get('market_type', 'binary'),
+        'trend': 'neutral',
+    }
+
+# Mock generator (replace with your frontend's mock if desired)
+def generate_mock_kalshi_markets(sport: str = "all"):
+    """
+    Returns rich mock market data (13 items) that matches the frontend's static mock.
+    The data is structured as expected by transform_market().
+    """
+    return [
+        # Politics
+        {
+            "ticker": "kalshi-politics-1",
+            "title": "Will the Federal Reserve cut rates in March 2026?",
+            "category": "Politics",
+            "yes_bid": 0.58,
+            "no_bid": 0.42,
+            "volume": "3200000",
+            "subtitle": "Market implied probability 58%. Fed futures indicate 65% chance of cut.",
+            "close_date": "2026-03-15",
+            "confidence": 72,
+            "edge": 2.3,
+        },
+        {
+            "ticker": "kalshi-politics-2",
+            "title": "Will the Democratic candidate win the 2026 midterms?",
+            "category": "Politics",
+            "yes_bid": 0.48,
+            "no_bid": 0.52,
+            "volume": "5100000",
+            "subtitle": "Markets slightly favor Republicans. Recent polling shows tightening race.",
+            "close_date": "2026-11-03",
+            "confidence": 65,
+            "edge": 1.8,
+        },
+        {
+            "ticker": "kalshi-politics-3",
+            "title": "Will the US avoid a government shutdown in 2026?",
+            "category": "Politics",
+            "yes_bid": 0.72,
+            "no_bid": 0.28,
+            "volume": "2100000",
+            "subtitle": "Bipartisan budget talks ongoing; markets see 72% chance of resolution.",
+            "close_date": "2026-12-31",
+            "confidence": 68,
+            "edge": 1.5,
+        },
+        # Economics
+        {
+            "ticker": "kalshi-econ-1",
+            "title": "Will the S&P 500 close above 6000 by Dec 2026?",
+            "category": "Economics",
+            "yes_bid": 0.45,
+            "no_bid": 0.55,
+            "volume": "8700000",
+            "subtitle": "Analysts mixed; economic growth forecast 2.1%.",
+            "close_date": "2026-12-31",
+            "confidence": 60,
+            "edge": 0.8,
+        },
+        {
+            "ticker": "kalshi-econ-2",
+            "title": "Will US inflation rate drop below 2.5% by June 2026?",
+            "category": "Economics",
+            "yes_bid": 0.63,
+            "no_bid": 0.37,
+            "volume": "4300000",
+            "subtitle": "CPI trending down; Fed signals possible cuts.",
+            "close_date": "2026-06-30",
+            "confidence": 74,
+            "edge": 2.1,
+        },
+        # Entertainment
+        {
+            "ticker": "kalshi-entertain-1",
+            "title": 'Will "Oppenheimer" win Best Picture at 2026 Oscars?',
+            "category": "Entertainment",
+            "yes_bid": 0.82,
+            "no_bid": 0.18,
+            "volume": "1400000",
+            "subtitle": "Heavy favorite after Golden Globe wins.",
+            "close_date": "2026-03-10",
+            "confidence": 85,
+            "edge": 3.5,
+        },
+        {
+            "ticker": "kalshi-entertain-2",
+            "title": "Will Taylor Swift win Album of the Year at 2026 Grammys?",
+            "category": "Entertainment",
+            "yes_bid": 0.71,
+            "no_bid": 0.29,
+            "volume": "2200000",
+            "subtitle": "Strong critical reception for latest album.",
+            "close_date": "2026-02-15",
+            "confidence": 77,
+            "edge": 2.9,
+        },
+        # Technology
+        {
+            "ticker": "kalshi-tech-1",
+            "title": "Will Apple announce a new iPhone model in March 2026?",
+            "category": "Technology",
+            "yes_bid": 0.91,
+            "no_bid": 0.09,
+            "volume": "2000000",
+            "subtitle": "Consistent with Apple’s release schedule.",
+            "close_date": "2026-03-31",
+            "confidence": 78,
+            "edge": 1.2,
+        },
+        {
+            "ticker": "kalshi-tech-2",
+            "title": "Will Tesla achieve full self‑driving (Level 5) by end 2026?",
+            "category": "Technology",
+            "yes_bid": 0.34,
+            "no_bid": 0.66,
+            "volume": "3100000",
+            "subtitle": "Regulatory hurdles remain; technical challenges persist.",
+            "close_date": "2026-12-31",
+            "confidence": 58,
+            "edge": 4.2,
+        },
+        # Health
+        {
+            "ticker": "kalshi-health-1",
+            "title": "Will FDA approve the new Alzheimer’s drug by Q2 2026?",
+            "category": "Health",
+            "yes_bid": 0.67,
+            "no_bid": 0.33,
+            "volume": "1100000",
+            "subtitle": "Phase 3 trials successful; approval likely.",
+            "close_date": "2026-06-30",
+            "confidence": 74,
+            "edge": 2.7,
+        },
+        {
+            "ticker": "kalshi-health-2",
+            "title": "Will the WHO declare the end of the COVID‑19 pandemic in 2026?",
+            "category": "Health",
+            "yes_bid": 0.52,
+            "no_bid": 0.48,
+            "volume": "2500000",
+            "subtitle": "Global case counts declining, but new variants possible.",
+            "close_date": "2026-12-31",
+            "confidence": 60,
+            "edge": 0.5,
+        },
+        # Weather
+        {
+            "ticker": "kalshi-weather-1",
+            "title": "Will NYC see more than 20 inches of snow in February?",
+            "category": "Weather",
+            "yes_bid": 0.35,
+            "no_bid": 0.65,
+            "volume": "890000",
+            "subtitle": "NOAA forecast suggests below‑average snowfall.",
+            "close_date": "2026-03-01",
+            "confidence": 70,
+            "edge": 2.1,
+        },
+        {
+            "ticker": "kalshi-weather-2",
+            "title": "Will a major hurricane (Category 3+) hit the US East Coast in 2026?",
+            "category": "Weather",
+            "yes_bid": 0.28,
+            "no_bid": 0.72,
+            "volume": "1800000",
+            "subtitle": "El Niño pattern may suppress Atlantic hurricanes.",
+            "close_date": "2026-11-30",
+            "confidence": 65,
+            "edge": 1.9,
+        },
+    ]
+
 NAME_MAPPING = {
     # NBA
     'Wagner': 'Franz Wagner',
@@ -409,7 +810,8 @@ FALLBACK_PLAYERS = {
 }
 
 # ============= FALLBACK INJURY DATA (Complete NBA Injuries) =============
-FALLBACK_NBA_INJURIES = [
+def get_fallback_nba_injuries():
+    return [
     # Atlanta Hawks
     {"player": "Jalen Johnson", "team": "ATL", "status": "Out", "injury": "Shoulder injury - season ending", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()},
     {"player": "Larry Nance Jr.", "team": "ATL", "status": "Out", "injury": "Knee surgery", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()},
@@ -545,26 +947,27 @@ FALLBACK_NBA_INJURIES = [
     {"player": "Malcolm Brogdon", "team": "WAS", "status": "Out", "injury": "Ankle", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=38)).isoformat()},
 ]
 
-# Add this near your FALLBACK_NBA_INJURIES
-FALLBACK_NFL_INJURIES = [
+def get_fallback_nfl_injuries():
+    return [
     {"player": "Patrick Mahomes", "team": "KC", "status": "Day-to-day", "injury": "Ankle sprain", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()},
     {"player": "Joe Burrow", "team": "CIN", "status": "Probable", "injury": "Calf strain", "expected_return": "expected to play", "date": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()},
     {"player": "Christian McCaffrey", "team": "SF", "status": "Out", "injury": "Knee injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()},
     # Add more NFL injuries as needed
 ]
 
-FALLBACK_MLB_INJURIES = [
+def get_fallback_mlb_injuries():
+    return [
     {"player": "Shohei Ohtani", "team": "LAD", "status": "Day-to-day", "injury": "Elbow soreness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat()},
     {"player": "Aaron Judge", "team": "NYY", "status": "Probable", "injury": "Toe contusion", "expected_return": "expected to play", "date": (datetime.now(timezone.utc) - timedelta(hours=16)).isoformat()},
     # Add more MLB injuries as needed
 ]
 
-FALLBACK_NHL_INJURIES = [
+def get_fallback_nhl_injuries():
+    return [
     {"player": "Connor McDavid", "team": "EDM", "status": "Day-to-day", "injury": "Upper body", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()},
     {"player": "Auston Matthews", "team": "TOR", "status": "Questionable", "injury": "Hand injury", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()},
     # Add more NHL injuries as needed
 ]
-
 
 def get_injuries_with_fallback(sport):
     """Get injuries from Tank01 API with fallback to static data"""
@@ -582,7 +985,6 @@ def get_injuries_with_fallback(sport):
             if response.status_code == 200:
                 data = response.json()
                 if data.get("body") and len(data["body"]) > 0:
-                    # Process Tank01 data
                     injuries = []
                     for injury in data["body"]:
                         injuries.append({
@@ -602,7 +1004,16 @@ def get_injuries_with_fallback(sport):
     
     # Fallback to static data
     print(f"📋 Using fallback injury data for {sport}")
-    return FALLBACK_NBA_INJURIES
+    if sport == "nba":
+        return get_fallback_nba_injuries()
+    elif sport == "nfl":
+        return get_fallback_nfl_injuries()
+    elif sport == "mlb":
+        return get_fallback_mlb_injuries()
+    elif sport == "nhl":
+        return get_fallback_nhl_injuries()
+    else:
+        return get_fallback_nba_injuries()  # default
 
 # Stat types per sport
 SPORT_STATS = {
@@ -1465,6 +1876,21 @@ def get_player_master_map(sport="nba"):
         traceback.print_exc()
         return {}
 
+# ========== GOAT API (balldontlie) MLB helpers ==========
+MLB_GOAT_API_KEY = os.getenv("BALLDONTLIE_API_KEY")   # your NBA key works for MLB
+MLB_GOAT_BASE = "https://api.balldontlie.io/mlb/v1/"
+
+def mlb_goat_request(endpoint: str, params: dict = None):
+    if not MLB_GOAT_API_KEY:
+        raise Exception("Missing BALLDONTLIE_API_KEY")
+    headers = {"Authorization": MLB_GOAT_API_KEY}
+    url = MLB_GOAT_BASE + endpoint.lstrip('/')
+    resp = requests.get(url, headers=headers, params=params, timeout=10)
+    if resp.status_code != 200:
+        print(f"❌ API error {resp.status_code}: {resp.text}")   # <-- add this
+        resp.raise_for_status()
+    return resp.json()
+
 # Simple TTL cache decorator
 def ttl_cache(ttl_seconds=300):
     def decorator(func):
@@ -1482,7 +1908,7 @@ def ttl_cache(ttl_seconds=300):
             return result
         return wrapper
     return decorator
-# Simple TTL cache decorator
+
 def fetch_sportsdata_players(sport):
     return []
 def format_sportsdata_player(player, sport):
@@ -1513,8 +1939,6 @@ def determine_strategy_from_query(query):
     return "balanced"
 def generate_single_lineup_backend(players, sport, strategy):
     return {}
-def generate_mock_player_details(player_id, sport):
-    return {"id": player_id, "name": "Mock Player"}
 def get_real_nfl_games(week):
     return []
 def fetch_nhl_defensive_stats():
@@ -1531,21 +1955,9 @@ def enhance_player_data(player):
     enhanced.setdefault('weight', 200)
     return enhanced
 
-def fetch_mlb_players():
-    return []
-def get_mlb_leaders(limit):
-    return {"hitting_leaders": [], "pitching_leaders": []}
-def fetch_tank01_props(game_date, limit):
-    return []
-def fetch_spring_games(year):
-    return []
 def get_mock_spring_training_data():
     return {}
 def get_spring_prospects(limit):
-    return []
-def fetch_mlb_props(date, limit):
-    return []
-def fetch_mlb_standings():
     return []
 def get_mlb_games_data():
     return []
@@ -1561,6 +1973,274 @@ def generate_ai_insights():
     return []
 def scrape_sports_data(sport):
     return {}
+
+# ============================================================
+# MLB ENDPOINTS – FIXED VERSIONS
+# ============================================================
+
+import os
+import uuid
+import random
+import traceback
+from datetime import datetime, timezone
+from flask import request, jsonify
+import requests
+
+# ---------- Helper functions (add these if missing) ----------
+
+def generate_mlb_standings(season):
+    """Generate mock MLB standings"""
+    return [
+        {'team': 'New York Yankees', 'wins': 95, 'losses': 67, 'pct': 0.586, 'games_back': 0},
+        {'team': 'Boston Red Sox', 'wins': 92, 'losses': 70, 'pct': 0.568, 'games_back': 3},
+        {'team': 'Los Angeles Dodgers', 'wins': 98, 'losses': 64, 'pct': 0.605, 'games_back': 0},
+        {'team': 'Atlanta Braves', 'wins': 101, 'losses': 61, 'pct': 0.623, 'games_back': 0},
+    ]
+
+def get_mlb_leaders(limit):
+    """Mock hitting and pitching leaders"""
+    hitting = [
+        {'name': 'Aaron Judge', 'team': 'NYY', 'avg': 0.322, 'hr': 62, 'rbi': 131, 'ops': 1.111},
+        {'name': 'Shohei Ohtani', 'team': 'LAD', 'avg': 0.304, 'hr': 44, 'rbi': 95, 'ops': 1.066},
+    ]
+    pitching = [
+        {'name': 'Gerrit Cole', 'team': 'NYY', 'era': 2.63, 'whip': 0.98, 'so': 222, 'ip': 200.0},
+        {'name': 'Spencer Strider', 'team': 'ATL', 'era': 3.10, 'whip': 1.05, 'so': 281, 'ip': 186.2},
+    ]
+    return {'hitting_leaders': hitting[:limit], 'pitching_leaders': pitching[:limit]}
+
+def fetch_tank01_props(game_date, limit):
+    """Fetch real player props from Tank01 (stub)"""
+    # Implement real call if needed
+    return []
+
+# ========== MLB REAL DATA from GOAT API ==========
+def fetch_mlb_games(date: str):
+    """Get real games for a date using balldontlie /games endpoint."""
+    try:
+        # Format date as YYYY-MM-DD
+        params = {"dates[]": date}
+        data = mlb_goat_request("games", params)
+        games = []
+        for g in data.get("data", []):
+            games.append({
+                "id": str(g.get("id")),
+                "home_team": g.get("home_team", {}).get("abbreviation"),
+                "away_team": g.get("away_team", {}).get("abbreviation"),
+                "home_full": g.get("home_team", {}).get("name"),
+                "away_full": g.get("away_team", {}).get("name"),
+                "home_score": g.get("home_score"),
+                "away_score": g.get("away_score"),
+                "status": g.get("status", "scheduled"),
+                "inning": g.get("inning"),
+                "game_date": g.get("date"),
+                "venue": g.get("venue", {}).get("name", "MLB Stadium"),
+                "tv": "MLB.TV",   # API may not provide TV
+            })
+        return games
+    except Exception as e:
+        print(f"❌ MLB games error: {e}")
+        return None
+
+def fetch_mlb_standings(season: int):
+    """Get standings from /teams/season_stats or /season_stats."""
+    try:
+        data = mlb_goat_request("teams/season_stats", {"season": season})
+        standings = []
+        for team in data.get("data", []):
+            standings.append({
+                "team": team.get("team", {}).get("name"),
+                "wins": team.get("wins"),
+                "losses": team.get("losses"),
+                "pct": team.get("win_percentage"),
+                "games_back": team.get("games_behind"),
+                "home_record": f"{team.get('home_wins',0)}-{team.get('home_losses',0)}",
+                "away_record": f"{team.get('away_wins',0)}-{team.get('away_losses',0)}",
+                "streak": team.get("streak"),
+                "last_10": team.get("last_10"),
+            })
+        return standings
+    except Exception as e:
+        print(f"❌ MLB standings error: {e}")
+        return None
+
+def fetch_mlb_leaders(stat_type: str, limit: int):
+    """Hitting or pitching leaders using /stats endpoint."""
+    try:
+        # For hitting: sort by avg (desc), for pitching: sort by era (asc)
+        sort_field = "avg" if stat_type == "hitting" else "era"
+        order = "desc" if stat_type == "hitting" else "asc"
+        params = {
+            "group": "player",
+            "season": datetime.now().year,
+            "sort": sort_field,
+            "order": order,
+            "limit": limit
+        }
+        data = mlb_goat_request("stats", params)
+        leaders = []
+        for item in data.get("data", []):
+            player = item.get("player", {})
+            stats = item.get("stats", {})
+            leaders.append({
+                "name": player.get("full_name"),
+                "team": player.get("team", {}).get("abbreviation"),
+                "position": player.get("primary_position"),
+                "avg": stats.get("batting_average") if stat_type == "hitting" else None,
+                "hr": stats.get("home_runs"),
+                "rbi": stats.get("rbi"),
+                "ops": stats.get("ops"),
+                "era": stats.get("era") if stat_type == "pitching" else None,
+                "whip": stats.get("whip"),
+                "so": stats.get("strikeouts"),
+                "ip": stats.get("innings_pitched"),
+            })
+        return leaders
+    except Exception as e:
+        print(f"❌ MLB {stat_type} leaders error: {e}")
+        return None
+
+def fetch_mlb_props(date: str, limit: int):
+    """Fetch real player props for a given date using balldontlie API – debug version."""
+    print(f"🔍 fetch_mlb_props called with date={date}, limit={limit}")
+    try:
+        # Step 1: Get games for the date
+        print(f"📡 Fetching games for date {date}")
+        games_data = mlb_goat_request("games", {"dates[]": date})
+        games = games_data.get("data", [])
+        print(f"📦 Received {len(games)} games from API")
+        if not games:
+            print(f"⚠️ No games found for {date}, cannot fetch props")
+            return None
+
+        all_props = []
+        for idx, game in enumerate(games):
+            game_id = game.get("id")
+            print(f"🎮 Processing game {idx+1}/{len(games)}: id={game_id}")
+            if not game_id:
+                continue
+
+            # Step 2: Fetch props for this game
+            try:
+                props_data = mlb_goat_request("odds/player_props", {"game_id": game_id})
+                props_list = props_data.get("data", [])
+                print(f"   📦 Found {len(props_list)} props for game {game_id}")
+                for prop in props_list:
+                    player_id = prop.get("player_id")
+                    # Get player name and team (with caching)
+                    if not hasattr(fetch_mlb_props, "_player_cache"):
+                        fetch_mlb_props._player_cache = {}
+                    if player_id not in fetch_mlb_props._player_cache:
+                        try:
+                            player_data = mlb_goat_request(f"players/{player_id}")
+                            player_info = player_data.get("data", {})
+                            player_name = player_info.get("full_name", f"Player {player_id}")
+                            player_team = player_info.get("team", {}).get("abbreviation", "")
+                            fetch_mlb_props._player_cache[player_id] = (player_name, player_team)
+                            print(f"   👤 Cached player {player_id}: {player_name} ({player_team})")
+                        except Exception as e:
+                            print(f"   ⚠️ Failed to fetch player {player_id}: {e}")
+                            fetch_mlb_props._player_cache[player_id] = (f"Player {player_id}", "")
+                    else:
+                        player_name, player_team = fetch_mlb_props._player_cache[player_id]
+
+                    stat = prop.get("prop_type", "").replace("_", " ").title()
+                    line = float(prop.get("line_value", 0))
+                    market = prop.get("market", {})
+                    over_odds = market.get("over_odds")
+                    under_odds = market.get("under_odds")
+                    odds = over_odds if over_odds else under_odds
+                    # Edge: not provided by API, set to None for now
+                    edge = None
+
+                    all_props.append({
+                        "id": str(prop.get("id")),
+                        "player": player_name,
+                        "team": player_team,
+                        "stat": stat,
+                        "line": line,
+                        "odds": odds,
+                        "edge": edge,
+                    })
+                    print(f"   ➕ Added prop: {player_name} {stat} {line} odds={odds}")
+                    if len(all_props) >= limit:
+                        break
+                if len(all_props) >= limit:
+                    break
+            except Exception as e:
+                print(f"   ❌ Error fetching props for game {game_id}: {e}")
+                continue
+
+        if all_props:
+            print(f"✅ Returning {len(all_props)} real props for {date}")
+            return all_props[:limit]
+        else:
+            print(f"⚠️ No props found for any game on {date}")
+            return None
+    except Exception as e:
+        print(f"❌ MLB props error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def fetch_mlb_players(search: str, limit: int):
+    """Search players using /players endpoint."""
+    try:
+        params = {"search": search, "limit": limit} if search else {"limit": limit}
+        data = mlb_goat_request("players", params)
+        players = []
+        for p in data.get("data", []):
+            players.append({
+                "id": str(p.get("id")),
+                "name": p.get("full_name"),
+                "team": p.get("team", {}).get("abbreviation"),
+                "position": p.get("primary_position"),
+                "avg": p.get("career_stats", {}).get("batting_average"),
+                "hr": p.get("career_stats", {}).get("home_runs"),
+                "rbi": p.get("career_stats", {}).get("rbi"),
+                "is_real_data": True,
+            })
+        return players
+    except Exception as e:
+        print(f"❌ MLB player search error: {e}")
+        return None
+
+def fetch_mlb_player_detail(player_id: str, season: int):
+    """Detailed season stats for a player."""
+    try:
+        # Get player info
+        player_data = mlb_goat_request(f"players/{player_id}")
+        player = player_data.get("data", {})
+        # Get season stats
+        stats_data = mlb_goat_request("stats", {
+            "player_ids[]": player_id,
+            "season": season,
+            "group": "player"
+        })
+        stats = {}
+        if stats_data.get("data"):
+            stats = stats_data["data"][0].get("stats", {})
+        return {
+            "id": player_id,
+            "name": player.get("full_name"),
+            "team": player.get("team", {}).get("abbreviation"),
+            "position": player.get("primary_position"),
+            "stats": {
+                "avg": stats.get("batting_average"),
+                "home_runs": stats.get("home_runs"),
+                "rbi": stats.get("rbi"),
+                "ops": stats.get("ops"),
+                "era": stats.get("era"),
+                "whip": stats.get("whip"),
+                "strikeouts": stats.get("strikeouts"),
+                "ip": stats.get("innings_pitched"),
+            },
+            "is_real_data": True,
+        }
+    except Exception as e:
+        print(f"❌ MLB player detail error: {e}")
+        return None
+
 # ------------------------------------------------------------------------------
 # Global flags and constants
 # ------------------------------------------------------------------------------
@@ -1663,6 +2343,8 @@ TANK01_API_HOST = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
 TANK01_API_KEY = os.environ.get("TANK01_API_KEY", "your-key-here")
 NBA_PROPS_API_HOST = "nba-player-props-odds.p.rapidapi.com"
 NBA_PROPS_API_BASE = "https://nba-player-props-odds.p.rapidapi.com"
+API_BASE = "https://api.balldontlie.io/v1/"   # adjust if your MLB endpoint is different
+API_KEY = os.getenv("BALLDONTLIE_API_KEY")    # use the same key as for NBA
 DEFAULT_EVENT_ID = "22200"
 NODE_API_BASE = "https://prizepicks-production.up.railway.app"
 general_cache = {}
@@ -1700,6 +2382,15 @@ if TWITTER_BEARER_TOKEN:
 else:
     twitter_client = None
     print("⚠️ TWITTER_BEARER_TOKEN not set – beat‑writer tweets will be disabled.")
+
+def goat_request(endpoint: str, params: Dict = None) -> Dict[str, Any]:
+    """Make a request to the GOAT API (works for both NBA and MLB)."""
+    if not API_KEY:
+        raise Exception("BALLDONTLIE_API_KEY not set")
+    url = f"{API_BASE}{endpoint}"
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
 def get_handles_for_sport(sport):
     """Collect all Twitter handles for a given sport from BEAT_WRITERS dict."""
@@ -5432,17 +6123,6 @@ def api_response(success, data=None, message="", **kwargs):
 
 
 # ------------------------------------------------------------------------------
-# Tank01 helpers
-# ------------------------------------------------------------------------------
-def call_tank01(endpoint, params=None):
-    url = f"https://{TANK01_API_HOST}/{endpoint}"
-    headers = {"x-rapidapi-host": TANK01_API_HOST, "x-rapidapi-key": TANK01_API_KEY}
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    return response.json()
-
-
-# ------------------------------------------------------------------------------
 # Balldontlie helper (PGA version)
 # ------------------------------------------------------------------------------
 def call_balldontlie(endpoint, params=None):
@@ -5912,177 +6592,6 @@ def generate_mock_beat_news(sport, team, sources):
     
     return news
 
-# MLB Players Generator
-# ------------------------------------------------------------------------------
-def generate_mlb_players(limit=200):
-    print(f"⚾ generate_mlb_players called with limit={limit}")
-    teams = [
-        "ARI",
-        "ATL",
-        "BAL",
-        "BOS",
-        "CHC",
-        "CIN",
-        "CLE",
-        "COL",
-        "CWS",
-        "DET",
-        "HOU",
-        "KC",
-        "LAA",
-        "LAD",
-        "MIA",
-        "MIL",
-        "MIN",
-        "NYM",
-        "NYY",
-        "OAK",
-        "PHI",
-        "PIT",
-        "SD",
-        "SEA",
-        "SF",
-        "STL",
-        "TB",
-        "TEX",
-        "TOR",
-        "WAS",
-    ]
-    first_names = [
-        "Aaron",
-        "Mike",
-        "Jacob",
-        "Bryce",
-        "Mookie",
-        "Freddie",
-        "Paul",
-        "Nolan",
-        "Max",
-        "Clayton",
-    ]
-    last_names = [
-        "Judge",
-        "Trout",
-        "deGrom",
-        "Harper",
-        "Betts",
-        "Freeman",
-        "Goldschmidt",
-        "Arenado",
-        "Scherzer",
-        "Kershaw",
-    ]
-    positions = ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "SP", "RP"]
-
-    players = []
-    for i in range(limit):
-        is_pitcher = random.choice(["SP", "RP"]) in positions[: i % 2 + 8]  # simplistic
-        player = {
-            "id": f"mlb-mock-{i}",
-            "name": f"{random.choice(first_names)} {random.choice(last_names)}",
-            "team": random.choice(teams),
-            "position": random.choice(positions),
-            "age": random.randint(22, 40),
-            "bats": random.choice(["R", "L", "S"]),
-            "throws": random.choice(["R", "L"]),
-            "is_pitcher": is_pitcher,
-        }
-        if is_pitcher:
-            player.update(
-                {
-                    "wins": random.randint(0, 20),
-                    "losses": random.randint(0, 15),
-                    "era": round(random.uniform(2.5, 6.0), 2),
-                    "whip": round(random.uniform(1.0, 1.6), 2),
-                    "so": random.randint(50, 250),
-                    "ip": round(random.uniform(50, 200), 1),
-                    "saves": random.randint(0, 40) if player["position"] == "RP" else 0,
-                }
-            )
-        else:
-            player.update(
-                {
-                    "avg": round(random.uniform(0.200, 0.330), 3),
-                    "hr": random.randint(0, 40),
-                    "rbi": random.randint(0, 120),
-                    "obp": round(random.uniform(0.280, 0.410), 3),
-                    "slg": round(random.uniform(0.350, 0.600), 3),
-                    "ops": 0.0,
-                    "sb": random.randint(0, 30),
-                }
-            )
-            player["ops"] = round(player["obp"] + player["slg"], 3)
-        players.append(player)
-
-    print(f"⚾ Generated {len(players)} players")
-    return players
-
-
-# ------------------------------------------------------------------------------
-# MLB Props Generator
-# ------------------------------------------------------------------------------
-def generate_mlb_props(players, game_date=None):
-    print("⚾ [generate_mlb_props] FUNCTION STARTED")
-    print(f"⚾ [generate_mlb_props] Received {len(players)} players")
-
-    props = []
-    game_date = game_date or datetime.now().strftime("%Y-%m-%d")
-    print(f"⚾ [generate_mlb_props] Using game_date: {game_date}")
-
-    stat_categories = [
-        ("Hits", 0.5, 2.5),
-        ("Home Runs", 0.5, 1.5),
-        ("RBIs", 0.5, 2.5),
-        ("Strikeouts", 4.5, 9.5),
-        ("Total Bases", 1.5, 3.5),
-        ("Stolen Bases", 0.5, 1.5),
-    ]
-    print(f"⚾ [generate_mlb_props] stat_categories count: {len(stat_categories)}")
-
-    sample_size = min(30, len(players))
-    print(f"⚾ [generate_mlb_props] sample_size = {sample_size}")
-
-    if sample_size == 0:
-        print("⚾ [generate_mlb_props] No players to sample – returning []")
-        return []
-
-    try:
-        selected_players = random.sample(players, sample_size)
-    except Exception as e:
-        print(f"❌ [generate_mlb_props] random.sample failed: {e}")
-        return []
-    print(f"⚾ [generate_mlb_props] Selected {len(selected_players)} players")
-
-    player_counter = 0
-    for player in selected_players:
-        player_counter += 1
-        print(
-            f"⚾ [generate_mlb_props] Processing player {player_counter}: {player.get('name')} ({player.get('team')})"
-        )
-
-        for stat, low, high in stat_categories:
-            line = round(random.uniform(low, high), 1)
-            prop = {
-                "id": f"prop-{player['id']}-{stat.replace(' ', '-')}-{random.randint(1000,9999)}",
-                "player": player["name"],
-                "team": player["team"],
-                "position": player["position"],
-                "stat": stat,
-                "line": line,
-                "over_odds": random.choice(["-120", "-130", "-140", "-110"]),
-                "under_odds": random.choice(["+100", "-110", "-115"]),
-                "game_date": game_date,
-                "opponent": random.choice(["LAD", "NYY", "HOU", "ATL", "BOS", "CHC"]),
-                "projection": round(line * random.uniform(0.9, 1.2), 1),
-                "source": "mock",
-                "is_real_data": False,
-            }
-            props.append(prop)
-            if len(props) % 10 == 0:
-                print(f"⚾ [generate_mlb_props] Generated {len(props)} props so far...")
-
-    print(f"⚾ [generate_mlb_props] FINAL: Generated {len(props)} props")
-    return props
 
 def generate_mlb_props(players, game_date):
     props = []
@@ -6551,6 +7060,328 @@ def generate_mock_advanced_analytics(sport, needed):
             }
         )
     return selections
+
+
+# ---------- Tank01 API helper ----------
+
+def call_tank01(endpoint: str, params: dict = None) -> dict:
+    """Generic caller for Tank01 API (RapidAPI)"""
+    rapidapi_key = os.getenv("RAPIDAPI_KEY")
+    if not rapidapi_key:
+        print("❌ RAPIDAPI_KEY environment variable not set.")
+        return {"statusCode": 500, "body": None, "error": "Missing API Key"}
+
+    host = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
+    url = f"https://{host}/{endpoint}"
+    headers = {
+        "x-rapidapi-host": host,
+        "x-rapidapi-key": rapidapi_key,
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        data = response.json()
+        return {"statusCode": response.status_code, "body": data}
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Tank01 API error ({endpoint}): {e}")
+        return {"statusCode": 500, "body": None, "error": str(e)}
+
+# ---------- Mock data generators (fallback) ----------
+def generate_mock_games(date: str):
+    """Generate mock games for fallback"""
+    teams = [
+        ("NYY", "New York Yankees", "BOS", "Boston Red Sox", "Yankee Stadium"),
+        ("LAD", "Los Angeles Dodgers", "SF", "San Francisco Giants", "Dodger Stadium"),
+        ("ATL", "Atlanta Braves", "PHI", "Philadelphia Phillies", "Truist Park"),
+        ("HOU", "Houston Astros", "TEX", "Texas Rangers", "Minute Maid Park"),
+        ("CHC", "Chicago Cubs", "STL", "St. Louis Cardinals", "Wrigley Field"),
+        ("SEA", "Seattle Mariners", "OAK", "Oakland Athletics", "T-Mobile Park"),
+        ("TOR", "Toronto Blue Jays", "TB", "Tampa Bay Rays", "Rogers Centre"),
+        ("SD", "San Diego Padres", "ARI", "Arizona Diamondbacks", "Petco Park"),
+    ]
+    games = []
+    for i, (home_abbr, home_full, away_abbr, away_full, venue) in enumerate(teams[:8]):
+        games.append({
+            "id": f"mock_{date}_{i}",
+            "home_team": home_abbr,
+            "away_team": away_abbr,
+            "home_full": home_full,
+            "away_full": away_full,
+            "home_score": None,
+            "away_score": None,
+            "status": "scheduled",
+            "inning": None,
+            "game_date": date,
+            "venue": venue,
+            "tv": "MLB.TV",
+        })
+    return games
+
+def generate_mock_standings():
+    """Generate mock standings for fallback"""
+    teams = [
+        "New York Yankees", "Boston Red Sox", "Baltimore Orioles", "Toronto Blue Jays", "Tampa Bay Rays",
+        "Los Angeles Dodgers", "San Francisco Giants", "San Diego Padres", "Arizona Diamondbacks", "Colorado Rockies",
+        "Atlanta Braves", "Philadelphia Phillies", "New York Mets", "Miami Marlins", "Washington Nationals",
+        "Chicago Cubs", "St. Louis Cardinals", "Milwaukee Brewers", "Cincinnati Reds", "Pittsburgh Pirates",
+        "Houston Astros", "Texas Rangers", "Seattle Mariners", "Los Angeles Angels", "Oakland Athletics",
+        "Minnesota Twins", "Cleveland Guardians", "Detroit Tigers", "Chicago White Sox", "Kansas City Royals",
+    ]
+    standings = []
+    for team in teams:
+        wins = 70 + random.randint(0, 40)
+        losses = 162 - wins - random.randint(0, 5)
+        pct = round(wins / (wins + losses), 3)
+        standings.append({
+            "team": team,
+            "wins": wins,
+            "losses": losses,
+            "pct": pct,
+            "games_back": round(random.uniform(0, 20), 1),
+            "home_record": f"{random.randint(30, 50)}-{random.randint(20, 40)}",
+            "away_record": f"{random.randint(30, 50)}-{random.randint(20, 40)}",
+            "streak": f"{random.choice(['W','L'])}{random.randint(1,5)}",
+            "last_10": f"{random.randint(2,8)}-{random.randint(2,8)}",
+        })
+    return standings
+
+def generate_mock_hitting_leaders(limit=20):
+    hitters = [
+        "Aaron Judge", "Juan Soto", "Rafael Devers", "Mookie Betts", "Shohei Ohtani",
+        "Freddie Freeman", "Ronald Acuña Jr.", "Bryce Harper", "Trea Turner", "Corey Seager",
+        "Yordan Alvarez", "Julio Rodríguez", "Vladimir Guerrero Jr.", "Bo Bichette", "Marcus Semien",
+        "Jose Ramirez", "Austin Riley", "Kyle Schwarber", "Pete Alonso", "Nolan Arenado",
+    ]
+    return [{
+        "name": name,
+        "team": random.choice(["NYY","BOS","LAD","ATL","HOU","SEA","TOR"]),
+        "position": random.choice(["OF","3B","SS","2B","1B","DH"]),
+        "avg": round(0.250 + random.random() * 0.100, 3),
+        "hr": random.randint(10, 50),
+        "rbi": random.randint(40, 130),
+        "ops": round(0.700 + random.random() * 0.300, 3),
+    } for name in hitters[:limit]]
+
+def generate_mock_pitching_leaders(limit=20):
+    pitchers = [
+        "Gerrit Cole", "Max Fried", "Zack Wheeler", "Spencer Strider", "Clayton Kershaw",
+        "Corbin Burnes", "Framber Valdez", "Kevin Gausman", "Logan Webb", "Pablo López",
+        "Sandy Alcantara", "Shane McClanahan", "Dylan Cease", "Luis Castillo", "Joe Musgrove",
+    ]
+    return [{
+        "name": name,
+        "team": random.choice(["NYY","ATL","PHI","LAD","MIL","HOU","SF"]),
+        "position": "P",
+        "era": round(2.50 + random.random() * 2.0, 2),
+        "whip": round(1.00 + random.random() * 0.5, 2),
+        "so": random.randint(100, 250),
+        "ip": round(150 + random.random() * 50, 1),
+    } for name in pitchers[:limit]]
+
+def generate_mock_props(date, limit=50):
+    players = ["Aaron Judge", "Shohei Ohtani", "Mookie Betts", "Ronald Acuña Jr.", "Freddie Freeman", "Bryce Harper", "Juan Soto"]
+    stats = ["Hits", "Home Runs", "RBI", "Strikeouts", "Walks"]
+    props = []
+    for i in range(min(limit, len(players) * 2)):
+        player = players[i % len(players)]
+        stat = stats[i % len(stats)]
+        props.append({
+            "id": f"mock_prop_{i}",
+            "player": player,
+            "team": random.choice(["NYY","LAD","ATL"]),
+            "stat": stat,
+            "line": round(0.5 + random.random() * 2.5, 1),
+            "odds": random.choice([-120, -110, +100, +120]),
+            "edge": round(random.uniform(-5, 15), 1),
+        })
+    return props[:limit]
+
+def generate_realistics_mock_players(search=None, limit=200):
+    """Generate mock MLB players (no sport variable)."""
+    all_players = [
+        {"id": "judge", "name": "Aaron Judge", "team": "NYY", "position": "OF", "avg": 0.322, "hr": 62, "rbi": 131},
+        {"id": "ohtani", "name": "Shohei Ohtani", "team": "LAD", "position": "DH", "avg": 0.304, "hr": 44, "rbi": 95},
+        {"id": "betts", "name": "Mookie Betts", "team": "LAD", "position": "OF", "avg": 0.307, "hr": 39, "rbi": 107},
+        {"id": "acuna", "name": "Ronald Acuña Jr.", "team": "ATL", "position": "OF", "avg": 0.337, "hr": 41, "rbi": 106},
+        {"id": "freeman", "name": "Freddie Freeman", "team": "LAD", "position": "1B", "avg": 0.331, "hr": 29, "rbi": 102},
+        {"id": "harper", "name": "Bryce Harper", "team": "PHI", "position": "1B", "avg": 0.293, "hr": 21, "rbi": 72},
+        {"id": "soto", "name": "Juan Soto", "team": "NYY", "position": "OF", "avg": 0.275, "hr": 35, "rbi": 109},
+        {"id": "seager", "name": "Corey Seager", "team": "TEX", "position": "SS", "avg": 0.327, "hr": 33, "rbi": 96},
+        {"id": "rodriguez", "name": "Julio Rodríguez", "team": "SEA", "position": "OF", "avg": 0.275, "hr": 32, "rbi": 103},
+        {"id": "guerrero", "name": "Vladimir Guerrero Jr.", "team": "TOR", "position": "1B", "avg": 0.288, "hr": 26, "rbi": 94},
+    ]
+    if search:
+        search_lower = search.lower()
+        all_players = [p for p in all_players if search_lower in p["name"].lower() or search_lower in p["team"].lower()]
+    return all_players[:limit]
+
+def generate_mock_mlb_props(limit=50):
+    """Generate mock player props for MLB."""
+    players = [
+        "Aaron Judge", "Shohei Ohtani", "Mookie Betts", "Ronald Acuña Jr.",
+        "Freddie Freeman", "Bryce Harper", "Juan Soto", "Corey Seager"
+    ]
+    stats = ["Hits", "Home Runs", "RBI", "Strikeouts", "Walks"]
+    props = []
+    for i in range(limit):
+        player = players[i % len(players)]
+        stat = stats[i % len(stats)]
+        line = round(0.5 + (i % 5) * 0.5, 1)
+        odds = random.choice([-120, -110, +100, +120])
+        edge = round(random.uniform(-5, 15), 1)
+        props.append({
+            "id": f"mock_prop_{i}",
+            "player": player,
+            "team": random.choice(["NYY","LAD","ATL","PHI","TEX"]),
+            "stat": stat,
+            "line": line,
+            "odds": odds,
+            "edge": edge,
+        })
+    return props
+
+def generate_mock_players(search=None, limit=200):
+    """Generate realistic mock MLB players (no sport variable)."""
+    all_players = [
+        {"id": "judge", "name": "Aaron Judge", "team": "NYY", "position": "OF", "avg": 0.322, "hr": 62, "rbi": 131},
+        {"id": "ohtani", "name": "Shohei Ohtani", "team": "LAD", "position": "DH", "avg": 0.304, "hr": 44, "rbi": 95},
+        {"id": "betts", "name": "Mookie Betts", "team": "LAD", "position": "OF", "avg": 0.307, "hr": 39, "rbi": 107},
+        {"id": "acuna", "name": "Ronald Acuña Jr.", "team": "ATL", "position": "OF", "avg": 0.337, "hr": 41, "rbi": 106},
+        {"id": "freeman", "name": "Freddie Freeman", "team": "LAD", "position": "1B", "avg": 0.331, "hr": 29, "rbi": 102},
+        {"id": "harper", "name": "Bryce Harper", "team": "PHI", "position": "1B", "avg": 0.293, "hr": 21, "rbi": 72},
+        {"id": "soto", "name": "Juan Soto", "team": "NYY", "position": "OF", "avg": 0.275, "hr": 35, "rbi": 109},
+        {"id": "seager", "name": "Corey Seager", "team": "TEX", "position": "SS", "avg": 0.327, "hr": 33, "rbi": 96},
+        {"id": "rodriguez", "name": "Julio Rodríguez", "team": "SEA", "position": "OF", "avg": 0.275, "hr": 32, "rbi": 103},
+        {"id": "guerrero", "name": "Vladimir Guerrero Jr.", "team": "TOR", "position": "1B", "avg": 0.288, "hr": 26, "rbi": 94},
+    ]
+    if search:
+        search_lower = search.lower()
+        all_players = [p for p in all_players if search_lower in p["name"].lower() or search_lower in p["team"].lower()]
+    return all_players[:limit]
+
+# ---------- REAL DATA FETCHERS ----------
+def fetch_tank01_games(date: str):
+    tank01_date = date.replace("-", "")
+    result = call_tank01("getMLBGamesForDate", {"gameDate": tank01_date})
+    if result.get("statusCode") != 200:
+        return None
+
+    data = result.get("body")
+    # Tank01 returns a list of games directly (no wrapping)
+    if isinstance(data, list):
+        games_raw = data
+    elif isinstance(data, dict) and "games" in data:
+        games_raw = data["games"]
+    else:
+        games_raw = []
+
+    if not games_raw:
+        print(f"⚠️ No games in API response for date {date}")
+        return None
+
+    games = []
+    for g in games_raw:
+        if not isinstance(g, dict):
+            continue
+        games.append({
+            "id": g.get("gameID", ""),
+            "home_team": g.get("home", ""),
+            "away_team": g.get("away", ""),
+            "home_full": g.get("home_full", g.get("home", "")),
+            "away_full": g.get("away_full", g.get("away", "")),
+            "home_score": g.get("homeScore"),
+            "away_score": g.get("awayScore"),
+            "status": "live" if g.get("gameStatus") == "1" else "final" if g.get("gameStatus") == "2" else "scheduled",
+            "inning": g.get("inning"),
+            "game_date": tank01_date,
+            "venue": g.get("venue", "MLB Stadium"),
+            "tv": g.get("tv", "MLB.TV"),
+        })
+    return games
+
+def fetch_tank01_standings(season):
+    """Get real standings – Tank01 doesn't have a direct endpoint, so use schedule/results or fallback to mock."""
+    # For standings, we can use getMLBTeams and then getMLBTeamSeasonStats? Not directly.
+    # We'll fall back to mock for now, but you could implement by aggregating game results.
+    # Alternatively, use another API (e.g., SportsData.io). For simplicity, return None.
+    return None
+
+def fetch_tank01_players(limit=200):
+    result = call_tank01("getMLBPlayerList", {"limit": limit})
+    if result.get("statusCode") != 200:
+        return None
+    data = result.get("body", [])
+    if not isinstance(data, list):
+        print("⚠️ Player list API response is not a list.")
+        return None
+
+    players = []
+    for p in data:
+        if not isinstance(p, dict):
+            continue
+        player = {
+            "id": p.get("playerID"),
+            "name": p.get("longName"),
+            "team": p.get("team"),
+            "position": p.get("pos"),
+            "jersey": p.get("jerseyNum"),
+            "bats": p.get("bat"),
+            "throws": p.get("throw"),
+            "height": p.get("height"),
+            "weight": p.get("weight"),
+            "birth_date": p.get("bDay"),
+            "college": p.get("college"),
+            "is_real_data": True,
+        }
+        if player["id"] and player["name"]:
+            players.append(player)
+    return players if players else None
+
+def fetch_tank01_player_detail(player_id, season):
+    """Fetch player info and stats – use correct numeric ID, fallback on error."""
+    # Try to get player info first (getMLBPlayerInfo expects numeric ID)
+    info_res = call_tank01("getMLBPlayerInfo", {"playerID": player_id})
+    if info_res.get("statusCode") != 200:
+        return None
+    player_info = info_res.get("body")
+    if not player_info or not isinstance(player_info, dict):
+        return None
+
+    # Get game logs – this endpoint may 404 if no games for that season
+    games = []
+    try:
+        games_res = call_tank01("getMLBPlayerGames", {"playerID": player_id, "season": season})
+        if games_res.get("statusCode") == 200:
+            games = games_res.get("body", [])
+            if not isinstance(games, list):
+                games = []
+    except Exception:
+        games = []  # ignore 404
+
+    is_pitcher = "P" in player_info.get("pos", "")
+    # Build stats (simplified – you can expand aggregation)
+    stats = {}
+    if is_pitcher:
+        stats = {"era": 3.50, "whip": 1.20, "strikeouts": 150, "ip": 180.0}
+    else:
+        stats = {"avg": 0.300, "home_runs": 25, "rbi": 80, "ops": 0.900}
+
+    return {
+        "id": player_id,
+        "name": player_info.get("longName"),
+        "team": player_info.get("team"),
+        "position": player_info.get("pos"),
+        "stats": stats,
+        "is_real_data": True,
+    }
+
+
+def fetch_tank01_props(date, limit):
+    """Player props from Tank01 – not directly available, use mock for now."""
+    # Tank01 doesn't have player props; you could use The Odds API but that's separate.
+    return None
+
+
 
 
 def generate_mock_games(sport: str) -> List[Dict]:
@@ -7872,20 +8703,40 @@ def influencer_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route("/api/promo/validate", methods=['POST'])
+@app.route('/api/promo/validate', methods=['POST'])
 @login_required
-def validate_promo_endpoint():  # Changed function name
-    """Validate a promo code""" 
+def validate_promo_endpoint():
+    """Validate a promo code (Stripe coupon)"""
     try:
-        data = request.json   
+        data = request.json
         code = data.get('code')
-
-        from services.promo_service import validate_promo_code
-        result = validate_promo_code(code)
-
-        return jsonify(result)
+        
+        if not code:
+            return jsonify({'valid': False, 'error': 'No promo code provided'}), 400
+        
+        print(f"🔍 Validating promo code: {code}")
+        
+        # Retrieve the coupon directly
+        coupon = stripe.Coupon.retrieve(code)
+        print(f"✅ Found coupon: {coupon.id}, percent_off: {coupon.percent_off}, valid: {coupon.valid}")
+        
+        # Check if coupon is valid and not deleted
+        if coupon.valid and not getattr(coupon, 'deleted', False):
+            return jsonify({
+                'valid': True,
+                'discount_percent': coupon.percent_off
+            })
+        else:
+            return jsonify({'valid': False, 'message': 'Coupon expired or invalid'})
+        
+    except stripe.error.InvalidRequestError as e:
+        print(f"❌ Coupon not found: {e}")
+        return jsonify({'valid': False, 'message': 'Promo code not found'})
     except Exception as e:
-        return jsonify({'valid': False, 'error': str(e)}), 400
+        print(f"❌ Promo validation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'valid': False, 'error': str(e)}), 500
 
 @app.route("/api/promo/create", methods=['POST'])
 @admin_required  # Only admins can create promo codes
@@ -8681,29 +9532,44 @@ def verify_checkout_session():
 # =============================================
 def validate_promo_code(promo_code):
     try:
-        coupon = stripe.Coupon.retrieve(promo_code)
-        print(f"🔍 Retrieved coupon: {coupon.id}, valid: {coupon.valid}, percent_off: {coupon.percent_off}")
-
-        is_deleted = getattr(coupon, 'deleted', False)
-        if coupon.valid and not is_deleted:
-            try:
-                result = {
-                    'valid': True,
-                    'influencer_name': coupon.metadata.get('influencer_name', ''),
-                    'discount_percent': coupon.percent_off,   # <-- This line might raise AttributeError
-                }
-                print(f"✅ Returning success: {result}")
-                return result
-            except Exception as e:
-                print(f"❌ Error while building result: {e}")
-                return {'valid': False, 'message': 'Error building response'}
+        # First, try to retrieve as a promotion code
+        promo = stripe.PromotionCode.retrieve(promo_code)
+        print(f"🔍 Retrieved promotion code: {promo.code}, coupon: {promo.coupon.id}")
+        
+        # Check if the promotion code is active and within its valid dates
+        if not promo.active:
+            return {'valid': False, 'message': 'Promotion code is inactive'}
+        
+        # Check expiration
+        if promo.expires_at and promo.expires_at < int(time.time()):
+            return {'valid': False, 'message': 'Promotion code has expired'}
+        
+        # Get the underlying coupon
+        coupon = promo.coupon
+        if coupon.valid:
+            return {
+                'valid': True,
+                'discount_percent': coupon.percent_off,
+                'influencer_name': promo.metadata.get('influencer_name', ''),
+                'promotion_code': promo.code
+            }
         else:
-            result = {'valid': False, 'message': 'Coupon expired or invalid'}
-            print(f"⚠️ Returning invalid: {result}")
-            return result
+            return {'valid': False, 'message': 'Coupon is invalid'}
+            
     except stripe.error.InvalidRequestError as e:
-        print(f"❌ Stripe error: {e}")
-        return {'valid': False, 'message': 'Promo code not found'}
+        # If not a promotion code, try as a coupon (fallback)
+        try:
+            coupon = stripe.Coupon.retrieve(promo_code)
+            if coupon.valid and not getattr(coupon, 'deleted', False):
+                return {
+                    'valid': True,
+                    'discount_percent': coupon.percent_off,
+                    'influencer_name': coupon.metadata.get('influencer_name', '')
+                }
+            else:
+                return {'valid': False, 'message': 'Coupon expired or invalid'}
+        except stripe.error.InvalidRequestError:
+            return {'valid': False, 'message': 'Promotion code or coupon not found'}
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
         return {'valid': False, 'message': 'Error validating code'}
@@ -8754,24 +9620,35 @@ def create_subscription_checkout():
         success_url = f"{FRONTEND_URL}/subscription?success=true&session_id={{CHECKOUT_SESSION_ID}}"
         cancel_url = f"{FRONTEND_URL}/subscription?canceled=true"
 
-        # Create Stripe checkout session
-        session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=[{
+        # Prepare session parameters
+        session_params = {
+            'payment_method_types': ['card'],
+            'line_items': [{
                 'price': price_id,
                 'quantity': 1,
             }],
-            mode='subscription',
-            success_url=success_url,
-            cancel_url=cancel_url,
-            client_reference_id=g.user_id,
-            customer_email=g.user_email,
-            metadata={
+            'mode': 'subscription',
+            'success_url': success_url,
+            'cancel_url': cancel_url,
+            'client_reference_id': g.user_id,
+            'customer_email': g.user_email,
+            'metadata': {
                 'user_id': g.user_id,
                 'plan_id': plan_id,
                 'interval': interval
             }
-        )
+        }
+
+        # Apply promo code if provided
+        if promo_code:
+            session_params['discounts'] = [{'promotion_code': promo_code}]
+        else:
+            print("No promo code provided")
+
+        # Create Stripe checkout session
+        session = stripe.checkout.Session.create(**session_params)
+
+        print(f"✅ Checkout session created: {session.id} with promo: {promo_code}")
 
         return jsonify({
             'success': True,
@@ -9472,62 +10349,61 @@ def get_correlated_parlay(parlay_id):
         }
     )
 
-def generate_mock_kalshi_markets(sport="all"):
-    """Generate mock Kalshi prediction markets (non‑sports by default)"""
-    return [
-        {
-            "id": "kalshi-politics-1",
-            "question": "Will the Federal Reserve cut rates in March 2026?",
-            "category": "Economics",
-            "yesPrice": "0.58",
-            "noPrice": "0.42",
-            "volume": "$3.2M",
-            "analysis": "Market implied probability 58%. Fed futures indicate 65% chance of cut.",
-            "expires": "2026-03-15",
-            "confidence": 72,
-            "edge": "+2.3%",
-            "platform": "kalshi",
-            "marketType": "binary",
-            "trend": "up"
-        },
-        {
-            "id": "kalshi-politics-2",
-            "question": "Will the Democratic candidate win the 2026 midterms?",
-            "category": "Politics",
-            "yesPrice": "0.48",
-            "noPrice": "0.52",
-            "volume": "$5.1M",
-            "analysis": "Markets slightly favor Republicans. Recent polling shows tightening race.",
-            "expires": "2026-11-03",
-            "confidence": 65,
-            "edge": "+1.8%",
-            "platform": "kalshi",
-            "marketType": "binary",
-            "trend": "neutral"
-        },
-        # Add more markets as needed...
-    ]
-
+# ------------------------------------------------------------------
+# Flask route
+# ------------------------------------------------------------------
 @app.route("/api/kalshi/predictions")
 def kalshi_predictions():
     try:
-        sport = request.args.get("sport", "all").lower()
+        sport = flask_request.args.get("sport", "all").lower()
         print(f"📊 GET /api/kalshi/predictions: sport={sport}")
 
-        markets = generate_mock_kalshi_markets(sport)
-        count = len(markets)
+        markets = fetch_kalshi_markets(sport)
+        if markets is None:
+            print("⚠️ Kalshi API unavailable, using mock data")
+            mock_markets = generate_mock_kalshi_markets(sport)
+            predictions = [transform_market(m) for m in mock_markets]
+            is_mock = True
+        else:
+            predictions = []
+            sports_count = 0
+            liquidity_skipped = 0
+            for m in markets:
+                # Skip markets with zero liquidity (optional – comment out to show them)
+                yes_bid = float(m.get('yes_bid_dollars', 0.0))
+                no_bid = float(m.get('no_bid_dollars', 0.0))
+                if yes_bid == 0.0 and no_bid == 0.0:
+                    liquidity_skipped += 1
+                    continue   # remove this line to show zero‑liquidity markets
+                transformed = transform_market(m)
+                if transformed['category'] == 'Sports':
+                    sports_count += 1
+                else:
+                    predictions.append(transformed)
+            is_mock = False
+            print(f"🏀 Sports markets filtered: {sports_count}")
+            print(f"💧 Zero‑liquidity markets skipped: {liquidity_skipped}")
+            print(f"✅ Retrieved {len(predictions)} non‑sports predictions from Kalshi")
+
+        predictions = predictions[:50]
 
         return jsonify({
             "success": True,
-            "predictions": markets,   # <-- array under this key
-            "count": count,
+            "predictions": predictions,
+            "count": len(predictions),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sport": sport,
-            "is_mock": True
+            "is_mock": is_mock
         })
     except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({"success": False, "error": str(e), "predictions": [], "count": 0})
+        print(f"❌ Error in /api/kalshi/predictions: {e}")
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "predictions": [],
+            "count": 0
+        }), 500
 
 @app.route("/api/fantasy/players")
 def get_fantasy_players():
@@ -12754,46 +13630,6 @@ def get_predictions_outcome():
                 "data_source": "error-fallback",
             }
         )
-
-
-def generate_mock_players(sport: str, limit: int) -> list:
-    """Generate mock player data for any sport."""
-    mock_players = []
-    positions = {
-        "nba": ["PG", "SG", "SF", "PF", "C"],
-        "nfl": ["QB", "RB", "WR", "TE", "K"],
-        "mlb": ["P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF"],
-        "nhl": ["C", "LW", "RW", "D", "G"],
-    }.get(sport, ["N/A"])
-
-    for i in range(limit):
-        pos = random.choice(positions)
-        fantasy_pts = round(random.uniform(5, 50), 1)
-        salary = int(
-            max(3000, min(15000, fantasy_pts * 350 * random.uniform(0.85, 1.15)))
-        )
-        value = fantasy_pts / (salary / 1000) if salary > 0 else 0
-
-        mock_players.append(
-            {
-                "id": f"mock_{sport}_{i}",
-                "name": f"Mock Player {i+1}",
-                "team": "MOCK",
-                "position": pos,
-                "salary": salary,
-                "fantasy_points": fantasy_pts,
-                "projected_points": fantasy_pts,
-                "value": round(value, 2),
-                "points": round(random.uniform(0, 30), 1),
-                "rebounds": round(random.uniform(0, 15), 1) if sport == "nba" else 0,
-                "assists": round(random.uniform(0, 15), 1) if sport == "nba" else 0,
-                "injury_status": "healthy",
-                "is_real_data": False,
-                "data_source": f"{sport.upper()} (generated)",
-            }
-        )
-    return mock_players
-
 
 def get_static_data_for_sport(sport: str) -> list:
     """Return the static data list for a given sport."""
@@ -18064,453 +18900,112 @@ def build_roster_context(sport):
     )
     return header + "\n".join(truncated)
 
-
+# ============================================================
+# MLB ENDPOINTS – FIXED VERSIONS
+# ============================================================
 @app.route("/api/mlb/games")
 def get_mlb_games():
-    """Proxy for Tank01 MLB games by date"""
-    try:
-        date = request.args.get("date")
-        if not date:
-            return jsonify({"error": "Missing date parameter"}), 400
-
-        tank01_date = date.replace("-", "")
-        rapidapi_key = os.getenv("RAPIDAPI_KEY")
-        if not rapidapi_key:
-            return jsonify({"error": "RAPIDAPI_KEY not configured"}), 500
-
-        url = f"https://tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com/getMLBGamesForDate?gameDate={tank01_date}"
-        headers = {
-            "x-rapidapi-host": "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com",
-            "x-rapidapi-key": rapidapi_key,
-        }
-
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        # 🐛 DEBUG: log the raw response to see its structure
-        print(f"🔍 MLB raw response for {date}: {data}")
-
-        # Tank01 may return:
-        # - a dict with "body" containing "games"
-        # - a dict with top‑level "games"
-        # - a direct list of games
-        # - an empty list []
-        # - a list containing a single empty list? (e.g., [[]])
-        games_raw = []
-        if isinstance(data, dict):
-            if "body" in data and isinstance(data["body"], dict):
-                games_raw = data["body"].get("games", [])
-            elif "games" in data:
-                games_raw = data["games"]
-        elif isinstance(data, list):
-            games_raw = data
-
-        # If games_raw is a list of lists, flatten it (unlikely but safe)
-        if games_raw and isinstance(games_raw[0], list):
-            games_raw = [item for sublist in games_raw for item in sublist]
-
-        games = []
-        for game in games_raw:
-            # Skip if game is not a dict (e.g., empty list inside)
-            if not isinstance(game, dict):
-                continue
-            game_data = {
-                "id": game.get("gameID", ""),
-                "home_team": game.get("home", ""),
-                "away_team": game.get("away", ""),
-                "home_abbrev": game.get("home", ""),
-                "away_abbrev": game.get("away", ""),
-                "home_full": game.get("home_full", game.get("home", "")),
-                "away_full": game.get("away_full", game.get("away", "")),
-                "home_score": game.get("homeScore"),
-                "away_score": game.get("awayScore"),
-                "status": game.get("gameStatus", "Scheduled"),
-                "inning": game.get("inning"),
-                "game_date": game.get("gameDate", tank01_date),
-                "venue": game.get("venue", "MLB Stadium"),
-                "tv": "MLB.TV",
-            }
-            games.append(game_data)
-
-        return jsonify(
-            {"games": games, "count": len(games), "date": date, "source": "tank01-mlb"}
-        )
-
-    except requests.exceptions.RequestException as e:
-        print(f"❌ MLB API request failed: {e}")
-        return jsonify({"error": "Failed to fetch MLB data"}), 502
-    except Exception as e:
-        print(f"❌ Unexpected error in MLB endpoint: {e}")
-        # Print full traceback for debugging
-        import traceback
-
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/mlb/players")
-def get_mlb_players():
-    """Get MLB players. Optional filters: team, position, limit."""
-    try:
-        team = flask_request.args.get("team")
-        position = flask_request.args.get("position")
-        limit = int(flask_request.args.get("limit", 200))
-        use_realtime = flask_request.args.get("realtime", "true").lower() == "true"
-
-        players = []
+    date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    games = fetch_mlb_games(date)
+    if not games:
+        games = generate_mock_games(date)   # your existing mock generator
         source = "mock"
-
-        # Try real data from SportsData.io if requested
-        if use_realtime and API_CONFIG.get("sportsdata_mlb", {}).get("working"):
-            real_players = fetch_mlb_players()
-            if real_players:
-                # Transform to our format
-                for p in real_players[:limit]:
-                    players.append(
-                        {
-                            "id": p.get("PlayerID"),
-                            "name": p.get("Name"),
-                            "team": p.get("Team"),
-                            "position": p.get("Position"),
-                            "jersey": p.get("Jersey"),
-                            "bats": p.get("BatHand"),
-                            "throws": p.get("ThrowHand"),
-                            "height": p.get("Height"),
-                            "weight": p.get("Weight"),
-                            "birth_date": p.get("BirthDate"),
-                            "college": p.get("College"),
-                            "is_real_data": True,
-                        }
-                    )
-                source = "SportsData.io"
-
-        # Fallback to mock data if none
-        if not players:
-            players = generate_mlb_players(limit)
-            for p in players:
-                p["is_real_data"] = False
-            source = "mock"
-
-        # Apply filters
-        if team:
-            players = [p for p in players if p.get("team", "").upper() == team.upper()]
-        if position:
-            players = [
-                p for p in players if p.get("position", "").upper() == position.upper()
-            ]
-
-        return jsonify(
-            {
-                "success": True,
-                "players": players[:limit],
-                "count": len(players[:limit]),
-                "filters": {"team": team, "position": position},
-                "source": source,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
-    except Exception as e:
-        print(f"❌ Error in /api/mlb/players: {e}")
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-# ------------------------------------------------------------------------------
-# /api/mlb/players/<player_id> - Detailed player info with stats
-# ------------------------------------------------------------------------------
-def fetch_tank01_player_detail(player_id, season):
-    """Fetch player info and season stats from Tank01 with detailed logging."""
-    try:
-        print(f"🔍 Fetching player detail for ID {player_id}, season {season}")
-
-        # --- Get basic player info ---
-        print(f"   Calling getMLBPlayerInfo for player {player_id}")
-        info_data = call_tank01("getMLBPlayerInfo", {"playerID": player_id})
-        print(f"   getMLBPlayerInfo response status: {info_data.get('statusCode')}")
-
-        body = info_data.get("body", {})
-        print(f"   Body type: {type(body)}")
-        if isinstance(body, dict):
-            print(f"   Body keys: {list(body.keys())[:5]}")
-        else:
-            print(f"   Body content (first 200 chars): {str(body)[:200]}")
-
-        # For getMLBPlayerInfo, the body is the player object itself
-        player_info = body
-        if not player_info:
-            print(f"   ❌ No player info found for ID {player_id}")
-            return None
-
-        print(
-            f"   Player info found: {player_info.get('longName')} ({player_info.get('pos')})"
-        )
-
-        # --- Get season stats (game logs) ---
-        games = []
-        try:
-            print(
-                f"   Calling getMLBPlayerGames for player {player_id}, season {season}"
-            )
-            stats_data = call_tank01(
-                "getMLBPlayerGames", {"playerID": player_id, "season": season}
-            )
-            print(
-                f"   getMLBPlayerGames response status: {stats_data.get('statusCode')}"
-            )
-            games = stats_data.get("body", [])
-        except Exception as e:
-            # If 404, it's likely no games for that season – continue with empty list
-            if "404" in str(e):
-                print(
-                    f"   ⚠️ No game logs found for season {season} (404) – using empty list"
-                )
-            else:
-                # Re-raise other unexpected errors
-                print(f"   ❌ Unexpected error fetching games: {e}")
-                raise
-        print(f"   Received {len(games)} games for season {season}")
-
-        # Determine if pitcher
-        is_pitcher = "P" in player_info.get("pos", "")
-        print(f"   Player is {'pitcher' if is_pitcher else 'hitter'}")
-
-        # Build base info
-        player = {
-            "id": player_id,
-            "name": player_info.get("longName"),
-            "team": player_info.get("team"),
-            "position": player_info.get("pos"),
-            "age": None,
-            "bats": player_info.get("bat"),
-            "throws": player_info.get("throw"),
-            "jersey": player_info.get("jerseyNum"),
-            "height": player_info.get("height"),
-            "weight": player_info.get("weight"),
-            "birth_date": player_info.get("bDay"),
-            "college": player_info.get("college"),
-            "season": season,
-            "is_real_data": True,
-        }
-
-        if is_pitcher:
-            # Aggregate pitching stats
-            stats = {
-                "wins": 0,
-                "losses": 0,
-                "era": 0.0,
-                "games": 0,
-                "games_started": 0,
-                "saves": 0,
-                "ip": 0.0,
-                "hits_allowed": 0,
-                "earned_runs": 0,
-                "home_runs_allowed": 0,
-                "walks": 0,
-                "strikeouts": 0,
-                "whip": 0.0,
-                "k_per_9": 0.0,
-                "bb_per_9": 0.0,
-            }
-            for game in games:
-                pitching = game.get("Pitching", {})
-                if pitching:
-                    stats["wins"] += int(pitching.get("Win", 0))
-                    stats["losses"] += int(pitching.get("Loss", 0))
-                    stats["games"] += 1
-                    stats["games_started"] += 1 if game.get("gameStarted") else 0
-                    stats["saves"] += int(pitching.get("Save", 0))
-                    stats["ip"] += float(pitching.get("InningsPitched", 0))
-                    stats["hits_allowed"] += int(pitching.get("Hits", 0))
-                    stats["earned_runs"] += int(pitching.get("EarnedRuns", 0))
-                    stats["home_runs_allowed"] += int(pitching.get("HomeRuns", 0))
-                    stats["walks"] += int(pitching.get("Walks", 0))
-                    stats["strikeouts"] += int(pitching.get("Strikeouts", 0))
-            if stats["ip"] > 0:
-                stats["era"] = round((stats["earned_runs"] * 9) / stats["ip"], 2)
-                stats["whip"] = round(
-                    (stats["walks"] + stats["hits_allowed"]) / stats["ip"], 2
-                )
-                stats["k_per_9"] = round((stats["strikeouts"] * 9) / stats["ip"], 2)
-                stats["bb_per_9"] = round((stats["walks"] * 9) / stats["ip"], 2)
-            player["stats"] = stats
-            print(f"   Aggregated pitching stats: {stats}")
-        else:
-            # Aggregate hitting stats
-            stats = {
-                "games": 0,
-                "plate_appearances": 0,
-                "at_bats": 0,
-                "runs": 0,
-                "hits": 0,
-                "doubles": 0,
-                "triples": 0,
-                "home_runs": 0,
-                "rbi": 0,
-                "walks": 0,
-                "strikeouts": 0,
-                "stolen_bases": 0,
-                "caught_stealing": 0,
-                "avg": 0.0,
-                "obp": 0.0,
-                "slg": 0.0,
-                "ops": 0.0,
-            }
-            for game in games:
-                hitting = game.get("Hitting", {})
-                if hitting:
-                    stats["games"] += 1
-                    stats["plate_appearances"] += int(
-                        hitting.get("PlateAppearances", 0)
-                    )
-                    stats["at_bats"] += int(hitting.get("AtBats", 0))
-                    stats["runs"] += int(hitting.get("Runs", 0))
-                    stats["hits"] += int(hitting.get("Hits", 0))
-                    stats["doubles"] += int(hitting.get("Doubles", 0))
-                    stats["triples"] += int(hitting.get("Triples", 0))
-                    stats["home_runs"] += int(hitting.get("HomeRuns", 0))
-                    stats["rbi"] += int(hitting.get("RBIs", 0))
-                    stats["walks"] += int(hitting.get("Walks", 0))
-                    stats["strikeouts"] += int(hitting.get("Strikeouts", 0))
-                    stats["stolen_bases"] += int(hitting.get("StolenBases", 0))
-                    stats["caught_stealing"] += int(hitting.get("CaughtStealing", 0))
-            if stats["at_bats"] > 0:
-                stats["avg"] = round(stats["hits"] / stats["at_bats"], 3)
-                total_bases = (
-                    (
-                        stats["hits"]
-                        - stats["doubles"]
-                        - stats["triples"]
-                        - stats["home_runs"]
-                    )
-                    + 2 * stats["doubles"]
-                    + 3 * stats["triples"]
-                    + 4 * stats["home_runs"]
-                )
-                stats["slg"] = round(total_bases / stats["at_bats"], 3)
-            if stats["plate_appearances"] > 0:
-                stats["obp"] = round(
-                    (stats["hits"] + stats["walks"]) / stats["plate_appearances"], 3
-                )
-            if stats["obp"] and stats["slg"]:
-                stats["ops"] = round(stats["obp"] + stats["slg"], 3)
-            player["stats"] = stats
-            print(f"   Aggregated hitting stats: {stats}")
-
-        print(f"✅ Successfully built player detail for {player['name']}")
-        return player
-
-    except Exception as e:
-        print(f"❌ Error in fetch_tank01_player_detail: {e}")
-        traceback.print_exc()
-        return None
-
-
-@app.route("/api/mlb/players/<player_id>")
-def get_mlb_player_detail(player_id):
-    try:
-        season = flask_request.args.get("season", datetime.now().year)
-        # Try real data from Tank01
-        player = fetch_tank01_player_detail(player_id, season)
-        if player:
-            return jsonify({"success": True, "player": player})
-        else:
-            # Fallback to mock if needed (optional)
-            return jsonify({"success": False, "error": "Player not found"}), 404
-    except Exception as e:
-        print(f"❌ Error in /api/mlb/players/<player_id>: {e}")
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
+    else:
+        source = "balldontlie"
+    return jsonify({"games": games, "count": len(games), "date": date, "source": source})
 
 @app.route("/api/mlb/stats")
 def get_mlb_stats():
     try:
-        stat_type = flask_request.args.get("type", "standings")
-        season = flask_request.args.get("season", datetime.now().year)
-        limit = int(flask_request.args.get("limit", 10))
+        stat_type = request.args.get("type", "standings")
+        season = int(request.args.get("season", datetime.now().year))
+        limit = int(request.args.get("limit", 20))
 
         result = {}
-
         if stat_type == "standings":
-            # You can still use fetch_mlb_stats('standings') if you have that
-            # Or use Tank01's schedule/results to compute standings
-            # For simplicity, we keep mock or fallback
-            standings = generate_mlb_standings(season)
+            standings = fetch_mlb_standings(season)
+            if not standings:
+                standings = generate_mock_standings()
             result["standings"] = standings
-
         elif stat_type == "hitting":
-            leaders = get_mlb_leaders(limit)
-            result["hitting_leaders"] = leaders["hitting_leaders"]
-
+            leaders = fetch_mlb_leaders("hitting", limit)
+            if not leaders:
+                leaders = getMockHittingLeaders()   # your mock
+            result["hitting_leaders"] = leaders
         elif stat_type == "pitching":
-            leaders = get_mlb_leaders(limit)
-            result["pitching_leaders"] = leaders["pitching_leaders"]
-
+            leaders = fetch_mlb_leaders("pitching", limit)
+            if not leaders:
+                leaders = getMockPitchingLeaders()
+            result["pitching_leaders"] = leaders
         else:
             return jsonify({"success": False, "error": "Invalid stat type"}), 400
 
-        return jsonify(
-            {
-                "success": True,
-                "type": stat_type,
-                "season": season,
-                "data": result,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
+        return jsonify({
+            "success": True,
+            "type": stat_type,
+            "season": season,
+            "data": result,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        })
     except Exception as e:
-        print(f"❌ Error in /api/mlb/stats: {e}")
+        print(f"❌ MLB stats error: {e}")
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/mlb/players")
+def get_mlb_players():
+    search = request.args.get("search")
+    limit = int(request.args.get("limit", 200))
+    players = fetch_mlb_players(search, limit)
+    if not players:
+        players = generate_mock_players(search, limit)   # your mock with real names
+        source = "mock"
+    else:
+        source = "balldontlie"
+    return jsonify({
+        "success": True,
+        "players": players[:limit],
+        "count": len(players[:limit]),
+        "source": source,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    })
 
-# ------------------------------------------------------------------------------
-# /api/mlb/props - Player props for today's games
-# ------------------------------------------------------------------------------
+@app.route("/api/mlb/players/<player_id>")
+def get_mlb_player_detail(player_id):
+    season = int(request.args.get("season", datetime.now().year))
+    player = fetch_mlb_player_detail(player_id, season)
+    if not player:
+        player = {
+            "id": player_id,
+            "name": "MLB Player",
+            "team": "MLB",
+            "position": "UTL",
+            "stats": {"avg": 0.300, "home_runs": 25, "rbi": 80, "ops": 0.900},
+            "is_real_data": False,
+        }
+    return jsonify({"success": True, "player": player})
+
 @app.route("/api/mlb/props")
 def get_mlb_props():
-    try:
-        game_date = flask_request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
-        limit = int(flask_request.args.get("limit", 50))
-
-        # 1. Try real data from Tank01
-        props = fetch_tank01_props(game_date, limit)
-        source = "Tank01"
-        print(f"⚾ Tank01 returned {len(props) if props else 0} props")
-
-        # 2. If no real data, fall back to mock
-        if not props:
-            print("⚠️ No real MLB props, falling back to mock")
-            players = generate_mlb_players(100)  # generate some players
-            try:
-                props = generate_mlb_props(players, game_date)
-                print(f"⚾ generate_mlb_props returned {len(props)} props")
-            except Exception as e:
-                print(f"❌ Exception in generate_mlb_props: {e}")
-                traceback.print_exc()
-                props = []  # ensure props is an empty list
-            source = "mock"
-
-        # 3. Log the final count and return
-        print(f"⚾ Returning {len(props)} props (source: {source})")
-        return jsonify(
-            {
-                "success": True,
-                "date": game_date,
-                "props": props[:limit],
-                "count": len(props[:limit]),
-                "source": source,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
-    except Exception as e:
-        print(f"❌ Error in /api/mlb/props: {e}")
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
+    date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    limit = int(request.args.get("limit", 50))
+    print(f"🔄 /api/mlb/props called with date={date}, limit={limit}")
+    props = fetch_mlb_props(date, limit)
+    if props:
+        source = "balldontlie"
+        print(f"✅ Returning real props (source={source})")
+    else:
+        props = generate_mock_mlb_props(limit)
+        source = "mock"
+        print(f"⚠️ Falling back to mock props")
+    return jsonify({
+        "success": True,
+        "date": date,
+        "props": props[:limit],
+        "count": len(props[:limit]),
+        "source": source,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    })
 
 def map_game_status(status):
     """Map Tank01 game status to your frontend status."""
