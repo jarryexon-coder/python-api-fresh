@@ -124,6 +124,8 @@ from services.promo_service import (
     apply_promo_to_subscription,
     get_influencer_stats
 )
+
+ALLOWED_ORIGINS = ['https://sportsanalyticsgpt.com', 'http://localhost:5173']
     
 # Import models
 from models.subscription import Subscription
@@ -145,109 +147,69 @@ if firebase_creds:
 else:
     raise Exception("FIREBASE_SERVICE_ACCOUNT environment variable not set")
 
-def handle_checkout_completed(session):
-    """Update user subscription after successful checkout"""
+def user_has_unlimited_credits(user_id):
+    print(f"DEBUG: Checking user {user_id}")
+    if not db:
+        print("DEBUG: db not initialized")
+        return False
     try:
-        # Extract data
-        user_id = session.get('client_reference_id')
-        customer_email = session.get('customer_email')
-        subscription_id = session.get('subscription')
-        metadata = session.get('metadata', {})
-        
-        print(f"🔍 Looking for user - ID: {user_id}, Email: {customer_email}")
-        
-        # Try to find user
-        user = None
-        
-        # Method 1: By client_reference_id
-        if user_id and user_id in users_db:
-            user = users_db[user_id]
-            print(f"✅ Found user by ID: {user.email}")
-        
-        # Method 2: By email in users_db
-        if not user and customer_email:
-            for uid, u in users_db.items():
-                if u.email == customer_email:
-                    user = u
-                    user_id = uid
-                    print(f"✅ Found user by email: {user.email} (ID: {uid})")
-                    break
-        
-        # Method 3: Check if user exists in Firebase Auth
-        if not user and customer_email:
-            try:
-                # Try to get user from Firebase Auth
-                firebase_user = auth.get_user_by_email(customer_email)
-                if firebase_user:
-                    # Create user in our database
-                    from models import User as UserModel
-                    user = User(id=firebase_user.uid, email=customer_email)
-                    users_db[user.id] = user
-                    user_id = user.id
-                    print(f"✅ Created new user from Firebase: {user.email} (ID: {user.id})")
-            except Exception as e:
-                print(f"⚠️ Firebase user lookup failed: {e}")
-        
-        if not user:
-            print(f"❌ User not found! Creating new user...")
-            # Create a new user
-            from models import User
-            new_id = user_id or customer_email
-            user = User(id=new_id, email=customer_email)
-            users_db[new_id] = user
-            user_id = new_id
-            print(f"✅ Created new user: {user.email} (ID: {user_id})")
-        
-        # Update user record
-        user.subscription_id = subscription_id
-        user.plan = plan_id or 'free'
-        user.subscription_status = 'active'
-        user.stripe_customer_id = customer_id
-        user.current_period_start = current_period_start
-        user.current_period_end = current_period_end
-        user.cancel_at_period_end = stripe_subscription.get('cancel_at_period_end', False)
-        
-        # Save user changes
-        users_db[user_id] = user
-        
-        # Create or update subscription record
-        if subscription_id not in subscriptions_db:
-            # Create Subscription object
-            subscription = Subscription(
-                user_id=user_id,
-                plan_id=plan_id or 'free',
-                stripe_subscription_id=subscription_id,
-                stripe_customer_id=customer_id
-            )
-            subscription.status = 'active'
-            subscription.current_period_start = current_period_start
-            subscription.current_period_end = current_period_end
-            subscription.cancel_at_period_end = stripe_subscription.get('cancel_at_period_end', False)
-            
-            subscriptions_db[subscription_id] = subscription
-            print(f"✅ Created new subscription record: {subscription_id}")
+        user_ref = db.collection('users').document(user_id)
+        doc = user_ref.get()
+        if doc.exists:
+            data = doc.to_dict()
+            unlimited = data.get('unlimited_credits', False)
+            role = data.get('role')
+            print(f"DEBUG: unlimited_credits={unlimited}, role={role}")
+            return unlimited or role == 'admin'
         else:
-            # Update existing subscription
-            subscription = subscriptions_db[subscription_id]
-            subscription.status = 'active'
-            subscription.plan_id = plan_id or subscription.plan_id
-            subscription.current_period_start = current_period_start
-            subscription.current_period_end = current_period_end
-            subscription.cancel_at_period_end = stripe_subscription.get('cancel_at_period_end', False)
-            print(f"✅ Updated existing subscription: {subscription_id}")
-        
-        print(f"✅ Successfully updated subscription for user {user_id}")
-        print(f"   Plan: {plan_id}")
-        print(f"   Status: active")
-        
+            print(f"DEBUG: User document {user_id} does not exist")
     except Exception as e:
-        print(f"❌ Error handling checkout completed: {e}")
-        traceback.print_exc()
+        print(f"DEBUG: Firestore error: {e}")
+    return False
 
 key = os.environ.get('KALSHI_PRIVATE_KEY')
 print(f"Key starts with: {key[:50]}")
 print(f"Key ends with: {key[-50:]}")
 print(f"Key length: {len(key)}")
+
+# Helper function to add credits to the Redis generation counter
+def add_generator_credits_to_redis(user_id, quantity):
+    """Add purchased generator credits to Redis counter."""
+    key = f"user:gen:{user_id}"
+    
+    if "redis_client" in globals() and redis_client:
+        try:
+            # Get current remaining, default to DAILY_LIMIT
+            remaining_raw = redis_client.hget(key, "remaining")
+            if remaining_raw is None:
+                remaining = DAILY_LIMIT
+            else:
+                if isinstance(remaining_raw, bytes):
+                    remaining_raw = remaining_raw.decode('utf-8')
+                remaining = int(remaining_raw)
+            
+            # Add credits
+            new_remaining = remaining + quantity
+            
+            # Save with fresh last_reset
+            redis_client.hset(key, "remaining", new_remaining)
+            redis_client.hset(key, "last_reset", datetime.utcnow().isoformat())
+            redis_client.expire(key, 86400)
+            
+            print(f"✅ Added {quantity} credits to {user_id}. New total: {new_remaining}")
+            return True
+        except Exception as e:
+            print(f"❌ Redis error adding credits: {e}")
+            return False
+    else:
+        # In-memory fallback
+        if user_id not in user_gen_store:
+            user_gen_store[user_id] = {
+                "remaining": DAILY_LIMIT,
+                "last_reset": datetime.utcnow().isoformat(),
+            }
+        user_gen_store[user_id]["remaining"] += quantity
+        return True
 
 # ==============================================
 # Kalshi API integration – Final Version
@@ -333,27 +295,89 @@ def fetch_kalshi_markets(sport: str = 'all'):
 
 def transform_market(market: dict) -> dict:
     """Convert a raw Kalshi market to the frontend's Prediction format."""
-    ticker = market.get('ticker', '')
-    title = market.get('title', 'No title')
-    event_ticker = market.get('event_ticker', '')
-    yes_bid = float(market.get('yes_bid_dollars', market.get('yes_bid', 0.5)))    
-    no_bid = float(market.get('no_bid_dollars', 0.5))
-
-    original_yes = yes_bid
-    original_no = no_bid
-    if yes_bid == 0.0:
-        yes_bid = 0.5
-    if no_bid == 0.0:
-        no_bid = 0.5
-
-    volume = market.get('volume_24h_fp', '0')
-    close_time = market.get('close_time', '')
-
-    # Edge: market sentiment based on distance from 0.5
-    if original_yes != 0.0:
-        sentiment_edge = (original_yes - 0.5) * 200
-    else:
-        sentiment_edge = 0.0
+    try:
+        ticker = market.get('ticker', '')
+        title = market.get('title', market.get('subtitle', 'No title'))
+        event_ticker = market.get('event_ticker', '')
+        
+        # Get prices with proper fallbacks
+        yes_bid = float(market.get('yes_bid_dollars', market.get('yes_bid', 0.5)))
+        no_bid = float(market.get('no_bid_dollars', market.get('no_bid', 0.5)))
+        
+        # Handle zero prices
+        if yes_bid == 0.0:
+            yes_bid = 0.5
+        if no_bid == 0.0:
+            no_bid = 0.5
+        
+        # Get volume
+        volume = market.get('volume_24h_fp', market.get('volume', '0'))
+        if volume == '0' or volume == 0:
+            volume = market.get('volume_usd', '0')
+        
+        # Get close time
+        close_time = market.get('close_time', '')
+        if close_time:
+            close_time = close_time.split('T')[0] if 'T' in close_time else close_time
+        
+        # Get category (try multiple fields)
+        category = market.get('category', market.get('event_category', 'General'))
+        
+        # Calculate edge (market sentiment based on distance from 0.5)
+        edge = ((yes_bid - 0.5) / 0.5) * 100
+        edge_display = f"{'+' if edge > 0 else ''}{edge:.1f}%"
+        
+        # Calculate confidence
+        confidence = min(95, max(55, int(yes_bid * 100)))
+        
+        # Determine trend
+        if yes_bid > 0.55:
+            trend = 'up'
+        elif yes_bid < 0.45:
+            trend = 'down'
+        else:
+            trend = 'neutral'
+        
+        return {
+            "id": ticker,
+            "question": title,
+            "category": category,
+            "yesPrice": f"{yes_bid:.2f}",
+            "noPrice": f"{no_bid:.2f}",
+            "volume": f"${float(volume):,.0f}" if volume != '0' else 'N/A',
+            "analysis": f"Market for {title}. Current yes bid: {yes_bid:.2f}, no bid: {no_bid:.2f}",
+            "expires": close_time if close_time else "2026-12-31",
+            "confidence": confidence,
+            "edge": edge_display,
+            "platform": "kalshi",
+            "marketType": "binary",
+            "trend": trend,
+            "aiGenerated": False,
+            "close_date": close_time,
+            "yes_bid": yes_bid,
+            "no_bid": no_bid,
+            "volume_numeric": float(volume) if volume != '0' else 0
+        }
+    except Exception as e:
+        print(f"❌ Error in transform_market: {e}")
+        print(f"Market data: {market}")
+        # Return a fallback prediction
+        return {
+            "id": market.get('ticker', 'unknown'),
+            "question": market.get('title', 'Unknown Market'),
+            "category": "General",
+            "yesPrice": "0.50",
+            "noPrice": "0.50",
+            "volume": "N/A",
+            "analysis": "Unable to parse market data",
+            "expires": "2026-12-31",
+            "confidence": 50,
+            "edge": "0%",
+            "platform": "kalshi",
+            "marketType": "binary",
+            "trend": "neutral",
+            "aiGenerated": False
+        }
 
     # ----------------------------------------------------------
     # SPORTS DETECTION – multi‑layer
@@ -8567,28 +8591,6 @@ def login():
         # CORS handled by Flask-CORS
         return response
 
-@app.route("/api/auth/me", methods=['GET'])
-@login_required
-def get_current_user():
-    """Get current user"""
-    try:
-        user = users_db.get(g.user_id)
-        if not user:
-            return jsonify({'success': False, 'error': 'User not found'}), 404
-        
-        # Get subscription if exists
-        if user.subscription_id and user.subscription_id in subscriptions_db:
-            user.subscription = subscriptions_db[user.subscription_id]
-        
-        return jsonify({
-            'success': True,
-            'user': user.to_dict()
-        })
-        
-    except Exception as e:
-        print(f"Get user error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 @app.route("/api/auth/me", methods=['PUT'])
 @login_required
 def update_user():
@@ -8645,6 +8647,51 @@ def change_password():
 # =============================================
 # SUBSCRIPTION ROUTES
 # =============================================
+@app.route("/api/admin/add-credits", methods=['POST'])
+def admin_add_credits():
+    """Manually add credits to a user"""
+    data = flask_request.json
+    user_id = data.get('user_id')
+    credits = data.get('credits', 20)
+    
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 400
+    
+    add_generator_credits_to_redis(user_id, credits)
+    
+    return jsonify({
+        'success': True,
+        'message': f'Added {credits} credits to {user_id}'
+    })
+
+@app.route("/api/admin/reset-user", methods=['POST'])
+def admin_reset_user():
+    """Reset a user's generator data"""
+    data = flask_request.json
+    user_id = data.get('user_id')
+    
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 400
+    
+    key = f"user:gen:{user_id}"
+    
+    if "redis_client" in globals() and redis_client:
+        # Delete the corrupted key
+        redis_client.delete(key)
+        print(f"✅ Deleted key for user {user_id}")
+        
+        # Initialize fresh
+        remaining = DAILY_LIMIT
+        last_reset = datetime.utcnow().isoformat()
+        redis_client.hset(key, mapping={"remaining": remaining, "last_reset": last_reset})
+        redis_client.expire(key, 86400)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Reset user {user_id} with {remaining} credits'
+        })
+    else:
+        return jsonify({'error': 'Redis not available'}), 500
 
 @app.route('/api/admin/create-promo', methods=['POST'])
 @admin_required
@@ -8847,6 +8894,354 @@ def get_user_stats():
         # CORS handled by Flask-CORS
         return response
 
+# =============================================
+# STRIPE WEBHOOKS
+# =============================================
+
+def handle_checkout_completed(session_dict):
+    """Update user subscription after successful checkout"""
+    try:
+        # Extract data safely
+        user_id = session_dict.get('client_reference_id')
+        customer_email = session_dict.get('customer_email')
+        subscription_id = session_dict.get('subscription')
+        metadata = session_dict.get('metadata', {})
+        
+        # Get payment status safely
+        payment_status = session_dict.get('payment_status')
+        
+        print(f"🔍 Looking for user - ID: {user_id}, Email: {customer_email}")
+        print(f"💰 Payment status: {payment_status}")
+        print(f"📦 Mode: {session_dict.get('mode')}")
+        print(f"🏷️ Metadata: {metadata}")
+        
+        # ===== HANDLE GENERATOR CREDITS PURCHASE =====
+        if metadata.get('type') == 'generator_credits':
+            credits = int(metadata.get('credits', 20))
+            
+            print(f"💰 GENERATOR CREDITS PURCHASE DETECTED")
+            print(f"   User ID: {user_id}")
+            print(f"   Credits: {credits}")
+            
+            if payment_status == 'paid' and user_id:
+                add_generator_credits_to_redis(user_id, credits)
+                print(f"✅ Added {credits} credits to Redis for user {user_id}")
+                
+                if db:
+                    try:
+                        user_ref = db.collection('users').document(user_id)
+                        user_ref.update({
+                            'credits': firestore.Increment(credits),
+                            'updated_at': firestore.SERVER_TIMESTAMP
+                        })
+                        print(f"✅ Updated Firestore credits for {user_id}")
+                    except Exception as e:
+                        print(f"⚠️ Could not update Firestore: {e}")
+                
+                return {'success': True, 'credits_added': credits}
+            else:
+                return {'success': False, 'error': 'Payment not completed or missing user_id'}
+        
+        # ===== HANDLE GENERATOR PICK PURCHASE =====
+        if metadata.get('type') == 'generator_pick':
+            quantity = int(metadata.get('quantity', 1))
+            
+            print(f"🎯 GENERATOR PICK PURCHASE DETECTED")
+            print(f"   User ID: {user_id}")
+            print(f"   Quantity: {quantity}")
+            
+            if payment_status == 'paid' and user_id:
+                credits_to_add = quantity
+                add_generator_credits_to_redis(user_id, credits_to_add)
+                print(f"✅ Added {credits_to_add} credits for {quantity} pick(s)")
+                
+                if db:
+                    try:
+                        user_ref = db.collection('users').document(user_id)
+                        user_ref.update({
+                            'credits': firestore.Increment(credits_to_add),
+                            'updated_at': firestore.SERVER_TIMESTAMP
+                        })
+                        print(f"✅ Updated Firestore credits for {user_id}")
+                    except Exception as e:
+                        print(f"⚠️ Could not update Firestore: {e}")
+                
+                return {'success': True, 'credits_added': credits_to_add}
+            else:
+                return {'success': False, 'error': 'Payment not completed or missing user_id'}
+        
+        # ===== HANDLE SUBSCRIPTION PURCHASE =====
+        if session_dict.get('mode') == 'subscription':
+            plan_id = metadata.get('plan_id')
+            
+            print(f"📊 SUBSCRIPTION PURCHASE DETECTED")
+            print(f"   Plan: {plan_id}")
+            print(f"   Subscription ID: {subscription_id}")
+            
+            # Add generator credits for generator plan
+            if plan_id == 'generator':
+                credits_to_add = 20
+                print(f"🎁 GENERATOR PACKAGE DETECTED! Adding {credits_to_add} generator credits")
+                
+                if user_id:
+                    add_generator_credits_to_redis(user_id, credits_to_add)
+                    print(f"✅ Added {credits_to_add} generator credits to Redis for user {user_id}")
+                    
+                    if db:
+                        try:
+                            user_ref = db.collection('users').document(user_id)
+                            user_ref.update({
+                                'credits': firestore.Increment(credits_to_add),
+                                'updated_at': firestore.SERVER_TIMESTAMP
+                            })
+                            print(f"✅ Updated Firestore credits for user {user_id}")
+                        except Exception as e:
+                            print(f"⚠️ Could not update Firestore: {e}")
+                else:
+                    print(f"⚠️ No user_id found, cannot add generator credits")
+            
+            # Update user subscription in Firestore
+            if db and user_id:
+                try:
+                    user_ref = db.collection('users').document(user_id)
+                    user_doc = user_ref.get()
+                    
+                    if user_doc.exists:
+                        user_ref.update({
+                            'plan': plan_id,
+                            'subscription_id': subscription_id,
+                            'subscription_status': 'active',
+                            'updated_at': firestore.SERVER_TIMESTAMP
+                        })
+                        print(f"✅ Updated user {user_id} to {plan_id} plan")
+                    else:
+                        print(f"⚠️ User {user_id} not found")
+                except Exception as e:
+                    print(f"⚠️ Could not update user subscription: {e}")
+            
+            return {'success': True, 'plan': plan_id}
+        
+        return {'success': False, 'error': 'Unknown purchase type'}
+        
+    except Exception as e:
+        print(f"❌ Error in handle_checkout_completed: {e}")
+        traceback.print_exc()
+        return {'success': False, 'error': str(e)}
+
+
+@app.route("/api/subscriptions/webhook", methods=['POST'])
+def stripe_webhook():
+    """Handle Stripe webhook events with proper subscription upgrade logic"""
+    from datetime import datetime
+    import traceback
+    import os
+    import hashlib
+    import hmac
+    
+    print("=" * 80)
+    print("📨 WEBHOOK RECEIVED - ENDPOINT HIT")
+    print(f"   Time: {datetime.utcnow().isoformat()}")
+    
+    payload = flask_request.data
+    sig_header = flask_request.headers.get('Stripe-Signature')
+    webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
+    
+    print(f"   Signature header: {sig_header[:50] if sig_header else 'None'}...")
+    print(f"   Webhook secret present: {bool(webhook_secret)}")
+    print(f"   Payload length: {len(payload)} bytes")
+    
+    try:
+        payload_str = payload.decode('utf-8')
+        print(f"   Payload preview: {payload_str[:200]}...")
+    except:
+        print(f"   Payload preview: {payload[:200]}...")
+    
+    if webhook_secret:
+        print(f"   Webhook secret length: {len(webhook_secret)}")
+        print(f"   Webhook secret prefix: {webhook_secret[:15]}...")
+        print(f"   Webhook secret suffix: ...{webhook_secret[-10:]}")
+    
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+        print(f"✅ Webhook signature verified successfully")
+        print(f"   Event type: {event['type']}")
+        print(f"   Event ID: {event['id']}")
+    except ValueError as e:
+        print(f"❌ Invalid payload: {e}")
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError as e:
+        print(f"❌ Signature verification failed: {e}")
+        return jsonify({'error': 'Invalid signature'}), 400
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 400
+    
+    # ----- CHECKOUT SESSION COMPLETED -----
+    if event['type'] == 'checkout.session.completed':
+        print(f"\n💰 Processing checkout.session.completed")
+        
+        session = event['data']['object']
+        
+        # Convert to dictionary safely
+        if hasattr(session, 'to_dict'):
+            session_dict = session.to_dict()
+        else:
+            session_dict = dict(session)
+        
+        # CRITICAL: Convert metadata from StripeObject to dict
+        if 'metadata' in session_dict and session_dict['metadata']:
+            if hasattr(session_dict['metadata'], 'to_dict'):
+                session_dict['metadata'] = session_dict['metadata'].to_dict()
+            elif hasattr(session_dict['metadata'], 'get'):
+                # It's already a dict-like object
+                session_dict['metadata'] = dict(session_dict['metadata'])
+        
+        print(f"   Session ID: {session_dict.get('id')}")
+        print(f"   Mode: {session_dict.get('mode')}")
+        print(f"   Payment Status: {session_dict.get('payment_status')}")
+        print(f"   Customer Email: {session_dict.get('customer_email')}")
+        print(f"   Metadata: {session_dict.get('metadata')}")
+        
+        # Also check client_reference_id for user_id if metadata doesn't have it
+        if not session_dict.get('metadata', {}).get('user_id'):
+            user_id = session_dict.get('client_reference_id')
+            if user_id:
+                session_dict['metadata']['user_id'] = user_id
+                print(f"   Using client_reference_id as user_id: {user_id}")
+        
+        result = handle_checkout_completed(session_dict)
+        
+        if result.get('success'):
+            print(f"✅ Checkout processed successfully: {result}")
+            return jsonify({'received': True, 'result': result}), 200
+        else:
+            print(f"❌ Checkout processing failed: {result.get('error')}")
+            return jsonify({'received': True, 'warning': result.get('error')}), 200
+    
+    # ----- INVOICE PAYMENT SUCCEEDED -----
+    elif event['type'] == 'invoice.payment_succeeded':
+        print(f"\n💰 Invoice payment succeeded")
+        invoice = event['data']['object']
+        
+        if hasattr(invoice, 'to_dict'):
+            invoice_dict = invoice.to_dict()
+        else:
+            invoice_dict = dict(invoice)
+        
+        subscription_id = invoice_dict.get('subscription')
+        print(f"   Subscription: {subscription_id}")
+        
+        if subscription_id and db:
+            try:
+                subscription = stripe.Subscription.retrieve(subscription_id)
+                customer_id = subscription.customer
+                
+                users_query = db.collection('users').where('stripe_customer_id', '==', customer_id).limit(1).stream()
+                users_list = list(users_query)
+                
+                if users_list:
+                    user_ref = db.collection('users').document(users_list[0].id)
+                    user_ref.update({
+                        'subscription_status': subscription.status,
+                        'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
+                        'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
+                        'updated_at': firestore.SERVER_TIMESTAMP
+                    })
+                    print(f"✅ Updated user subscription status")
+                
+                sub_ref = db.collection('subscriptions').document(subscription_id)
+                sub_ref.update({
+                    'status': subscription.status,
+                    'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
+                    'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
+                    'last_payment_date': firestore.SERVER_TIMESTAMP,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
+                print(f"✅ Updated subscription payment record")
+            except Exception as e:
+                print(f"❌ Error processing invoice payment: {e}")
+                traceback.print_exc()
+    
+    # ----- SUBSCRIPTION UPDATED -----
+    elif event['type'] == 'customer.subscription.updated':
+        print(f"\n🔄 Subscription updated")
+        subscription = event['data']['object']
+        
+        if hasattr(subscription, 'to_dict'):
+            sub_dict = subscription.to_dict()
+        else:
+            sub_dict = dict(subscription)
+        
+        subscription_id = sub_dict.get('id')
+        status = sub_dict.get('status')
+        cancel_at_period_end = sub_dict.get('cancel_at_period_end', False)
+        
+        print(f"   Subscription ID: {subscription_id}")
+        print(f"   Status: {status}")
+        print(f"   Cancel at period end: {cancel_at_period_end}")
+        
+        if subscription_id and db:
+            sub_ref = db.collection('subscriptions').document(subscription_id)
+            update_data = {
+                'status': status,
+                'cancel_at_period_end': cancel_at_period_end,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            }
+            
+            if sub_dict.get('current_period_start'):
+                update_data['current_period_start'] = datetime.fromtimestamp(sub_dict['current_period_start'])
+            if sub_dict.get('current_period_end'):
+                update_data['current_period_end'] = datetime.fromtimestamp(sub_dict['current_period_end'])
+            
+            sub_ref.update(update_data)
+            print(f"✅ Updated subscription status")
+            
+            sub_doc = sub_ref.get()
+            if sub_doc.exists:
+                user_id = sub_doc.to_dict().get('user_id')
+                if user_id:
+                    user_ref = db.collection('users').document(user_id)
+                    user_ref.update({
+                        'subscription_status': status,
+                        'updated_at': firestore.SERVER_TIMESTAMP
+                    })
+                    print(f"✅ Updated user subscription status")
+    
+    # ----- SUBSCRIPTION DELETED -----
+    elif event['type'] == 'customer.subscription.deleted':
+        print(f"\n❌ Subscription deleted")
+        subscription = event['data']['object']
+        
+        if hasattr(subscription, 'to_dict'):
+            sub_dict = subscription.to_dict()
+        else:
+            sub_dict = dict(subscription)
+        
+        subscription_id = sub_dict.get('id')
+        print(f"   Subscription ID: {subscription_id}")
+        
+        if subscription_id and db:
+            sub_ref = db.collection('subscriptions').document(subscription_id)
+            sub_ref.update({
+                'status': 'canceled',
+                'deleted_at': firestore.SERVER_TIMESTAMP,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
+            print(f"✅ Marked subscription as canceled")
+            
+            users_query = db.collection('users').where('subscription_id', '==', subscription_id).limit(1).stream()
+            users_list = list(users_query)
+            if users_list:
+                user_ref = db.collection('users').document(users_list[0].id)
+                user_ref.update({
+                    'subscription_status': 'canceled',
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
+                print(f"✅ Updated user subscription status")
+    
+    print("=" * 80)
+    return jsonify({'received': True}), 200
 
 @app.route('/api/user/subscription', methods=['GET'])
 @login_required
@@ -8871,23 +9266,28 @@ def get_user_subscription():
 
 @app.route("/api/user/profile", methods=['GET', 'OPTIONS'])
 def get_user_profile():
-    """Get user profile from Firestore"""
-    # Handle CORS preflight request FIRST
+    """Get user profile from Firestore with CORS support for multiple origins"""
+    # Get the request origin
+    origin = flask_request.headers.get('Origin')
+    if origin not in ALLOWED_ORIGINS:
+        origin = 'https://sportsanalyticsgpt.com'  # fallback
+
+    # Handle CORS preflight request
     if flask_request.method == 'OPTIONS':
         response = make_response()
-        # CORS handled by Flask-CORS
+        response.headers.add('Access-Control-Allow-Origin', origin)
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         response.headers.add('Access-Control-Max-Age', '3600')
-        return response
+        return response, 200
 
     try:
         # Get authorization header
         auth_header = flask_request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
-            print("❌ No Bearer token found")
             response = make_response(jsonify({'error': 'No Bearer token found'}), 401)
+            response.headers.add('Access-Control-Allow-Origin', origin)
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
@@ -8896,26 +9296,24 @@ def get_user_profile():
         # Verify Firebase token
         result = verify_firebase_token(token)
 
-        # Safety check: ensure result is a dict
         if not isinstance(result, dict):
-            print(f"❌ Unexpected token verification result type: {type(result)}")
             response = make_response(jsonify({'error': 'Internal authentication error'}), 500)
+            response.headers.add('Access-Control-Allow-Origin', origin)
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
         if not result.get('valid'):
-            print(f"❌ Token verification failed: {result.get('error')}")
             response = make_response(jsonify({'error': result.get('error', 'Invalid token')}), 401)
+            response.headers.add('Access-Control-Allow-Origin', origin)
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
-        # Firebase token payload uses 'uid', not 'user_id'
         user_id = result['payload'].get('uid')
         user_email = result['payload'].get('email')
 
         if not user_id:
-            print("❌ No user ID in token payload")
             response = make_response(jsonify({'error': 'Invalid token payload'}), 401)
+            response.headers.add('Access-Control-Allow-Origin', origin)
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
@@ -8923,6 +9321,7 @@ def get_user_profile():
 
         if not db:
             response = make_response(jsonify({'error': 'Database not available'}), 500)
+            response.headers.add('Access-Control-Allow-Origin', origin)
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
@@ -8945,11 +9344,13 @@ def get_user_profile():
                 'lifetimeSpent': user_data.get('lifetimeSpent', 0),
                 'memberSince': user_data.get('created_at').isoformat() if user_data.get('created_at') else None,
                 'current_period_start': user_data.get('current_period_start').isoformat() if user_data.get('current_period_start') else None,
-                'current_period_end': user_data.get('current_period_end').isoformat() if user_data.get('current_period_end') else None
+                'current_period_end': user_data.get('current_period_end').isoformat() if user_data.get('current_period_end') else None,
+                'isInfluencerEligible': user_data.get('isInfluencerEligible', False)
             }
         else:
             # Create user if not exists
             print(f"⚠️ User not found in Firestore, creating...")
+            # Data for Firestore (includes sentinel)
             user_data = {
                 'email': user_email,
                 'displayName': user_email.split('@')[0] if user_email else 'User',
@@ -8957,14 +9358,30 @@ def get_user_profile():
                 'credits': 0,
                 'lifetimeSpent': 0,
                 'subscription_status': 'inactive',
+                'isInfluencerEligible': False,
                 'created_at': firestore.SERVER_TIMESTAMP
             }
             user_ref.set(user_data)
-            response_data = user_data
-            response_data['id'] = user_id
+
+            # Build response without the sentinel
+            response_data = {
+                'id': user_id,
+                'email': user_email,
+                'displayName': user_data['displayName'],
+                'plan': 'free',
+                'subscription_id': None,
+                'subscription_status': 'inactive',
+                'credits': 0,
+                'lifetimeSpent': 0,
+                'memberSince': None,
+                'current_period_start': None,
+                'current_period_end': None,
+                'isInfluencerEligible': False
+            }
             print(f"✅ Created new user: {user_id}")
 
         response = make_response(jsonify(response_data), 200)
+        response.headers.add('Access-Control-Allow-Origin', origin)
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
 
@@ -8972,6 +9389,7 @@ def get_user_profile():
         print(f"❌ Get profile error: {e}")
         traceback.print_exc()
         response = make_response(jsonify({'error': str(e)}), 500)
+        response.headers.add('Access-Control-Allow-Origin', origin)
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
 
@@ -9462,7 +9880,6 @@ def refresh_subscription():
 @app.route("/api/subscriptions/verify-session", methods=['POST'])
 @login_required
 def verify_checkout_session():
-    """Verify a checkout session and return subscription details"""
     try:
         data = flask_request.json
         session_id = data.get('sessionId')
@@ -9470,62 +9887,28 @@ def verify_checkout_session():
         if not session_id:
             return jsonify({'error': 'Session ID required'}), 400
         
-        print(f"🔍 Verifying session: {session_id} for user: {g.user_id}")
+        # Just check the user's subscription in Firestore
+        user_ref = db.collection('users').document(g.user_id)
+        user_doc = user_ref.get()
         
-        # Retrieve session from Stripe
-        session = stripe.checkout.Session.retrieve(session_id)
-        
-        if session.payment_status == 'paid':
-            # Get user from database
-            if db:
-                user_ref = db.collection('users').document(g.user_id)
-                user_doc = user_ref.get()
-                
-                if user_doc.exists:
-                    user_data = user_doc.to_dict()
-                    subscription_id = user_data.get('subscription_id')
-                    
-                    if subscription_id:
-                        # Get subscription from Firestore
-                        sub_ref = db.collection('subscriptions').document(subscription_id)
-                        sub_doc = sub_ref.get()
-                        
-                        if sub_doc.exists:
-                            sub_data = sub_doc.to_dict()
-                            return jsonify({
-                                'success': True,
-                                'subscription': {
-                                    'id': subscription_id,
-                                    'plan_id': sub_data.get('plan_id'),
-                                    'status': sub_data.get('status'),
-                                    'current_period_start': sub_data.get('current_period_start').isoformat() if sub_data.get('current_period_start') else None,
-                                    'current_period_end': sub_data.get('current_period_end').isoformat() if sub_data.get('current_period_end') else None
-                                }
-                            })
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            plan = user_data.get('plan', 'free')
             
-            # Fallback to in-memory
-            user = users_db.get(g.user_id)
-            if user and user.subscription_id:
-                subscription = subscriptions_db.get(user.subscription_id)
-                if subscription:
-                    return jsonify({
-                        'success': True,
-                        'subscription': {
-                            'id': subscription.id,
-                            'plan_id': subscription.plan_id,
-                            'status': subscription.status,
-                            'current_period_start': subscription.current_period_start.isoformat() if subscription.current_period_start else None,
-                            'current_period_end': subscription.current_period_end.isoformat() if subscription.current_period_end else None
-                        }
-                    })
+            return jsonify({
+                'success': True,
+                'type': 'subscription',
+                'subscription': {
+                    'plan_id': plan,
+                    'status': 'active' if plan != 'free' else 'inactive'
+                }
+            })
         
-        return jsonify({'success': False, 'message': 'Subscription not found or not paid'}), 404
+        return jsonify({'success': False, 'message': 'User not found'}), 404
         
     except Exception as e:
-        print(f"❌ Verify session error: {e}")
-        traceback.print_exc()
+        print(f"❌ Error: {e}")
         return jsonify({'error': str(e)}), 500
-
 
 # =============================================
 # Helper: Validate promo code against Stripe
@@ -9586,6 +9969,10 @@ prices = {
     'generator': {
         'month': 'price_1TBqTrA3tlI8MNZjn2kvGXI3',
         'year': 'price_1TBqVUA3tlI8MNZjlDK9POuj'
+    },
+    'influencer': {   # <-- ADD THIS
+        'month': 'price_1TJq2RA3tlI8MNZjGBZ27YcZ',   # your influencer price ID
+        'year': 'price_1TJq2RA3tlI8MNZjGBZ27YcZ'     # same for yearly (or create a yearly price)
     }
 }
 
@@ -9596,72 +9983,120 @@ prices = {
 @login_required
 def create_subscription_checkout():
     try:
-        data = flask_request.json  # Use flask_request, not request
-        print(f"Received data: {data}")
-
+        data = flask_request.json
         plan_id = data.get('planId')
         interval = data.get('interval', 'month')
-        promo_code = data.get('promoCode')  # optional
-
-        # Validate plan_id
-        if plan_id not in prices:
+        
+        # Map plan_id to your price IDs
+        price_ids = {
+            'starter': 'price_YOUR_STARTER_PRICE_ID',     # Create this in Stripe
+            'analytics': 'price_YOUR_ANALYTICS_PRICE_ID', # Create this in Stripe
+            'generator': 'price_1TN2WPA3tlI8MNZjrgD5gGqB', # Your existing price ID
+        }
+        
+        price_id = price_ids.get(plan_id)
+        if not price_id:
             return jsonify({'error': f'Invalid plan: {plan_id}'}), 400
-
-        # Validate interval
-        if interval not in prices[plan_id]:
-            return jsonify({'error': f'Invalid interval: {interval}'}), 400
-
-        price_id = prices[plan_id][interval]
-
-        # Get frontend URL from environment, default to production
+        
         FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
-
-        # Build success/cancel URLs (now pointing to frontend)
-        success_url = f"{FRONTEND_URL}/subscription?success=true&session_id={{CHECKOUT_SESSION_ID}}"
-        cancel_url = f"{FRONTEND_URL}/subscription?canceled=true"
-
-        # Prepare session parameters
+        
         session_params = {
             'payment_method_types': ['card'],
+            'mode': 'subscription',
             'line_items': [{
                 'price': price_id,
                 'quantity': 1,
             }],
-            'mode': 'subscription',
-            'success_url': success_url,
-            'cancel_url': cancel_url,
+            'success_url': f"{FRONTEND_URL}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_id}&value=39.99",
+            'cancel_url': f"{FRONTEND_URL}/subscription?canceled=true",
             'client_reference_id': g.user_id,
             'customer_email': g.user_email,
             'metadata': {
                 'user_id': g.user_id,
                 'plan_id': plan_id,
-                'interval': interval
+                'interval': interval,
+                'type': 'subscription'
             }
         }
-
-        # Apply promo code if provided
-        if promo_code:
-            session_params['discounts'] = [{'promotion_code': promo_code}]
-        else:
-            print("No promo code provided")
-
-        # Create Stripe checkout session
+        
         session = stripe.checkout.Session.create(**session_params)
-
-        print(f"✅ Checkout session created: {session.id} with promo: {promo_code}")
-
+        
+        print(f"🔗 CHECKOUT URL: {session.url}")
+        print(f"✅ Subscription checkout created: {session.id}")
+        
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url
-        })
-
-    except stripe.error.InvalidRequestError as e:
-        print(f"Stripe InvalidRequestError: {e}")
-        return jsonify({'error': f'Stripe error: {str(e)}'}), 400
+        }), 200
+        
     except Exception as e:
-        print(f"Unexpected error: {e}")
-        import traceback
+        print(f"❌ Subscription checkout error: {e}")
+        print(f"🔑 Using Stripe API key: {stripe.api_key[:20]}...")
+        print(f"💰 Price ID being used: {price_id}")
+        print(f"📋 All price IDs in dict: {price_ids}")
+        print(f"🔑 Using Stripe API key: {stripe.api_key[:15]}...")
+        print(f"🔑 Key mode: {'TEST' if 'sk_test' in stripe.api_key else 'LIVE'}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/debug/stripe-account', methods=['GET'])
+def debug_stripe_account():
+    try:
+        account = stripe.Account.retrieve()
+        return jsonify({
+            'account_id': account.id,
+            'email': account.email,
+            'business_name': account.business_name
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route("/api/subscriptions/create-checkout-test", methods=['POST'])
+def create_subscription_checkout_test():
+    try:
+        data = flask_request.json
+        plan_id = data.get('planId', 'generator')
+        interval = data.get('interval', 'month')
+        user_id = "DRlS9wfiFnbNnC0rGgsGcrzEjuY2"
+        user_email = "test6@gmail.com"
+        
+        # Use the correct recurring price ID
+        price_id = "price_1TN2WPA3tlI8MNZjrgD5gGqB"
+        
+        FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
+        PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_YOUR_KEY')
+        
+        session_params = {
+            'payment_method_types': ['card'],
+            'mode': 'subscription',
+            'line_items': [{
+                'price': price_id,
+                'quantity': 1,
+            }],
+            'success_url': f"{FRONTEND_URL}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_id}&value=39.99",
+            'cancel_url': f"{FRONTEND_URL}/subscription?canceled=true",
+            'client_reference_id': user_id,
+            'customer_email': user_email,
+            'metadata': {
+                'user_id': user_id,
+                'plan_id': plan_id,
+                'interval': interval,
+                'type': 'subscription'
+            }
+        }
+        
+        session = stripe.checkout.Session.create(**session_params)
+        
+        return jsonify({
+            'success': True,
+            'sessionId': session.id,
+            'url': session.url,
+            'publishableKey': PUBLISHABLE_KEY
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Test checkout error: {e}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -9724,7 +10159,7 @@ def reactivate_subscription_endpoint():
 # =============================================
 # GENERATOR PICKS ROUTES
 # =============================================
-@app.route('/api/generator-picks/create-checkout', methods=['POST'])
+@app.route('/api/generator/pick/checkout', methods=['POST'])
 @login_required
 def create_generator_pick_checkout():
     """Create a Stripe checkout session for individual generator picks"""
@@ -9734,41 +10169,50 @@ def create_generator_pick_checkout():
         
         if quantity < 1 or quantity > 100:
             return jsonify({'error': 'Invalid quantity'}), 400
-            
+        
         user_id = g.user_id
         user_email = g.user_email
+        
+        FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
         
         # Individual generator pick price ID
         price_id = 'price_1TBr3CA3tlI8MNZj70WwJBuN'
         
+        # Calculate amount for metadata (assuming $0.99 per pick)
+        amount_per_pick = 0.99
+        total_amount = amount_per_pick * quantity
+        
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
-            line_items=[{
+            line_items=[{ 
                 'price': price_id,
                 'quantity': quantity,
             }],
             mode='payment',  # One-time payment, not subscription
-            success_url='https://your-frontend.com/generator-picks/success?session_id={CHECKOUT_SESSION_ID}',
-            cancel_url='https://your-frontend.com/generator-picks/cancel',
+            success_url=f"{FRONTEND_URL}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&type=generator_pick&quantity={quantity}&value={total_amount}",
+            cancel_url=f"{FRONTEND_URL}/subscription/cancel",
             client_reference_id=user_id,
             customer_email=user_email,
             metadata={
-                'user_id': user_id,
+                'user_id': user_id,   
                 'type': 'generator_pick',
                 'quantity': quantity
             }
         )
         
-        # Following the pattern from File 1 with success flag and consistent response
+        print(f"✅ Generator pick checkout created: {session.id}")
+        print(f"   Quantity: {quantity}")
+        print(f"   Amount: ${total_amount}")
+        
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url
         })
-        
+            
     except Exception as e:
         print(f"❌ Generator pick checkout error: {str(e)}")
-        traceback.print_exc()
+        traceback.print_exc()  
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route("/api/generator/items", methods=['GET'])
@@ -9826,13 +10270,13 @@ def generator_credits_checkout():
     """Create Stripe checkout for generator credits using dynamic pricing"""
     try:
         print(f"🛒 Creating generator credits checkout for user: {g.user_id}")
-        
+               
         if not stripe.api_key:
             return jsonify({'error': 'Stripe not configured'}), 500
-        
+            
         data = flask_request.json
         credits_amount = data.get('credits', 10)
-        
+            
         # Map credits to prices - MATCH YOUR ACTUAL STRIPE PRICES
         credit_prices = {
             1: 1.99,
@@ -9840,26 +10284,27 @@ def generator_credits_checkout():
             20: 25.80,
             50: 44.50,
         }
-        
+
         amount = credit_prices.get(credits_amount)
         if not amount:
             return jsonify({'error': f'Invalid credits amount: {credits_amount}. Available: 1, 10, 20, 50'}), 400
-        
+    
         # Get base URL
         base_url = flask_request.host_url.rstrip('/')
         is_dev = 'localhost' in base_url or '127.0.0.1' in base_url
-        
+
+        # Updated success URLs with credits and value parameters
         if is_dev:
-            success_url = 'http://localhost:5173/subscription/success?session_id={CHECKOUT_SESSION_ID}&type=credits'
+            success_url = f'http://localhost:5173/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&type=credits&credits={credits_amount}&value={amount}'
             cancel_url = 'http://localhost:5173/subscription/cancel'
         else:
-            success_url = 'https://sportsanalyticsgpt.com/subscription/success?session_id={CHECKOUT_SESSION_ID}&type=credits'
+            success_url = f'https://sportsanalyticsgpt.com/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&type=credits&credits={credits_amount}&value={amount}'
             cancel_url = 'https://sportsanalyticsgpt.com/subscription/cancel'
         
         # Create a product name for this purchase
         product_name = f"{credits_amount} Generator Credits"
         product_description = f"Purchase {credits_amount} generator credits for AI predictions and generator features"
-        
+            
         # Create checkout session with dynamic line item (one-time payment)
         checkout_params = {
             'payment_method_types': ['card'],
@@ -9870,7 +10315,7 @@ def generator_credits_checkout():
                         'name': product_name,
                         'description': product_description,
                     },
-                    'unit_amount': int(amount * 100),  # Convert to cents
+                    'unit_amount': int(amount * 100),  # Convert to cents   
                 },
                 'quantity': 1,
             }],
@@ -9885,19 +10330,19 @@ def generator_credits_checkout():
                 'credits': credits_amount
             }
         }
-        
+
         session = stripe.checkout.Session.create(**checkout_params)
-        
+
         print(f"✅ Credits checkout session created: {session.id}")
         print(f"   Credits: {credits_amount}")
         print(f"   Amount: ${amount}")
-        
+    
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url
-        }), 200
-        
+        }), 200   
+            
     except Exception as e:
         print(f"❌ Credits checkout error: {e}")
         traceback.print_exc()
@@ -9948,340 +10393,6 @@ def use_generator_credit():
     except Exception as e:
         print(f"Use generator credit error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
-# =============================================
-# STRIPE WEBHOOKS
-# =============================================
-@app.route("/api/subscriptions/webhook", methods=['POST'])
-def stripe_webhook():
-    """Handle Stripe webhook events with proper subscription upgrade logic"""
-    from datetime import datetime
-    import traceback
-    
-    payload = flask_request.data
-    sig_header = flask_request.headers.get('Stripe-Signature')
-    webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
-    
-    print("=" * 80)
-    print("📨 WEBHOOK RECEIVED")
-    print(f"   Time: {datetime.utcnow().isoformat()}")
-    print(f"   Signature header: {sig_header[:50] if sig_header else 'None'}...")
-    
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
-        print(f"✅ Webhook signature verified")
-        print(f"   Event type: {event['type']}")
-        print(f"   Event ID: {event['id']}")
-    except Exception as e:
-        print(f"❌ Webhook signature verification failed: {e}")
-        return jsonify({'error': str(e)}), 400
-    
-    # Convert to dictionary for safe access
-    if hasattr(event, 'to_dict'):
-        event_dict = event.to_dict()
-    else:
-        event_dict = dict(event)
-    
-    # ----- CHECKOUT SESSION COMPLETED -----
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        
-        # Convert to dictionary for safe access
-        if hasattr(session, 'to_dict'):
-            session_dict = session.to_dict()
-        else:
-            session_dict = dict(session)
-        
-        print(f"\n💰 Processing checkout.session.completed")
-        print(f"   Session ID: {session_dict.get('id')}")
-        print(f"   Mode: {session_dict.get('mode')}")
-        print(f"   Metadata: {session_dict.get('metadata')}")
-        
-        # ===== HANDLE GENERATOR CREDITS PURCHASE =====
-        if session_dict.get('metadata', {}).get('type') == 'generator_credits':
-            user_id = session_dict.get('metadata', {}).get('user_id')
-            credits = int(session_dict.get('metadata', {}).get('credits', 45))
-            customer_email = session_dict.get('customer_email')
-            payment_status = session_dict.get('payment_status')
-            
-            print(f"💰 GENERATOR CREDITS PURCHASE:")
-            print(f"   User ID: {user_id}")
-            print(f"   Credits: {credits}")
-            print(f"   Email: {customer_email}")
-            print(f"   Status: {payment_status}")
-            
-            if payment_status == 'paid' and db:
-                # Try to find user by ID first
-                user_ref = None
-                if user_id:
-                    user_ref = db.collection('users').document(user_id)
-                    user_doc = user_ref.get()
-                    
-                    if user_doc.exists:
-                        user_data = user_doc.to_dict()
-                        current_credits = user_data.get('credits', 0)
-                        
-                        # Add credits
-                        user_ref.update({
-                            'credits': current_credits + credits,
-                            'updated_at': firestore.SERVER_TIMESTAMP
-                        })
-                        print(f"✅ Added {credits} credits to user {user_id}. New total: {current_credits + credits}")
-                    else:
-                        print(f"⚠️ User {user_id} not found in Firestore")
-                elif customer_email:
-                    # Search by email
-                    users_query = db.collection('users').where('email', '==', customer_email).limit(1).stream()
-                    users_list = list(users_query)
-                    if users_list:
-                        user_ref = db.collection('users').document(users_list[0].id)
-                        user_data = users_list[0].to_dict()
-                        current_credits = user_data.get('credits', 0)
-                        
-                        user_ref.update({
-                            'credits': current_credits + credits,
-                            'updated_at': firestore.SERVER_TIMESTAMP
-                        })
-                        print(f"✅ Added {credits} credits to user {customer_email}. New total: {current_credits + credits}")
-                    else:
-                        print(f"⚠️ User with email {customer_email} not found")
-            
-            return jsonify({'received': True})
-        
-        # ===== HANDLE SUBSCRIPTION PURCHASE =====
-        elif session_dict.get('mode') == 'subscription':
-            customer_id = session_dict.get('customer')
-            subscription_id = session_dict.get('subscription')
-            client_reference_id = session_dict.get('client_reference_id')
-            customer_email = session_dict.get('customer_email')
-            metadata = session_dict.get('metadata', {})
-            user_id = metadata.get('user_id') or client_reference_id
-            plan_id = metadata.get('plan_id')
-            
-            print(f"\n📊 SUBSCRIPTION PURCHASE:")
-            print(f"   Customer: {customer_id}")
-            print(f"   Subscription: {subscription_id}")
-            print(f"   User ID: {user_id}")
-            print(f"   Plan: {plan_id}")
-            print(f"   Customer Email: {customer_email}")
-            
-            if not subscription_id:
-                print("⚠️ No subscription ID found")
-                return jsonify({'received': True})
-            
-            # Get subscription details from Stripe
-            try:
-                subscription = stripe.Subscription.retrieve(subscription_id)
-                
-                # Update user in Firestore with the new plan
-                if db:
-                    # Try to find user by ID first
-                    user_ref = None
-                    if user_id:
-                        user_ref = db.collection('users').document(user_id)
-                        user_doc = user_ref.get()
-                        
-                        if user_doc.exists:
-                            # Update existing user
-                            user_ref.update({
-                                'plan': plan_id,
-                                'subscription_id': subscription_id,
-                                'subscription_status': subscription.status,
-                                'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
-                                'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
-                                'stripe_customer_id': customer_id,
-                                'updated_at': firestore.SERVER_TIMESTAMP
-                            })
-                            print(f"✅ Updated user {user_id} to {plan_id} plan")
-                        else:
-                            print(f"⚠️ User {user_id} not found")
-                    
-                    # If not found by ID or no ID, try by email
-                    if not user_ref and customer_email:
-                        users_query = db.collection('users').where('email', '==', customer_email).limit(1).stream()
-                        users_list = list(users_query)
-                        if users_list:
-                            user_ref = db.collection('users').document(users_list[0].id)
-                            user_ref.update({
-                                'plan': plan_id,
-                                'subscription_id': subscription_id,
-                                'subscription_status': subscription.status,
-                                'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
-                                'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
-                                'stripe_customer_id': customer_id,
-                                'updated_at': firestore.SERVER_TIMESTAMP
-                            })
-                            print(f"✅ Updated user {customer_email} to {plan_id} plan")
-                        else:
-                            # Create new user
-                            new_user_data = {
-                                'email': customer_email,
-                                'plan': plan_id,
-                                'subscription_id': subscription_id,
-                                'subscription_status': subscription.status,
-                                'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
-                                'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
-                                'stripe_customer_id': customer_id,
-                                'credits': 0,
-                                'created_at': firestore.SERVER_TIMESTAMP,
-                                'updated_at': firestore.SERVER_TIMESTAMP
-                            }
-                            db.collection('users').document(user_id or customer_email).set(new_user_data)
-                            print(f"✅ Created new user with {plan_id} plan")
-                    
-                    # Store subscription record
-                    sub_ref = db.collection('subscriptions').document(subscription_id)
-                    sub_data = {
-                        'user_id': user_id or customer_email,
-                        'user_email': customer_email,
-                        'plan_id': plan_id,
-                        'stripe_subscription_id': subscription_id,
-                        'stripe_customer_id': customer_id,
-                        'status': subscription.status,
-                        'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
-                        'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
-                        'created_at': firestore.SERVER_TIMESTAMP,
-                        'updated_at': firestore.SERVER_TIMESTAMP
-                    }
-                    sub_ref.set(sub_data, merge=True)
-                    print(f"✅ Stored subscription record")
-                    
-            except Exception as e:
-                print(f"❌ Error retrieving subscription details: {e}")
-                traceback.print_exc()
-    
-    # ----- INVOICE PAYMENT SUCCEEDED -----
-    elif event['type'] == 'invoice.payment_succeeded':
-        invoice = event['data']['object']
-        
-        if hasattr(invoice, 'to_dict'):
-            invoice_dict = invoice.to_dict()
-        else:
-            invoice_dict = dict(invoice)
-        
-        subscription_id = invoice_dict.get('subscription')
-        print(f"\n💰 Invoice paid for subscription: {subscription_id}")
-        
-        if subscription_id and db:
-            # Update subscription status
-            try:
-                subscription = stripe.Subscription.retrieve(subscription_id)
-                
-                # Get customer and find user
-                customer_id = subscription.customer
-                
-                # Find user by stripe_customer_id and update subscription status
-                users_query = db.collection('users').where('stripe_customer_id', '==', customer_id).limit(1).stream()
-                users_list = list(users_query)
-                
-                if users_list:
-                    user_ref = db.collection('users').document(users_list[0].id)
-                    user_ref.update({
-                        'subscription_status': subscription.status,
-                        'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
-                        'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
-                        'updated_at': firestore.SERVER_TIMESTAMP
-                    })
-                    print(f"✅ Updated user subscription status")
-                
-                # Update subscription record
-                sub_ref = db.collection('subscriptions').document(subscription_id)
-                sub_ref.update({
-                    'status': subscription.status,
-                    'current_period_start': datetime.fromtimestamp(subscription.current_period_start),
-                    'current_period_end': datetime.fromtimestamp(subscription.current_period_end),
-                    'last_payment_date': firestore.SERVER_TIMESTAMP,
-                    'updated_at': firestore.SERVER_TIMESTAMP
-                })
-                print(f"✅ Updated subscription payment record")
-                
-            except Exception as e:
-                print(f"❌ Error processing invoice payment: {e}")
-                traceback.print_exc()
-    
-    # ----- SUBSCRIPTION UPDATED -----
-    elif event['type'] == 'customer.subscription.updated':
-        subscription = event['data']['object']
-        
-        if hasattr(subscription, 'to_dict'):
-            sub_dict = subscription.to_dict()
-        else:
-            sub_dict = dict(subscription)
-        
-        subscription_id = sub_dict.get('id')
-        status = sub_dict.get('status')
-        cancel_at_period_end = sub_dict.get('cancel_at_period_end', False)
-        current_period_start = sub_dict.get('current_period_start')
-        current_period_end = sub_dict.get('current_period_end')
-        
-        print(f"\n🔄 Subscription updated: {subscription_id}")
-        print(f"   Status: {status}")
-        print(f"   Cancel at period end: {cancel_at_period_end}")
-        
-        if subscription_id and db:
-            # Update subscription record
-            sub_ref = db.collection('subscriptions').document(subscription_id)
-            update_data = {
-                'status': status,
-                'cancel_at_period_end': cancel_at_period_end,
-                'updated_at': firestore.SERVER_TIMESTAMP
-            }
-            
-            if current_period_start:
-                update_data['current_period_start'] = datetime.fromtimestamp(current_period_start)
-            if current_period_end:
-                update_data['current_period_end'] = datetime.fromtimestamp(current_period_end)
-            
-            sub_ref.update(update_data)
-            print(f"✅ Updated subscription status")
-            
-            # Update user if needed
-            sub_doc = sub_ref.get()
-            if sub_doc.exists:
-                user_id = sub_doc.to_dict().get('user_id')
-                if user_id:
-                    user_ref = db.collection('users').document(user_id)
-                    user_ref.update({
-                        'subscription_status': status,
-                        'updated_at': firestore.SERVER_TIMESTAMP
-                    })
-                    print(f"✅ Updated user subscription status")
-    
-    # ----- SUBSCRIPTION DELETED -----
-    elif event['type'] == 'customer.subscription.deleted':
-        subscription = event['data']['object']
-        
-        if hasattr(subscription, 'to_dict'):
-            sub_dict = subscription.to_dict()
-        else:
-            sub_dict = dict(subscription)
-        
-        subscription_id = sub_dict.get('id')
-        print(f"\n❌ Subscription deleted: {subscription_id}")
-        
-        if subscription_id and db:
-            sub_ref = db.collection('subscriptions').document(subscription_id)
-            sub_ref.update({
-                'status': 'canceled',
-                'deleted_at': firestore.SERVER_TIMESTAMP,
-                'updated_at': firestore.SERVER_TIMESTAMP
-            })
-            print(f"✅ Marked subscription as canceled")
-            
-            # Check if user has another active subscription
-            users_query = db.collection('users').where('subscription_id', '==', subscription_id).limit(1).stream()
-            users_list = list(users_query)
-            if users_list:
-                user_ref = db.collection('users').document(users_list[0].id)
-                user_ref.update({
-                    'subscription_status': 'canceled',
-                    'updated_at': firestore.SERVER_TIMESTAMP
-                })
-                print(f"✅ Updated user subscription status")
-    
-    print("=" * 80)
-    return jsonify({'received': True})
-
 
 # ------------------------------------------------------------------------------
 # Players & Fantasy endpoints
@@ -10352,6 +10463,43 @@ def get_correlated_parlay(parlay_id):
 # ------------------------------------------------------------------
 # Flask route
 # ------------------------------------------------------------------
+@app.route("/api/kalshi/debug-markets", methods=["GET"])
+def debug_kalshi_markets():
+    """Debug endpoint to see raw Kalshi markets"""
+    try:
+        markets = fetch_kalshi_markets()
+        if markets is None:
+            return jsonify({
+                "success": False,
+                "error": "Failed to fetch markets",
+                "markets": []
+            }), 500
+        
+        # Show sample of markets
+        sample_markets = []
+        for market in markets[:5]:
+            sample_markets.append({
+                "ticker": market.get('ticker'),
+                "title": market.get('title'),
+                "category": market.get('category'),
+                "yes_bid_dollars": market.get('yes_bid_dollars'),
+                "no_bid_dollars": market.get('no_bid_dollars'),
+                "close_time": market.get('close_time'),
+                "status": market.get('status')
+            })
+        
+        return jsonify({
+            "success": True,
+            "total_markets": len(markets),
+            "sample_markets": sample_markets,
+            "all_categories": list(set([m.get('category', 'Unknown') for m in markets[:50]]))
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 @app.route("/api/kalshi/predictions")
 def kalshi_predictions():
     try:
@@ -10359,32 +10507,40 @@ def kalshi_predictions():
         print(f"📊 GET /api/kalshi/predictions: sport={sport}")
 
         markets = fetch_kalshi_markets(sport)
+        
         if markets is None:
             print("⚠️ Kalshi API unavailable, using mock data")
             mock_markets = generate_mock_kalshi_markets(sport)
             predictions = [transform_market(m) for m in mock_markets]
             is_mock = True
+        elif len(markets) == 0:
+            print("⚠️ Kalshi returned 0 markets, using mock data")
+            mock_markets = generate_mock_kalshi_markets(sport)
+            predictions = [transform_market(m) for m in mock_markets]
+            is_mock = True
         else:
-            predictions = []
-            sports_count = 0
-            liquidity_skipped = 0
-            for m in markets:
-                # Skip markets with zero liquidity (optional – comment out to show them)
-                yes_bid = float(m.get('yes_bid_dollars', 0.0))
-                no_bid = float(m.get('no_bid_dollars', 0.0))
-                if yes_bid == 0.0 and no_bid == 0.0:
-                    liquidity_skipped += 1
-                    continue   # remove this line to show zero‑liquidity markets
-                transformed = transform_market(m)
-                if transformed['category'] == 'Sports':
-                    sports_count += 1
-                else:
-                    predictions.append(transformed)
+            print(f"✅ Retrieved {len(markets)} raw markets from Kalshi")
+            
+            # Transform all markets first
+            all_predictions = []
+            for market in markets:
+                try:
+                    transformed = transform_market(market)
+                    all_predictions.append(transformed)
+                except Exception as e:
+                    print(f"❌ Error transforming market {market.get('ticker')}: {e}")
+                    continue
+            
+            # Filter out sports markets (category "Sports")
+            predictions = [p for p in all_predictions if p.get('category') != 'Sports']
+            
+            # Also filter out markets with very low volume or that are closed
+            predictions = [p for p in predictions if p.get('volume', '0') != '0']
+            
+            print(f"📊 After filtering: {len(predictions)} non-sports predictions")
             is_mock = False
-            print(f"🏀 Sports markets filtered: {sports_count}")
-            print(f"💧 Zero‑liquidity markets skipped: {liquidity_skipped}")
-            print(f"✅ Retrieved {len(predictions)} non‑sports predictions from Kalshi")
 
+        # Limit to 50 predictions
         predictions = predictions[:50]
 
         return jsonify({
@@ -11289,67 +11445,6 @@ def get_injuries():
         traceback.print_exc()
         return generate_mock_injuries(sport)
 
-def extract_injury_from_tank01(item, default_id, player_map=None, sport="nba"):
-    """Extract injury data with improved name matching"""
-    if player_map is None:
-        player_map = {}
-    
-    player_id = str(item.get("playerID") or default_id)
-    
-    # Try multiple methods to find the player
-    full_name = None
-    team = ""
-    
-    # Method 1: Direct ID match
-    if player_id in player_map:
-        player_info = player_map[player_id]
-        full_name = player_info.get("name")
-        team = player_info.get("team", "")
-        print(f"  ✅ Found player by ID: {full_name}")
-    
-    # Method 2: Try to find by name from description
-    if not full_name:
-        description = item.get("description", "")
-        if description:
-            import re
-    
-            # Extract potential name from description
-            date_match = re.search(r'[A-Z][a-z]{2} \d{1,2}:?\s*([A-Z][a-z]+)', description)
-            if date_match:
-                last_name = date_match.group(1).strip()
-    
-                # Search player_map for matching last name
-                for pid, pdata in player_map.items():
-                    pname = pdata.get('name', '')
-                    if pname and last_name.lower() in pname.lower():
-                        full_name = pname
-                        team = pdata.get('team', '')
-                        print(f"  ✅ Found player by name match '{last_name}': {full_name}")
-                        break
-    
-    # Method 3: Use global NAME_MAPPING
-    if not full_name:
-        description = item.get("description", "")
-        if description:
-            for last_name, full in NAME_MAPPING.items():
-                if last_name in description:
-                    full_name = full
-                    print(f"  ✅ Mapped '{last_name}' to '{full}'")
-                    break
-    
-    return {
-        "id": player_id,
-        "player": full_name or f"{sport.upper()} Player",
-        "team": team,
-        "sport": sport,
-        "status": item.get("designation", "out").lower(),
-        "injury": item.get("description", "Unknown injury"),
-        "date": datetime.now(timezone.utc).isoformat(),
-        "injDate": item.get("injDate"),
-        "source": "Tank01",
-        "confidence": 85
-    }
-
 def get_player_master_map(sport="nba"):
     """Get a comprehensive mapping of player IDs to player info"""
     try:
@@ -11492,165 +11587,6 @@ def get_nba_players_from_database():
     except Exception as e:
         print(f"⚠️ Error loading NBA players: {e}")
         return []
-
-def extract_injury_from_tank01(item, default_id, player_map=None, sport="nba"):
-    """Extract injury data with comprehensive name matching and logging"""
-    if player_map is None:
-        player_map = {}
-
-    player_id = str(item.get("playerID") or default_id)
-    description = item.get("description", "")
-    
-    print(f"\n🔍 Processing injury for player_id: {player_id}")
-    print(f"📝 Description: {description[:100]}...")
-    
-    full_name = None
-    team = ""
-    match_method = "none"
-    
-    # METHOD 1: Direct ID match (most reliable)
-    if player_id in player_map:
-        player_info = player_map[player_id]
-        full_name = player_info.get("name")
-        team = player_info.get("team", "")
-        match_method = "direct_id_match"
-        print(f"  ✅ Method 1 - Direct ID match: {full_name} ({team})")
-    
-    # METHOD 2: Try to find by name from description using player_map
-    if not full_name and description:
-        import re
-        
-        # Extract potential last name from description
-        # Pattern: "Feb 18: Wagner will be sidelined..."
-        date_match = re.search(r'[A-Z][a-z]{2} \d{1,2}:?\s*([A-Z][a-z]+)', description)
-        if date_match:
-            last_name = date_match.group(1).strip()
-            print(f"  🔍 Method 2 - Looking for last name: '{last_name}'")
-            
-            # Search player_map for matching last name
-            for pid, pdata in player_map.items():
-                pname = pdata.get('name', '')
-                if pname and last_name.lower() in pname.lower():
-                    full_name = pname
-                    team = pdata.get('team', '')
-                    match_method = "last_name_match"
-                    print(f"    ✅ Found '{pname}' matching last name '{last_name}'")
-                    break
-    
-    # METHOD 3: Hard-coded mapping for common players
-    if not full_name:
-        # Comprehensive name mapping
-        name_mapping = {
-            # NBA - from your logs
-            'Wagner': 'Franz Wagner',
-            'Clingan': 'Donovan Clingan',
-            'Simons': 'Anfernee Simons',
-            'Hart': 'Josh Hart',
-            'Herro': 'Tyler Herro',
-            'Marshall': 'Naji Marshall',
-            'Rupert': 'Rayan Rupert',
-            'Fontecchio': 'Simone Fontecchio',
-            'Champagnie': 'Julian Champagnie',
-            'Harden': 'James Harden',
-            'Leonard': 'Kawhi Leonard',
-            'Curry': 'Stephen Curry',
-            'James': 'LeBron James',
-            'Dončić': 'Luka Dončić',
-            'Jokić': 'Nikola Jokić',
-            'Durant': 'Kevin Durant',
-            'Embiid': 'Joel Embiid',
-            'Tatum': 'Jayson Tatum',
-            'Brown': 'Jaylen Brown',
-            'Morant': 'Ja Morant',
-            'Jackson': 'Jaren Jackson Jr.',
-            'Williamson': 'Zion Williamson',
-            'Ball': 'LaMelo Ball',
-            'Wembanyama': 'Victor Wembanyama',
-            'McNeeley': 'Liam McNeeley',
-            'Konchar': 'John Konchar',
-            'Post': 'Quinten Post',
-            
-            # NHL
-            'McDavid': 'Connor McDavid',
-            'Matthews': 'Auston Matthews',
-            'MacKinnon': 'Nathan MacKinnon',
-        }
-        
-        if description:
-            for last_name, full in name_mapping.items():
-                if last_name in description:
-                    full_name = full
-                    match_method = "hardcoded_mapping"
-                    print(f"  ✅ Method 3 - Hardcoded mapping: '{last_name}' -> '{full}'")
-                    break
-    
-    # METHOD 4: Extract full name from description with regex
-    if not full_name and description:
-        import re
-        # Look for "FirstName LastName" pattern after the date
-        name_pattern = r'[A-Z][a-z]{2} \d{1,2}:?\s*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+\.?)?)'
-        name_match = re.search(name_pattern, description)
-        if name_match:
-            full_name = name_match.group(1).strip()
-            match_method = "regex_extraction"
-            print(f"  ✅ Method 4 - Regex extracted: '{full_name}'")
-    
-    # METHOD 5: Try to get team name and create placeholder
-    if not full_name and description:
-        import re
-        # Look for team names like "Trail Blazers", "Magic", etc.
-        team_pattern = r'([A-Z][a-z]+ [A-Z][a-z]+)'
-        team_match = re.search(team_pattern, description)
-        if team_match:
-            team_name = team_match.group(1)
-            full_name = f"{team_name} Player"
-            match_method = "team_placeholder"
-            print(f"  ⚠️ Method 5 - Using team placeholder: '{full_name}'")
-    
-    # Final fallback
-    if not full_name:
-        full_name = f"{sport.upper()} Player"
-        match_method = "fallback"
-        print(f"  ⚠️ Method 6 - Using sport fallback: '{full_name}'")
-    
-    status = item.get("designation", "Out").lower()
-    injury_desc = item.get("description", "Unknown injury")
-    
-    # Determine confidence based on match method and status
-    base_confidence = 90 if match_method in ["direct_id_match", "last_name_match"] else 75
-    
-    if status in ["out", "doubtful"]:
-        confidence = min(95, base_confidence + 5)
-    elif status in ["questionable", "day-to-day"]:
-        confidence = base_confidence
-    else:
-        confidence = base_confidence - 10
-    
-    # Try to extract expected return date
-    expected_return = "TBD"
-    if "return" in injury_desc.lower():
-        import re
-        date_match = re.search(r'return (?:in|within|by)?\s*(\d+-\d+-\d+|\w+ \d{1,2})', injury_desc, re.IGNORECASE)
-        if date_match:
-            expected_return = date_match.group(1)
-    
-    print(f"  📊 Final: '{full_name}' | Team: '{team}' | Status: {status} | Method: {match_method}")
-    
-    return {
-        "id": player_id,
-        "player": full_name,
-        "team": team,
-        "sport": sport,
-        "status": status,
-        "injury": injury_desc,
-        "date": datetime.now(timezone.utc).isoformat(),
-        "publishedAt": datetime.now(timezone.utc).isoformat(),
-        "injDate": item.get("injDate"),
-        "source": "Tank01",
-        "confidence": confidence,
-        "expected_return": expected_return,
-        "_match_method": match_method  # For debugging
-    }
 
 def generate_mock_injuries(sport):
     """Generate enhanced mock injury data for a specific sport"""
@@ -12667,56 +12603,87 @@ user_gen_store = {}  # fallback in‑memory store if Redis unavailable
 class DecrementRequest(BaseModel):
     user_id: str
 
-
 class PurchaseRequest(BaseModel):
     user_id: str
     quantity: int
-
 
 @app.route("/api/user/generations/<user_id>", methods=["GET", "OPTIONS"])
 @cross_origin(origins="*", supports_credentials=True)
 def get_generations(user_id):
     """Return remaining generations for a user (resets daily)."""
     try:
+        # Admin check
+        if user_has_unlimited_credits(user_id):
+            return jsonify({"remaining": 999999})
+
         key = f"user:gen:{user_id}"
-        # Try Redis first
+        
         if "redis_client" in globals() and redis_client:
-            data = redis_client.hgetall(key)
-            if not data:
-                # First time user
-                remaining = DAILY_LIMIT
-                last_reset = datetime.utcnow().isoformat()
-                redis_client.hset(
-                    key, mapping={"remaining": remaining, "last_reset": last_reset}
-                )
-                redis_client.expire(key, 86400)
-                return jsonify({"remaining": remaining})
-            else:
-                # Check if 24h passed
-                last_reset = datetime.fromisoformat(data.get("last_reset", ""))
-                if datetime.utcnow() - last_reset > timedelta(hours=24):
-                    remaining = DAILY_LIMIT
-                    redis_client.hset(key, "remaining", remaining)
-                    redis_client.hset(key, "last_reset", datetime.utcnow().isoformat())
+            # Get or initialize user data
+            remaining = DAILY_LIMIT
+            last_reset = datetime.utcnow()
+            
+            # Try to get existing data
+            try:
+                remaining_raw = redis_client.hget(key, "remaining")
+                last_reset_raw = redis_client.hget(key, "last_reset")
+                
+                if remaining_raw is not None:
+                    if isinstance(remaining_raw, bytes):
+                        remaining_raw = remaining_raw.decode('utf-8')
+                    remaining = int(remaining_raw)
+                
+                if last_reset_raw is not None:
+                    if isinstance(last_reset_raw, bytes):
+                        last_reset_raw = last_reset_raw.decode('utf-8')
+                    if last_reset_raw:
+                        try:
+                            last_reset = datetime.fromisoformat(last_reset_raw)
+                        except:
+                            last_reset = datetime.utcnow()
+                    else:
+                        last_reset = datetime.utcnow()
                 else:
-                    remaining = int(data.get("remaining", DAILY_LIMIT))
-                return jsonify({"remaining": remaining})
+                    last_reset = datetime.utcnow()
+                    
+            except Exception as e:
+                print(f"Error reading Redis: {e}")
+                # If any error, initialize fresh
+                remaining = DAILY_LIMIT
+                last_reset = datetime.utcnow()
+            
+            # Check if reset is needed
+            if datetime.utcnow() - last_reset > timedelta(hours=24):
+                remaining = DAILY_LIMIT
+                last_reset = datetime.utcnow()
+            
+            # Save back to Redis
+            redis_client.hset(key, "remaining", remaining)
+            redis_client.hset(key, "last_reset", last_reset.isoformat())
+            redis_client.expire(key, 86400)
+            
+            return jsonify({"remaining": remaining})
         else:
-            # Fallback to in‑memory dict
+            # In-memory fallback
             if user_id not in user_gen_store:
                 user_gen_store[user_id] = {
                     "remaining": DAILY_LIMIT,
                     "last_reset": datetime.utcnow().isoformat(),
                 }
+            
             data = user_gen_store[user_id]
             last_reset = datetime.fromisoformat(data["last_reset"])
+            
             if datetime.utcnow() - last_reset > timedelta(hours=24):
                 data["remaining"] = DAILY_LIMIT
                 data["last_reset"] = datetime.utcnow().isoformat()
+            
             return jsonify({"remaining": data["remaining"]})
+            
     except Exception as e:
+        print(f"Error in get_generations: {e}")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/user/generations/decrement", methods=["POST", "OPTIONS"])
 @cross_origin(origins="*", supports_credentials=True)
@@ -12725,52 +12692,57 @@ def decrement_generations():
     try:
         req = DecrementRequest(**flask_request.json)
         user_id = req.user_id
+        
+        # Admin bypass
+        if user_has_unlimited_credits(user_id):
+            return jsonify({"remaining": 999999})
+        
         key = f"user:gen:{user_id}"
-
+        
         if "redis_client" in globals() and redis_client:
-            # Atomic decrement with WATCH
-            pipe = redis_client.pipeline()
-            while True:
-                try:
-                    pipe.watch(key)
-                    data = pipe.hgetall(key)
-                    if not data:
-                        remaining = DAILY_LIMIT
-                        last_reset = datetime.utcnow().isoformat()
-                    else:
-                        remaining = int(data.get("remaining", DAILY_LIMIT))
-                        last_reset = data.get(
-                            "last_reset", datetime.utcnow().isoformat()
-                        )
-
-                    if remaining <= 0:
-                        pipe.unwatch()
-                        return jsonify({"error": "No generations left"}), 400
-
-                    pipe.multi()
-                    pipe.hset(key, "remaining", remaining - 1)
-                    pipe.hset(key, "last_reset", last_reset)
-                    pipe.expire(key, 86400)
-                    pipe.execute()
-                    new_remaining = remaining - 1
-                    break
-                except redis.WatchError:
-                    continue
-            return jsonify({"remaining": new_remaining})
+            # Simple decrement without complex pipeline
+            try:
+                # Check if key exists
+                if not redis_client.exists(key):
+                    # Initialize user
+                    remaining = DAILY_LIMIT
+                    last_reset = datetime.utcnow().isoformat()
+                    redis_client.hset(key, mapping={"remaining": remaining, "last_reset": last_reset})
+                    redis_client.expire(key, 86400)
+                
+                # Get current remaining
+                remaining = int(redis_client.hget(key, "remaining") or DAILY_LIMIT)
+                
+                if remaining <= 0:
+                    return jsonify({"error": "No generations left"}), 400
+                
+                # Decrement
+                new_remaining = remaining - 1
+                redis_client.hset(key, "remaining", new_remaining)
+                
+                return jsonify({"remaining": new_remaining})
+                
+            except Exception as e:
+                print(f"Redis error in decrement: {e}")
+                return jsonify({"error": str(e)}), 500
         else:
-            # In‑memory fallback
+            # In-memory fallback
             if user_id not in user_gen_store:
                 user_gen_store[user_id] = {
                     "remaining": DAILY_LIMIT,
                     "last_reset": datetime.utcnow().isoformat(),
                 }
+            
             if user_gen_store[user_id]["remaining"] <= 0:
                 return jsonify({"error": "No generations left"}), 400
+            
             user_gen_store[user_id]["remaining"] -= 1
             return jsonify({"remaining": user_gen_store[user_id]["remaining"]})
+            
     except Exception as e:
+        print(f"Error in decrement_generations: {e}")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/user/generations/purchase", methods=["POST", "OPTIONS"])
 @cross_origin(origins="*", supports_credentials=True)
@@ -13697,6 +13669,57 @@ def generate_mock_prediction_outcomes(sport="nba"):
 
     return outcomes
 
+@app.route("/api/user/generations/sync", methods=["POST", "OPTIONS"])
+@cross_origin(origins="*", supports_credentials=True)
+def sync_generations():
+    """Sync profile credits to generations system."""
+    try:
+        req = flask_request.json
+        user_id = req.get('user_id')
+        
+        if not user_id:
+            return jsonify({"error": "user_id required"}), 400
+        
+        # Get profile credits first
+        from models import User
+        user = User.query.filter_by(firebase_uid=user_id).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        profile_credits = user.credits if user.credits else 0
+        
+        key = f"user:gen:{user_id}"
+        
+        if "redis_client" in globals() and redis_client:
+            # Check if generations already exist
+            existing = redis_client.hgetall(key)
+            if existing:
+                # Add profile credits to existing
+                current = int(existing.get(b"remaining", 0))
+                new_total = current + profile_credits
+                redis_client.hset(key, "remaining", new_total)
+            else:
+                # Set initial generations to profile credits
+                redis_client.hset(key, mapping={"remaining": profile_credits, "last_reset": datetime.utcnow().isoformat()})
+                redis_client.expire(key, 86400)
+            
+            return jsonify({"remaining": profile_credits, "synced": True})
+        else:
+            # In-memory fallback
+            if user_id not in user_gen_store:
+                user_gen_store[user_id] = {
+                    "remaining": profile_credits,
+                    "last_reset": datetime.utcnow().isoformat(),
+                }
+            else:
+                user_gen_store[user_id]["remaining"] += profile_credits
+            
+            return jsonify({"remaining": user_gen_store[user_id]["remaining"], "synced": True})
+        
+    except Exception as e:
+        print(f"Error syncing generations: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 # ========== ADVANCED SCRAPER WITH PLAYWRIGHT ==========
 async def scrape_with_playwright(url, selector, extract_script):
@@ -14675,7 +14698,6 @@ def get_nba_alternate_lines():
         print(f"❌ Error in /api/odds/basketball_nba: {e}")
         return jsonify([])
 
-
 # ------------------------------------------------------------------------------
 # PrizePicks / selections
 # ------------------------------------------------------------------------------
@@ -14683,16 +14705,16 @@ def get_nba_alternate_lines():
 def prizepicks_selections():
     sport = flask_request.args.get("sport", "nba").lower()
     limit = int(flask_request.args.get("limit", 100))
-    
+
     # Check for cache-busting and randomness parameters
     force_refresh = should_skip_cache(flask_request.args)
     timestamp = flask_request.args.get("_t")
     seed = flask_request.args.get("seed")
-    
+
     cache_key = f"prizepicks:{sport}"
-    
+
     print(f"[PRIZEPICKS] Request for {sport} - force_refresh={force_refresh}, timestamp={timestamp}")
-    
+
     # Check cache if not forcing refresh
     if not force_refresh:
         cached = route_cache_get(cache_key)
@@ -14720,7 +14742,42 @@ def prizepicks_selections():
             "force": force_refresh,
             "_t": timestamp or str(int(time.time()))
         })
-        
+
+        # Filter out unrealistically low NBA points lines (alternate lines)
+        if sport == "nba" and result and result.get("selections"):
+            original_count = len(result["selections"])
+            filtered = []
+            for sel in result["selections"]:
+                stat = sel.get("stat", "").lower()
+                line = sel.get("line", 0)
+                # Keep only points props with line >= 8.5, and rebounds/assists with reasonable minimums
+                if stat == "points" and line < 8.5:
+                    print(f"   🚫 Python filter: skipping {sel['player']} {stat} line {line}")
+                    continue
+                if stat == "rebounds" and line < 3.5:
+                    continue
+                if stat == "assists" and line < 2.5:
+                    continue
+                filtered.append(sel)
+            result["selections"] = filtered
+            print(f"   📊 Python filter: kept {len(filtered)} of {original_count} NBA props")
+
+        # Fix MLB projections that are N/A
+        if sport == "mlb" and result and result.get("selections"):
+            for sel in result["selections"]:
+                if sel.get("projection") is None or sel.get("projection") == "N/A":
+                    # Assign a reasonable projection based on stat
+                    stat = sel.get("stat", "").lower()
+                    if stat == "hits":
+                        sel["projection"] = round(sel["line"] * random.uniform(0.8, 1.2), 1)
+                    elif stat == "home runs":
+                        sel["projection"] = round(sel["line"] * random.uniform(0.7, 1.5), 1)
+                    else:
+                        sel["projection"] = round(sel["line"] * random.uniform(0.9, 1.1), 1)
+                    sel["edge"] = round(((sel["projection"] - sel["line"]) / sel["line"]) * 100, 1)
+                    sel["type"] = "Over" if sel["projection"] > sel["line"] else "Under"
+
+        # If we have selections from the microservice, enhance and return
         if result and result.get("selections"):
             # Add significant variety and randomness
             result["selections"] = enhance_selections_with_variety(
@@ -14731,7 +14788,7 @@ def prizepicks_selections():
             result["timestamp"] = datetime.now(timezone.utc).isoformat()
             result["force_refreshed"] = force_refresh
             result["randomized"] = True
-            
+
             # Cache if not force refresh
             if not force_refresh:
                 route_cache_set(cache_key, result, ttl=120)
@@ -14745,7 +14802,7 @@ def prizepicks_selections():
                 seed=seed or timestamp or int(time.time()),
                 force_variety=True
             )
-            
+
             response_data = {
                 "success": True,
                 "selections": selections,
@@ -14755,11 +14812,11 @@ def prizepicks_selections():
                 "force_refreshed": force_refresh,
                 "randomized": True
             }
-            
+
             if not force_refresh:
                 route_cache_set(cache_key, response_data, ttl=120)
             return jsonify(response_data)
-            
+
     except Exception as e:
         print(f"❌ PrizePicks proxy error: {e}")
         selections = generate_sport_props(sport, limit)
@@ -14768,7 +14825,7 @@ def prizepicks_selections():
             seed=seed or timestamp or int(time.time()),
             force_variety=True
         )
-        
+
         response_data = {
             "success": True,
             "selections": selections,
@@ -14778,7 +14835,7 @@ def prizepicks_selections():
             "force_refreshed": force_refresh,
             "randomized": True
         }
-        
+
         if not force_refresh:
             route_cache_set(cache_key, response_data, ttl=60)
         return jsonify(response_data)
