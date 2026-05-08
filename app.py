@@ -13,7 +13,7 @@ import os
 import time
 import hashlib
 import traceback
-import uuid   
+import uuid
 import random
 import hmac
 import subprocess
@@ -22,6 +22,7 @@ import asyncio
 import aiohttp
 import re
 import concurrent.futures
+import copy
 import tweepy
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -40,7 +41,7 @@ import stripe  # Add this
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
-     
+
 from nba_static_data import NBA_PLAYERS_2026
 from data_pipeline import UnifiedNBADataPipeline
 
@@ -78,17 +79,17 @@ from balldontlie_fetchers import (
     # Cache functions
     get_cached,
     set_cache,
-    
+
     # Core API function
     make_request,
-    
+
     # Game odds and scores
     fetch_game_odds,
     fetch_game_odds_by_id,
     fetch_game_scores,
     merge_scores_with_odds,
     convert_scores_to_games,
-    
+
     # Game status helpers
     get_default_period,
     get_default_time_remaining,
@@ -98,7 +99,7 @@ from balldontlie_fetchers import (
     get_time_remaining_from_time_diff,
     get_game_duration_hours,
     determine_game_status_from_time,
-    
+
     # Player data functions
     fetch_multiple_player_recent_stats,
     fetch_active_players,
@@ -108,12 +109,12 @@ from balldontlie_fetchers import (
     fetch_player_recent_stats,
     fetch_player_info,
     fetch_todays_games,
-    
+
     # Props and projections
     fetch_balldontlie_props,
     fetch_player_props,
     fetch_player_projections,
-    
+
     # Main export
     fetch_nba_from_balldontlie,
 )
@@ -126,14 +127,14 @@ from services.promo_service import (
 )
 
 ALLOWED_ORIGINS = ['https://sportsanalyticsgpt.com', 'http://localhost:5173']
-    
+
 # Import models
 from models.subscription import Subscription
 from models.generator_pick import GeneratorPick
-   
+
 # Remove these duplicate imports (they're already in the utils import above)
 # from utils import login_required, admin_required, generate_token, verify_token
-        
+
 # =============================================
 # FIREBASE ADMIN INITIALIZATION (SECURE)
 # =============================================
@@ -176,7 +177,7 @@ print(f"Key length: {len(key)}")
 def add_generator_credits_to_redis(user_id, quantity):
     """Add purchased generator credits to Redis counter."""
     key = f"user:gen:{user_id}"
-    
+
     if "redis_client" in globals() and redis_client:
         try:
             # Get current remaining, default to DAILY_LIMIT
@@ -187,15 +188,15 @@ def add_generator_credits_to_redis(user_id, quantity):
                 if isinstance(remaining_raw, bytes):
                     remaining_raw = remaining_raw.decode('utf-8')
                 remaining = int(remaining_raw)
-            
+
             # Add credits
             new_remaining = remaining + quantity
-            
+
             # Save with fresh last_reset
             redis_client.hset(key, "remaining", new_remaining)
             redis_client.hset(key, "last_reset", datetime.utcnow().isoformat())
             redis_client.expire(key, 86400)
-            
+
             print(f"✅ Added {quantity} credits to {user_id}. New total: {new_remaining}")
             return True
         except Exception as e:
@@ -214,16 +215,6 @@ def add_generator_credits_to_redis(user_id, quantity):
 # ==============================================
 # Kalshi API integration – Final Version
 # ==============================================
-
-import os
-import requests
-import base64
-import traceback
-import urllib.parse
-from datetime import datetime, timezone, timedelta
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.backends import default_backend
 
 # ------------------------------------------------------------------
 # Kalshi authentication helpers
@@ -299,37 +290,37 @@ def transform_market(market: dict) -> dict:
         ticker = market.get('ticker', '')
         title = market.get('title', market.get('subtitle', 'No title'))
         event_ticker = market.get('event_ticker', '')
-        
+
         # Get prices with proper fallbacks
         yes_bid = float(market.get('yes_bid_dollars', market.get('yes_bid', 0.5)))
         no_bid = float(market.get('no_bid_dollars', market.get('no_bid', 0.5)))
-        
+
         # Handle zero prices
         if yes_bid == 0.0:
             yes_bid = 0.5
         if no_bid == 0.0:
             no_bid = 0.5
-        
+
         # Get volume
         volume = market.get('volume_24h_fp', market.get('volume', '0'))
         if volume == '0' or volume == 0:
             volume = market.get('volume_usd', '0')
-        
+
         # Get close time
         close_time = market.get('close_time', '')
         if close_time:
             close_time = close_time.split('T')[0] if 'T' in close_time else close_time
-        
+
         # Get category (try multiple fields)
         category = market.get('category', market.get('event_category', 'General'))
-        
+
         # Calculate edge (market sentiment based on distance from 0.5)
         edge = ((yes_bid - 0.5) / 0.5) * 100
         edge_display = f"{'+' if edge > 0 else ''}{edge:.1f}%"
-        
+
         # Calculate confidence
         confidence = min(95, max(55, int(yes_bid * 100)))
-        
+
         # Determine trend
         if yes_bid > 0.55:
             trend = 'up'
@@ -337,7 +328,7 @@ def transform_market(market: dict) -> dict:
             trend = 'down'
         else:
             trend = 'neutral'
-        
+
         return {
             "id": ticker,
             "question": title,
@@ -456,43 +447,54 @@ def transform_market(market: dict) -> dict:
     if any(keyword in title_lower for keyword in sports_keywords):
         category = "Sports"
 
-    # Regex: catch any "yes Name" pattern (player or team)
-    if category is None:
-        if re.search(r'yes\s+\w+(\s+\w+)?', title_lower):
-            category = "Sports"
-
-    if category is None:
-        # Non-sports categories
-        if any(word in title_lower for word in ['politics', 'election', 'president', 'democratic', 'republican', 'congress', 'senate']):
-            category = "Politics"
-        elif any(word in title_lower for word in ['econom', 'fed', 'sp500', 'inflation', 'interest rate', 'recession', 'gdp']):
-            category = "Economics"
-        elif any(word in title_lower for word in ['movie', 'oscar', 'grammy', 'entertainment', 'emmy', 'box office']):
-            category = "Entertainment"
-        elif any(word in title_lower for word in ['apple', 'tesla', 'ai', 'technology', 'iphone', 'self-driving']):
-            category = "Technology"
-        elif any(word in title_lower for word in ['health', 'covid', 'fda', 'alzheimer', 'vaccine', 'pandemic']):
-            category = "Health"
-        elif any(word in title_lower for word in ['weather', 'snow', 'hurricane', 'storm', 'temperature']):
-            category = "Weather"
-        else:
-            category = "General"
-
-    return {
-        'id': ticker,
-        'question': title,
-        'category': category,
-        'yesPrice': f"{yes_bid:.2f}",
-        'noPrice': f"{no_bid:.2f}",
-        'volume': f"${float(volume)/1e6:.1f}M" if volume and volume != '0' else "N/A",
-        'analysis': f"Market: {title}",
-        'expires': close_time,
-        'confidence': 50,
-        'edge': f"{sentiment_edge:+.1f}%",
-        'platform': 'kalshi',
-        'marketType': market.get('market_type', 'binary'),
-        'trend': 'neutral',
-    }
+# Regex: catch any "yes Name" pattern (player or team)
+if category is None:
+    if re.search(r'yes\s+\w+(\s+\w+)?', title_lower):
+        category = "Sports"
+    
+if category is None: 
+    # Non-sports categories
+    if any(word in title_lower for word in ['politics', 'election', 'president', 'democratic', 'republican', 'congress', 'senate']):
+        category = "Politics"
+    elif any(word in title_lower for word in ['econom', 'fed', 'sp500', 'inflation', 'interest rate', 'recession', 'gdp']):
+        category = "Economics"
+    elif any(word in title_lower for word in ['movie', 'oscar', 'grammy', 'entertainment', 'emmy', 'box office']):
+        category = "Entertainment"
+    elif any(word in title_lower for word in ['apple', 'tesla', 'ai', 'technology', 'iphone', 'self-driving']):
+        category = "Technology"
+    elif any(word in title_lower for word in ['health', 'covid', 'fda', 'alzheimer', 'vaccine', 'pandemic']):
+        category = "Health"
+    elif any(word in title_lower for word in ['weather', 'snow', 'hurricane', 'storm', 'temperature']):
+        category = "Weather"
+    else:
+        category = "General"
+        
+# Calculate sentiment edge (example logic - adjust as needed)
+# Edge = difference between market price and your model's probability
+sentiment_edge = 0.0
+if yes_bid and no_bid:
+    # Calculate implied probability from prices
+    total = float(yes_bid) + float(no_bid)
+    if total > 0:
+        implied_prob = float(yes_bid) / total * 100
+        # Compare to baseline (e.g., 50% for binary markets)
+        sentiment_edge = implied_prob - 50
+    
+return {
+    'id': ticker,
+    'question': title,  
+    'category': category,
+    'yesPrice': f"{yes_bid:.2f}",
+    'noPrice': f"{no_bid:.2f}",
+    'volume': f"${float(volume)/1e6:.1f}M" if volume and volume != '0' else "N/A",
+    'analysis': f"Market: {title}",
+    'expires': close_time,
+    'confidence': 50,
+    'edge': f"{sentiment_edge:+.1f}%",
+    'platform': 'kalshi',
+    'marketType': market.get('market_type', 'binary'),
+    'trend': 'neutral',
+}
 
 # Mock generator (replace with your frontend's mock if desired)
 def generate_mock_kalshi_markets(sport: str = "all"):
@@ -726,7 +728,7 @@ NAME_MAPPING = {
     'Mamu': 'Sandro Mamukelashvili',
     'Bassey': 'Charles Bassey',
     'Youngblood': 'Moses Youngblood',
-    
+
     # NHL
     'McDavid': 'Connor McDavid',
     'Draisaitl': 'Leon Draisaitl',
@@ -748,7 +750,7 @@ NAME_MAPPING = {
     'Pastrnak': 'David Pastrnak',
     'Marchand': 'Brad Marchand',
     'McAvoy': 'Charlie McAvoy',
-    
+
     # MLB
     'Judge': 'Aaron Judge',
     'Soto': 'Juan Soto',
@@ -840,131 +842,131 @@ def get_fallback_nba_injuries():
     {"player": "Jalen Johnson", "team": "ATL", "status": "Out", "injury": "Shoulder injury - season ending", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()},
     {"player": "Larry Nance Jr.", "team": "ATL", "status": "Out", "injury": "Knee surgery", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()},
     {"player": "Kobe Bufkin", "team": "ATL", "status": "Out", "injury": "Shoulder surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()},
-    
+
     # Boston Celtics
     {"player": "Kristaps Porzingis", "team": "BOS", "status": "Day-to-day", "injury": "Illness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()},
     {"player": "Al Horford", "team": "BOS", "status": "Day-to-day", "injury": "Rest", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()},
-    
+
     # Brooklyn Nets
     {"player": "Cam Thomas", "team": "BKN", "status": "Out", "injury": "Hamstring strain", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()},
     {"player": "Bojan Bogdanović", "team": "BKN", "status": "Out", "injury": "Foot surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()},
     {"player": "Trendon Watford", "team": "BKN", "status": "Out", "injury": "Hamstring", "expected_return": "1-2 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()},
     {"player": "De'Anthony Melton", "team": "BKN", "status": "Out", "injury": "Knee injury", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()},
-    
+
     # Charlotte Hornets
     {"player": "LaMelo Ball", "team": "CHA", "status": "Out", "injury": "Ankle injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()},
     {"player": "Miles Bridges", "team": "CHA", "status": "Questionable", "injury": "Knee soreness", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()},
     {"player": "Mark Williams", "team": "CHA", "status": "Out", "injury": "Foot injury", "expected_return": "1-2 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()},
     {"player": "Brandon Miller", "team": "CHA", "status": "Out", "injury": "Wrist surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=12)).isoformat()},
     {"player": "Grant Williams", "team": "CHA", "status": "Out", "injury": "ACL tear", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()},
-    
+
     # Chicago Bulls
     {"player": "Lonzo Ball", "team": "CHI", "status": "Out", "injury": "Knee recovery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()},
     {"player": "Patrick Williams", "team": "CHI", "status": "Out", "injury": "Foot injury", "expected_return": "3-4 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()},
     {"player": "Ayo Dosunmu", "team": "CHI", "status": "Questionable", "injury": "Shoulder", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=18)).isoformat()},
-    
+
     # Cleveland Cavaliers
     {"player": "Evan Mobley", "team": "CLE", "status": "Day-to-day", "injury": "Ankle sprain", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat()},
     {"player": "Caris LeVert", "team": "CLE", "status": "Questionable", "injury": "Wrist", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()},
-    
+
     # Dallas Mavericks
     {"player": "Kyrie Irving", "team": "DAL", "status": "Out", "injury": "Knee surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()},
     {"player": "Anthony Davis", "team": "DAL", "status": "Out", "injury": "Groin strain", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()},
     {"player": "Daniel Gafford", "team": "DAL", "status": "Out", "injury": "Knee injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()},
     {"player": "Dereck Lively II", "team": "DAL", "status": "Out", "injury": "Ankle fracture", "expected_return": "4-6 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()},
-    
+
     # Denver Nuggets
     {"player": "Jamal Murray", "team": "DEN", "status": "Day-to-day", "injury": "Knee inflammation", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()},
     {"player": "Aaron Gordon", "team": "DEN", "status": "Day-to-day", "injury": "Calf strain", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()},
     {"player": "DaRon Holmes II", "team": "DEN", "status": "Out", "injury": "Achilles surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()},
-    
+
     # Detroit Pistons
     {"player": "Simone Fontecchio", "team": "DET", "status": "Questionable", "injury": "Back injury", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()},
     {"player": "Jaden Ivey", "team": "DET", "status": "Out", "injury": "Leg fracture", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=25)).isoformat()},
     {"player": "Ausar Thompson", "team": "DET", "status": "Out", "injury": "Blood clot", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()},
-    
+
     # Golden State Warriors
     {"player": "Draymond Green", "team": "GSW", "status": "Day-to-day", "injury": "Calf tightness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat()},
     {"player": "Jonathan Kuminga", "team": "GSW", "status": "Out", "injury": "Ankle sprain", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()},
     {"player": "Gary Payton II", "team": "GSW", "status": "Questionable", "injury": "Calf", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()},
-    
+
     # Houston Rockets
     {"player": "Jabari Smith Jr.", "team": "HOU", "status": "Out", "injury": "Hand fracture", "expected_return": "3-4 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=9)).isoformat()},
     {"player": "Tari Eason", "team": "HOU", "status": "Out", "injury": "Leg injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=11)).isoformat()},
-    
+
     # Indiana Pacers
     {"player": "Myles Turner", "team": "IND", "status": "Day-to-day", "injury": "Ankle", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()},
     {"player": "Bennedict Mathurin", "team": "IND", "status": "Out", "injury": "Shoulder surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=35)).isoformat()},
-    
+
     # LA Clippers
     {"player": "Kawhi Leonard", "team": "LAC", "status": "Day-to-day", "injury": "Knee management", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()},
     {"player": "Norman Powell", "team": "LAC", "status": "Questionable", "injury": "Knee soreness", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=16)).isoformat()},
-    
+
     # Los Angeles Lakers
     {"player": "LeBron James", "team": "LAL", "status": "Day-to-day", "injury": "Ankle soreness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()},
     {"player": "Jaxson Hayes", "team": "LAL", "status": "Day-to-day", "injury": "Knee", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()},
     {"player": "Jarred Vanderbilt", "team": "LAL", "status": "Out", "injury": "Foot surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=50)).isoformat()},
     {"player": "Christian Wood", "team": "LAL", "status": "Out", "injury": "Knee surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=42)).isoformat()},
-    
+
     # Memphis Grizzlies
     {"player": "Ja Morant", "team": "MEM", "status": "Out", "injury": "Shoulder injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()},
     {"player": "Marcus Smart", "team": "MEM", "status": "Out", "injury": "Finger injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()},
     {"player": "GG Jackson", "team": "MEM", "status": "Out", "injury": "Foot surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=55)).isoformat()},
-    
+
     # Miami Heat
     {"player": "Jimmy Butler", "team": "MIA", "status": "Day-to-day", "injury": "Ankle sprain", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()},
     {"player": "Tyler Herro", "team": "MIA", "status": "Day-to-day", "injury": "Knee soreness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()},
-    
+
     # Milwaukee Bucks
     {"player": "Giannis Antetokounmpo", "team": "MIL", "status": "Day-to-day", "injury": "Knee soreness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()},
     {"player": "Khris Middleton", "team": "MIL", "status": "Out", "injury": "Ankle surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=28)).isoformat()},
-    
+
     # Minnesota Timberwolves
     {"player": "Mike Conley", "team": "MIN", "status": "Questionable", "injury": "Hamstring", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=15)).isoformat()},
     {"player": "Donte DiVincenzo", "team": "MIN", "status": "Out", "injury": "Toe injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()},
-    
+
     # New Orleans Pelicans
     {"player": "Zion Williamson", "team": "NOP", "status": "Day-to-day", "injury": "Hamstring tightness", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()},
     {"player": "Brandon Ingram", "team": "NOP", "status": "Out", "injury": "Ankle sprain", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=12)).isoformat()},
     {"player": "Dejounte Murray", "team": "NOP", "status": "Out", "injury": "Achilles injury", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=18)).isoformat()},
     {"player": "Herb Jones", "team": "NOP", "status": "Out", "injury": "Shoulder surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=32)).isoformat()},
-    
+
     # New York Knicks
     {"player": "Josh Hart", "team": "NYK", "status": "Probable", "injury": "Knee soreness", "expected_return": "expected to play", "date": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()},
     {"player": "Mitchell Robinson", "team": "NYK", "status": "Out", "injury": "Ankle surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=65)).isoformat()},
-    
+
     # Oklahoma City Thunder
     {"player": "Chet Holmgren", "team": "OKC", "status": "Out", "injury": "Hip fracture", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=70)).isoformat()},
     {"player": "Alex Caruso", "team": "OKC", "status": "Day-to-day", "injury": "Ankle", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat()},
     {"player": "Isaiah Hartenstein", "team": "OKC", "status": "Out", "injury": "Calf strain", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=9)).isoformat()},
-    
+
     # Orlando Magic
     {"player": "Franz Wagner", "team": "ORL", "status": "Out", "injury": "Ankle injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()},
     {"player": "Gary Harris", "team": "ORL", "status": "Out", "injury": "Hamstring", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()},
-    
+
     # Philadelphia 76ers
     {"player": "Joel Embiid", "team": "PHI", "status": "Out", "injury": "Knee injury management", "expected_return": "TBD", "date": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()},
     {"player": "Paul George", "team": "PHI", "status": "Out", "injury": "Finger injury", "expected_return": "1-2 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()},
     {"player": "Jared McCain", "team": "PHI", "status": "Out", "injury": "Meniscus tear", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=22)).isoformat()},
-    
+
     # Portland Trail Blazers
     {"player": "Anfernee Simons", "team": "POR", "status": "Questionable", "injury": "Ankle soreness", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()},
     {"player": "Robert Williams III", "team": "POR", "status": "Out", "injury": "Knee injury", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()},
-    
+
     # Sacramento Kings
     {"player": "Malik Monk", "team": "SAC", "status": "Day-to-day", "injury": "Ankle", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=14)).isoformat()},
-    
+
     # San Antonio Spurs
     {"player": "Victor Wembanyama", "team": "SAS", "status": "Out", "injury": "Shoulder surgery", "expected_return": "season", "date": (datetime.now(timezone.utc) - timedelta(days=25)).isoformat()},
     {"player": "Keldon Johnson", "team": "SAS", "status": "Day-to-day", "injury": "Shoulder", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=28)).isoformat()},
-    
+
     # Toronto Raptors
     {"player": "Immanuel Quickley", "team": "TOR", "status": "Questionable", "injury": "Groin", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()},
-    
+
     # Utah Jazz
     {"player": "Collin Sexton", "team": "UTA", "status": "Day-to-day", "injury": "Ankle", "expected_return": "day-to-day", "date": (datetime.now(timezone.utc) - timedelta(hours=16)).isoformat()},
     {"player": "Jordan Clarkson", "team": "UTA", "status": "Questionable", "injury": "Foot", "expected_return": "game-time decision", "date": (datetime.now(timezone.utc) - timedelta(hours=22)).isoformat()},
-    
+
     # Washington Wizards
     {"player": "Bilal Coulibaly", "team": "WAS", "status": "Out", "injury": "Wrist injury", "expected_return": "2-3 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()},
     {"player": "Marvin Bagley III", "team": "WAS", "status": "Out", "injury": "Knee", "expected_return": "3-4 weeks", "date": (datetime.now(timezone.utc) - timedelta(days=9)).isoformat()},
@@ -1003,9 +1005,9 @@ def get_injuries_with_fallback(sport):
                 "X-RapidAPI-Key": "YOUR_RAPIDAPI_KEY",  # Replace with your key
                 "X-RapidAPI-Host": "tank01-fantasy-stats.p.rapidapi.com"
             }
-            
+
             response = requests.get(url, headers=headers, timeout=10)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 if data.get("body") and len(data["body"]) > 0:
@@ -1025,7 +1027,7 @@ def get_injuries_with_fallback(sport):
                         return injuries
     except Exception as e:
         print(f"⚠️ Tank01 API error: {e}")
-    
+
     # Fallback to static data
     print(f"📋 Using fallback injury data for {sport}")
     if sport == "nba":
@@ -1066,7 +1068,7 @@ class Subscription:
         self.last_payment_date = None
         self.promo_code = None
         self.promoter_commission_rate = None
-        
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -1088,10 +1090,10 @@ def init_firebase():
         if firebase_admin._apps:
             print("✅ Firebase already initialized")
             return firebase_admin.get_app()
-        
+
         # Check for service account file path
         service_account_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH')
-        
+
         if service_account_path and os.path.exists(service_account_path):
             print(f"📁 Loading Firebase service account from: {service_account_path}")
             cred = credentials.Certificate(service_account_path)
@@ -1102,7 +1104,7 @@ def init_firebase():
             print(f"⚠️ Firebase service account not found at: {service_account_path}")
             print("⚠️ Using in-memory storage for development")
             return None
-                
+
     except Exception as e:
         print(f"❌ Failed to initialize Firebase: {e}")
         print("⚠️ Using in-memory storage for development")
@@ -1308,8 +1310,24 @@ BEAT_WRITERS_BY_SPORT = {
 
 def get_player_stats_from_static(player_name, sport):
     """Look up player stats from static data for advanced analytics."""
-    # Use your existing static data structures – adjust variable names as needed
-    if sport == 'nba' and 'static_nba_players' in globals():
+    
+    # Define static NBA players if not already defined
+    if 'static_nba_players' not in globals():
+        global static_nba_players
+        static_nba_players = [
+            # Add your NBA player data here
+            # Example: {'name': 'LeBron James', 'points': 27.2, 'rebounds': 7.5, 'assists': 7.3, 'team': 'LAL', 'position': 'SF'},
+        ]
+    
+    # Define static NHL players if not already defined
+    if 'static_nhl_players' not in globals():
+        global static_nhl_players
+        static_nhl_players = [
+            # Add your NHL player data here
+            # Example: {'name': 'Connor McDavid', 'points': 1.5, 'goals': 0.6, 'assists': 0.9, 'team': 'EDM', 'position': 'C'},
+        ]
+    
+    if sport == 'nba':
         for p in static_nba_players:
             if p.get('name') == player_name:
                 return {
@@ -1319,7 +1337,7 @@ def get_player_stats_from_static(player_name, sport):
                     'team': p.get('team', ''),
                     'position': p.get('position', '')
                 }
-    elif sport == 'nhl' and 'static_nhl_players' in globals():
+    elif sport == 'nhl':
         for p in static_nhl_players:
             if p.get('name') == player_name:
                 return {
@@ -1329,8 +1347,23 @@ def get_player_stats_from_static(player_name, sport):
                     'team': p.get('team', ''),
                     'position': p.get('position', '')
                 }
-    # ... add other sports
-    return None  # or default stats
+    # Add other sports (MLB, NFL, etc.)
+    elif sport == 'mlb':
+        # Add MLB static data
+        pass
+    elif sport == 'nfl':
+        # Add NFL static data
+        pass
+    
+    # Return default stats if player not found
+    return {
+        'points': 0,
+        'rebounds': 0,
+        'assists': 0,
+        'goals': 0,
+        'team': '',
+        'position': ''
+    }
 
 def enhance_selections_with_variety(selections, seed=None, force_variety=False):
     """
@@ -1339,38 +1372,38 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
     """
     if not selections:
         return []
-    
+
     # Create a deterministic but changing seed based on timestamp
     if seed:
         seed_value = int(hashlib.md5(str(seed).encode()).hexdigest(), 16) % 10000
         random.seed(seed_value)
     else:
         random.seed()  # Use system time for true randomness
-    
+
     enhanced = []
-    
+
     # Track seen combinations to avoid duplicates
     seen_combinations = set()
-    
+
     for selection in selections:
         # Create a deep copy to avoid modifying the original
         sel = copy.deepcopy(selection)
-        
+
         # Create a unique key to check for duplicates
         player = sel.get("player", "Unknown")
         stat = sel.get("stat", sel.get("stat_type", "points"))
         line = sel.get("line", 0)
         key = f"{player}|{stat}|{line}"
-        
+
         # Skip if we've seen this combination before
         if key in seen_combinations:
             continue
         seen_combinations.add(key)
-        
+
         # Add a random seed to the ID to ensure uniqueness
         if "id" in sel:
             sel["id"] = f"{sel['id']}-{random.randint(1000, 9999)}"
-        
+
         # Randomize projection significantly (±20%) to create more variety
         if "projection" in sel:
             try:
@@ -1378,14 +1411,14 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
                 variation = random.uniform(-0.20, 0.20)  # ±20% variation
                 new_proj = proj * (1 + variation)
                 sel["projection"] = round(new_proj, 1)
-                
+
                 # Recalculate edge based on new projection
                 if "line" in sel:
                     line_val = float(sel["line"])
                     if line_val > 0:
                         new_edge = ((new_proj - line_val) / line_val) * 100
                         sel["edge"] = round(new_edge, 1)
-                        
+
                         # Update type based on new projection
                         if new_edge > 0:
                             sel["type"] = "Over"
@@ -1393,7 +1426,7 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
                             sel["type"] = "Under"
             except (ValueError, TypeError):
                 pass
-        
+
         # Randomize confidence level with more variation
         if "confidence" in sel:
             try:
@@ -1405,12 +1438,12 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
                 sel["confidence"] = random.randint(40, 95)
         else:
             sel["confidence"] = random.randint(40, 95)
-        
+
         # Randomize odds for variety
         if "odds" in sel:
             odds_options = ["-110", "-115", "-120", "-125", "+100", "+105", "+110", "+115", "+120", "-105", "-108"]
             sel["odds"] = random.choice(odds_options)
-            
+
             # Also update over_price/under_price
             try:
                 odds_num = int(sel["odds"]) if sel["odds"].startswith(("-", "+")) else -110
@@ -1420,7 +1453,7 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
                     sel["under_price"] = odds_num
             except:
                 pass
-        
+
         # Randomize analysis text for variety
         analysis_templates = [
             f"{sel.get('player', 'Player')} {sel.get('stat', 'points')} – proj {sel.get('projection', '?')} vs line {sel.get('line', '?')}",
@@ -1435,11 +1468,11 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
             f"Based on last 5 games, {sel.get('player', 'Player')} trending {random.choice(['up', 'down'])}"
         ]
         sel["analysis"] = random.choice(analysis_templates)
-        
+
         # Randomize bookmaker
         bookmakers = ["FanDuel", "DraftKings", "BetMGM", "BetOnline.ag", "Fanatics", "Caesars", "PointsBet"]
         sel["bookmaker"] = random.choice(bookmakers)
-        
+
         # Randomize game
         games = [
             f"{sel.get('team', 'Team')} vs {random.choice(['LAL', 'GSW', 'BOS', 'MIL', 'PHX', 'DEN', 'PHI'])}",
@@ -1447,20 +1480,20 @@ def enhance_selections_with_variety(selections, seed=None, force_variety=False):
             f"{random.choice(['NBA', 'NHL', 'MLB'])} Game"
         ]
         sel["game"] = random.choice(games)
-        
+
         # Add variety metadata
         sel["variation_id"] = f"v{random.randint(1, 100)}"
         sel["variation_seed"] = seed if seed else "random"
         sel["processed_at"] = datetime.now(timezone.utc).isoformat()
-        
+
         enhanced.append(sel)
-    
+
     # Shuffle the selections thoroughly
     random.shuffle(enhanced)
-    
+
     # Reset random seed to avoid affecting other parts of the app
     random.seed()
-    
+
     return enhanced
 
 def generate_sport_props(sport, limit=50):
@@ -1568,7 +1601,7 @@ def compute_nhl_league_averages(defensive_stats_map):
     """Compute league averages for goals against, shots against, etc."""
     if not defensive_stats_map:
         return {"goals": 3.0, "shots": 30.0, "assists": 3.0}  # rough NHL averages
-        
+
     goals = [
         stats["goals_against_per_game"]
         for stats in defensive_stats_map.values()
@@ -1800,7 +1833,7 @@ def _map_nhl_game_state(state):
     """Convert RapidAPI gameState to frontend status."""
     state_map = {
         "FINAL": "final",
-        "LIVE": "live",  
+        "LIVE": "live",
         "PRE": "scheduled",
         "CRIT": "live",
     }
@@ -1847,23 +1880,23 @@ def get_player_master_map(sport="nba"):
     """Create comprehensive player map with multiple lookup strategies"""
     try:
         player_map = {}
-        
+
         if sport == "nba":
             # Get players from your database
             players = get_nba_players_from_database()  # Your existing function
-            
+
             for player in players:
                 player_id = str(player.get('id', ''))
                 name = player.get('name', '')
                 team = player.get('team', '')
-                
+
                 # Store by ID
                 player_map[player_id] = {
                     'name': name,
                     'team': team,
                     'id': player_id
                 }
-                
+
                 # Store by last name (for fuzzy matching)
                 if name:
                     name_parts = name.split()
@@ -1876,24 +1909,24 @@ def get_player_master_map(sport="nba"):
                                 'team': team,
                                 'id': player_id
                             }
-                        
+
                         # Store by full name lowercase
                         player_map[name.lower()] = {
                             'name': name,
                             'team': team,
                             'id': player_id
                         }
-            
+
             print(f"✅ Created player map with {len(players)} players and {len(player_map)} total keys")
-            
+
             # Print sample of last name mappings for debugging
             last_name_samples = [k for k in player_map.keys() if isinstance(k, str) and len(k) < 20 and ' ' not in k][:5]
             print(f"📊 Sample last name keys: {last_name_samples}")
-            
+
             return player_map
         else:
             return {}
-            
+
     except Exception as e:
         print(f"⚠️ Error creating player map: {e}")
         import traceback
@@ -1909,7 +1942,7 @@ def mlb_goat_request(endpoint: str, params: dict = None):
         raise Exception("Missing BALLDONTLIE_API_KEY")
     headers = {"Authorization": MLB_GOAT_API_KEY}
     url = MLB_GOAT_BASE + endpoint.lstrip('/')
-    resp = requests.get(url, headers=headers, params=params, timeout=10)
+    resp = requests.get(url, headers=BALLDONTLIE_HEADERS, params=params, timeout=10)
     if resp.status_code != 200:
         print(f"❌ API error {resp.status_code}: {resp.text}")   # <-- add this
         resp.raise_for_status()
@@ -1953,8 +1986,6 @@ def create_parlay_object(name, legs, market_type, source):
     return {"id": "mock", "name": name, "legs": legs}
 def generate_simple_parlay_suggestions(sport, count=4):
     return []
-def get_sports_wire():
-    return {"success": False, "news": []}
 def scrape_twitter_feed(source):
     return []
 def filter_players_by_query(players, query, sport):
@@ -2001,25 +2032,6 @@ def scrape_sports_data(sport):
 # ============================================================
 # MLB ENDPOINTS – FIXED VERSIONS
 # ============================================================
-
-import os
-import uuid
-import random
-import traceback
-from datetime import datetime, timezone
-from flask import request, jsonify
-import requests
-
-# ---------- Helper functions (add these if missing) ----------
-
-def generate_mlb_standings(season):
-    """Generate mock MLB standings"""
-    return [
-        {'team': 'New York Yankees', 'wins': 95, 'losses': 67, 'pct': 0.586, 'games_back': 0},
-        {'team': 'Boston Red Sox', 'wins': 92, 'losses': 70, 'pct': 0.568, 'games_back': 3},
-        {'team': 'Los Angeles Dodgers', 'wins': 98, 'losses': 64, 'pct': 0.605, 'games_back': 0},
-        {'team': 'Atlanta Braves', 'wins': 101, 'losses': 61, 'pct': 0.623, 'games_back': 0},
-    ]
 
 def get_mlb_leaders(limit):
     """Mock hitting and pitching leaders"""
@@ -2291,25 +2303,40 @@ CACHE_TTL = 3600
 # ------------------------------------------------------------------------------
 # Flask app initialization
 # ------------------------------------------------------------------------------
+# Replace your existing CORS configuration with this:
+
 app = Flask(__name__)
 
-# Configure CORS - FIXED VERSION
+# Single source of truth for CORS
 CORS(
     app,
-    resources={
-        r"/api/*": {
-            "origins": [
-                "http://localhost:5173",
-                "http://localhost:3000",
-                "https://sportsanalyticsgpt.com",
-                "https://www.sportsanalyticsgpt.com"
-            ]
-        }
-    },
+    origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:5000",
+        "https://sportsanalyticsgpt.com",
+        "https://www.sportsanalyticsgpt.com"
+    ],
     supports_credentials=True,
-    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Stripe-Signature'],
-    methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+    allow_headers=['Content-Type', 'Authorization', 'Cache-Control', 'Stripe-Signature', 'X-Requested-With'],
+    methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    expose_headers=['Content-Type', 'Authorization']
 )
+
+# ============================================
+# GLOBAL OPTIONS HANDLER - Catches all preflight requests
+# ============================================
+
+# ============================================
+# RATE LIMITING CONFIGURATION (Optional)
+# ============================================
+# Uncomment if you want to add rate limiting
+# limiter = Limiter(
+#     app,
+#     key_func=get_remote_address,
+#     default_limits=["200 per day", "50 per hour"],
+#     storage_uri="memory://"
+# )
 
 # ------------------------------------------------------------------------------
 # Environment & configuration
@@ -2352,7 +2379,7 @@ if not STRIPE_SECRET_KEY:
     print("Available env vars:", list(os.environ.keys()))
 else:
     print(f"✅ Found Stripe key: {STRIPE_SECRET_KEY[:10]}...")
-    
+
 # Configure Stripe
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -6020,11 +6047,6 @@ def save_props_to_cache(sport, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
-
-def route_cache_set(key, data, ttl=120):
-    route_cache[key] = {"data": data, "timestamp": time.time(), "ttl": ttl}
-
-
 def cache_data(key, data, ttl_minutes=15):
     """Stub – implement if needed."""
     pass
@@ -6048,76 +6070,11 @@ def print_startup_once():
         _STARTUP_PRINTED = True
 
 
-def call_node_microservice(path, params=None, method="GET", data=None):
-    node_base = os.environ.get(
-        "NODE_MICROSERVICE_URL", "https://prizepicks-production.up.railway.app"
-    )
-    url = node_base + path
-    headers = {"Content-Type": "application/json"}
-    try:
-        if method.upper() == "GET":
-            response = requests.get(url, params=params, timeout=30)
-        elif method.upper() == "POST":
-            response = requests.post(url, json=data, headers=headers, timeout=30)
-        else:
-            raise ValueError(f"Unsupported method {method}")
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"❌ Node microservice call failed: {e}")
-        return {"success": False, "error": str(e)}
-
-
 def _build_cors_preflight_response():
-    response = jsonify({"status": "ok"})
-    # CORS handled by Flask-CORS
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-    response.headers.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    return response, 200
-
-
-def build_roster_context(sport):
-    lines = []
-    if sport == "nba":
-        data = players_data_list
-    elif sport == "nfl":
-        data = nfl_players_data
-    elif sport == "mlb":
-        data = mlb_players_data
-    elif sport == "nhl":
-        data = nhl_players_data
-    else:
-        data = players_data_list
-
-    if isinstance(data, dict):
-        for player, team in data.items():
-            if player and team:
-                lines.append(f"{player}: {team}")
-    elif isinstance(data, (list, tuple, set)):
-        for item in data:
-            if isinstance(item, dict):
-                name = item.get("name") or item.get("playerName")
-                team = item.get("teamAbbrev") or item.get("team")
-                if name and team:
-                    lines.append(f"{name}: {team}")
-    else:
-        print(f"⚠️ Unsupported data type for {sport} players: {type(data)}")
-
-    lines.sort()
-    truncated = lines[:MAX_ROSTER_LINES]
-    print(
-        f"✅ {sport.upper()} – extracted {len(lines)} players, truncated to {len(truncated)}"
-    )
-    header = (
-        f"Current {sport.upper()} player-team affiliations (as of February 18, 2026):\n"
-    )
-    return header + "\n".join(truncated)
-
-
-def get_roster_context(sport):
-    if sport not in roster_cache:
-        roster_cache[sport] = build_roster_context(sport)
-    return roster_cache[sport]
+    """Build CORS preflight response"""
+    response = make_response()
+    response.status_code = 200
+    return response
 
 
 def api_response(success, data=None, message="", **kwargs):
@@ -6169,18 +6126,6 @@ def call_balldontlie(endpoint, params=None):
 BALLDONTLIE_NCAAB_BASE = "https://api.balldontlie.io/ncaab/v1"
 
 
-def fetch_from_balldontlie(endpoint, params=None):
-    if not BALLDONTLIE_API_KEY:
-        return {"success": False, "error": "BALLDONTLIE_API_KEY not configured"}, 500
-    url = f"{BALLDONTLIE_NCAAB_BASE}/{endpoint}"
-    headers = {"Authorization": BALLDONTLIE_API_KEY}
-    try:
-        resp = requests.get(url, headers=headers, params=params)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.RequestException as e:
-        status_code = getattr(e.response, "status_code", 500)
-        return {"success": False, "error": str(e)}, status_code
 
 
 # ------------------------------------------------------------------------------
@@ -6421,69 +6366,6 @@ def generate_mock_trends(sport, limit=10, trend_filter="all"):
     return trends[:limit]
 
 
-def generate_mock_parlay_suggestions(sport):
-    mock = []
-    for i in range(4):
-        num_legs = random.randint(2, 4)
-        legs = []
-        total_odds_decimal = 1.0
-        for j in range(num_legs):
-            odds_val = random.choice([-110, +120, -105, +150])
-            if odds_val > 0:
-                decimal = (odds_val / 100) + 1
-            else:
-                decimal = (100 / abs(odds_val)) + 1
-            total_odds_decimal *= decimal
-            leg = {
-                "id": str(uuid.uuid4()),
-                "description": f"Mock Leg {j+1}",
-                "odds": str(odds_val),
-                "confidence": random.randint(60, 95),
-                "sport": sport if sport != "all" else "NBA",
-                "market": "h2h",
-                "teams": {"home": "Team A", "away": "Team B"},
-                "line": None,
-                "value_side": "Team A",
-                "confidence_level": random.choice(["High", "Medium", "Low"]),
-                "player_name": None,
-                "stat_type": None,
-            }
-            legs.append(leg)
-        if total_odds_decimal >= 2:
-            total_odds_american = f"+{int((total_odds_decimal - 1) * 100)}"
-        else:
-            total_odds_american = f"-{int(100 / (total_odds_decimal - 1))}"
-        avg_confidence = sum(l["confidence"] for l in legs) / len(legs)
-        mock.append(
-            {
-                "id": str(uuid.uuid4()),
-                "name": f"Mock Parlay {i+1}",
-                "sport": sport if sport != "all" else "NBA",
-                "type": "standard",
-                "market_type": "mix",
-                "legs": legs,
-                "total_odds": total_odds_american,
-                "confidence": round(avg_confidence),
-                "confidence_level": "High" if avg_confidence > 75 else "Medium",
-                "analysis": "Mock analysis: This parlay combines high-value picks.",
-                "expected_value": f"+{random.randint(5, 20)}%",
-                "risk_level": random.choice(["Low", "Medium", "High"]),
-                "ai_metrics": {
-                    "leg_count": len(legs),
-                    "avg_leg_confidence": round(avg_confidence, 1),
-                    "recommended_stake": f"${random.randint(5, 50)}",
-                    "edge": round(random.uniform(0.02, 0.15), 3),
-                },
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "isToday": True,
-                "isGenerated": True,
-                "is_real_data": False,
-                "has_data": True,
-            }
-        )
-    return mock
-
-
 def generate_mock_value_bets(sport, limit):
     bet_types = ["Spread", "Over/Under", "Moneyline", "Player Props"]
     teams = [
@@ -6529,7 +6411,7 @@ def generate_mock_beat_news(sport, team, sources):
     """
     news = []
     now = datetime.now(timezone.utc)
-    
+
     # Expanded player lists for each sport
     PLAYERS_BY_SPORT = {
         "NBA": [
@@ -6564,10 +6446,10 @@ def generate_mock_beat_news(sport, team, sources):
             'Nikita Kucherov', 'Andrei Vasilevskiy', 'Igor Shesterkin', 'Kirill Kaprizov'
         ]
     }
-    
+
     # Fallback if sport not found
     players = PLAYERS_BY_SPORT.get(sport, PLAYERS_BY_SPORT["NBA"])
-    
+
     topics = [
         'trade rumors',
         'injury update',
@@ -6585,20 +6467,20 @@ def generate_mock_beat_news(sport, team, sources):
         'podcast appearance',
         'charity event'
     ]
-    
+
     # Generate up to 20 news items
     for i, source in enumerate(sources[:20]):
         # Pick a random player (not just the first few)
         player = random.choice(players)
         topic = random.choice(topics)
-        
+
         # Create plausible headline
         title = f"{source['name']}: {player} {topic}"
         description = f"{source['name']} of {source['outlet']} provides the latest on {player} and the {team or 'team'}. {source['outlet']}."
-        
+
         # Random publication time within last 24 hours
         published_at = (now - timedelta(hours=random.randint(0, 24))).isoformat()
-        
+
         news.append({
             "id": f"mock-beat-{i}-{int(time.time())}",
             "title": title,
@@ -6613,7 +6495,7 @@ def generate_mock_beat_news(sport, team, sources):
             "confidence": 88,
             "is_mock": True
         })
-    
+
     return news
 
 
@@ -7051,41 +6933,6 @@ def generate_mock_parlay_suggestions(sport):
         )
     return mock
 
-
-def generate_mock_advanced_analytics(sport, needed):
-    mock_players = [
-        {"name": "LeBron James", "team": "LAL"},
-        {"name": "Stephen Curry", "team": "GSW"},
-        {"name": "Giannis Antetokounmpo", "team": "MIL"},
-        {"name": "Kevin Durant", "team": "PHX"},
-        {"name": "Luka Doncic", "team": "DAL"},
-    ]
-    selections = []
-    for i in range(needed):
-        mp = random.choice(mock_players)
-        selections.append(
-            {
-                "id": f"mock-{mp['name'].replace(' ', '-')}-{i}",
-                "player": mp["name"],
-                "team": mp["team"],
-                "stat": random.choice(["Points", "Rebounds", "Assists"]),
-                "line": round(random.uniform(15.5, 35.5) * 2) / 2,
-                "type": random.choice(["over", "under"]),
-                "projection": round(random.uniform(10, 40) * 2) / 2,
-                "projection_diff": round(random.uniform(-5, 5), 1),
-                "confidence": random.choice(["high", "medium", "low"]),
-                "edge": round(random.uniform(0, 25), 1),
-                "odds": random.choice(["-110", "-115", "-105", "+100"]),
-                "bookmaker": random.choice(["FanDuel", "DraftKings", "BetMGM"]),
-                "analysis": f"{mp['name']} trending.",
-                "game": f"{mp['team']} vs {random.choice(['LAL', 'BOS', 'GSW'])}",
-                "source": "mock",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-    return selections
-
-
 # ---------- Tank01 API helper ----------
 
 def call_tank01(endpoint: str, params: dict = None) -> dict:
@@ -7398,102 +7245,6 @@ def fetch_tank01_player_detail(player_id, season):
         "stats": stats,
         "is_real_data": True,
     }
-
-
-def fetch_tank01_props(date, limit):
-    """Player props from Tank01 – not directly available, use mock for now."""
-    # Tank01 doesn't have player props; you could use The Odds API but that's separate.
-    return None
-
-
-
-
-def generate_mock_games(sport: str) -> List[Dict]:
-    """Generate mock games for testing when APIs aren't available."""
-    mock_games = []
-    
-    # Current date for commence_time
-    current_time = datetime.now().isoformat()
-    
-    if sport == 'nfl':
-        nfl_teams = [
-            ('Kansas City Chiefs', 'Philadelphia Eagles'),
-            ('San Francisco 49ers', 'Baltimore Ravens'),
-            ('Buffalo Bills', 'Cincinnati Bengals'),
-            ('Dallas Cowboys', 'Miami Dolphins'),
-            ('Detroit Lions', 'Green Bay Packers'),
-            ('Seattle Seahawks', 'Los Angeles Rams')
-        ]
-        
-        for i, (away, home) in enumerate(nfl_teams[:4]):  # Limit to 4 games
-            mock_games.append({
-                'id': f'mock-nfl-{i}',
-                'home_team': home,
-                'away_team': away,
-                'home_score': 0,
-                'away_score': 0,
-                'status': 'scheduled',
-                'period': '1st',
-                'clock': '15:00',
-                'commence_time': current_time,
-                'sport': 'NFL',
-                'odds': [],
-                'source': 'mock'
-            })
-            
-    elif sport == 'nhl':
-        nhl_teams = [
-            ('Boston Bruins', 'Toronto Maple Leafs'),
-            ('Colorado Avalanche', 'Vegas Golden Knights'),
-            ('Edmonton Oilers', 'Dallas Stars'),
-            ('New York Rangers', 'Carolina Hurricanes'),
-            ('Pittsburgh Penguins', 'Washington Capitals')
-        ]
-        
-        for i, (away, home) in enumerate(nhl_teams[:4]):
-            mock_games.append({
-                'id': f'mock-nhl-{i}',
-                'home_team': home,
-                'away_team': away,
-                'home_score': 0,
-                'away_score': 0,
-                'status': 'scheduled',
-                'period': '1st',
-                'clock': '20:00',
-                'commence_time': current_time,
-                'sport': 'NHL',
-                'odds': [],
-                'source': 'mock'
-            })
-            
-    elif sport == 'mlb':
-        mlb_teams = [
-            ('New York Yankees', 'Boston Red Sox'),
-            ('Los Angeles Dodgers', 'San Francisco Giants'),
-            ('Chicago Cubs', 'St. Louis Cardinals'),
-            ('Houston Astros', 'Texas Rangers'),
-            ('Atlanta Braves', 'Philadelphia Phillies')
-        ]
-        
-        for i, (away, home) in enumerate(mlb_teams[:4]):
-            mock_games.append({
-                'id': f'mock-mlb-{i}',
-                'home_team': home,
-                'away_team': away,
-                'home_score': 0,
-                'away_score': 0,
-                'status': 'scheduled',
-                'period': 'Top 1st',
-                'clock': '0 outs',
-                'commence_time': current_time,
-                'sport': 'MLB',
-                'odds': [],
-                'source': 'mock'
-            })
-    
-    print(f"🎲 Generated {len(mock_games)} mock games for {sport.upper()}", flush=True)
-    return mock_games
-
 
 # ------------------------------------------------------------------------------
 # Mock Injury Generator (single injury)
@@ -8392,6 +8143,8 @@ async def fetch_page(url, headers=None):
         print(f"❌ Error fetching {url}: {e}")
         return None
 
+
+
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
@@ -8478,25 +8231,25 @@ def register():
         password = data.get('password')
         first_name = data.get('firstName', '')
         last_name = data.get('lastName', '')
-        
+
         # Check if user exists
         for user in users_db.values():
             if user.email == email:
                 return jsonify({'success': False, 'error': 'User already exists'}), 400
-        
+
         # Create user
         user = User(email, password, first_name, last_name)
         users_db[user.id] = user
-        
+
         # Generate token
         token = generate_token(user.id)
-        
+
         return jsonify({
             'success': True,
             'token': token,
             'user': user.to_dict()
         }), 201
-        
+
     except Exception as e:
         print(f"Registration error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -8509,18 +8262,18 @@ def login():
         response = make_response()
         # REMOVE these hardcoded headers - let Flask-CORS handle it
         return response
-    
+
     try:
         data = flask_request.json
         email = data.get('email')
         password = data.get('password')
-        
+
         print(f"🔐 Login attempt for: {email}")
-        
+
         # Find user - first check Firestore if available
         user = None
         user_data = None
-        
+
         if db:
             # Search in Firestore
             users_query = db.collection('users').where('email', '==', email).limit(1).stream()
@@ -8529,7 +8282,7 @@ def login():
                 user_doc = users_list[0]
                 user_data = user_doc.to_dict()
                 print(f"✅ Found user in Firestore: {user_doc.id}")
-                
+
                 # Create or update in-memory user
                 from models.user import User
                 if user_doc.id in users_db:
@@ -8541,14 +8294,14 @@ def login():
                     user.subscription_id = user_data.get('subscription_id')
                     user.subscription_status = user_data.get('subscription_status', 'inactive')
                     users_db[user_doc.id] = user
-        
+
         # Fallback to in-memory users
         if not user:
             for u in users_db.values():
                 if hasattr(u, 'email') and u.email == email:
                     user = u
                     break
-        
+
         # For Firebase Auth, you should use Firebase's sign-in method
         if not user:
             print(f"⚠️ User not found, creating temporary user: {email}")
@@ -8556,13 +8309,13 @@ def login():
             user = User(id=email, email=email)
             user.display_name = email.split('@')[0]
             users_db[email] = user
-        
+
         # Update last login
         user.last_login = datetime.utcnow()
-        
+
         # Generate token (in production, use Firebase token)
         token = generate_token(user.id)
-        
+
         # Prepare response
         response_data = {
             'success': True,
@@ -8577,13 +8330,13 @@ def login():
                 'credits': getattr(user, 'credits', 0)
             }
         }
-        
+
         # Let Flask-CORS add the headers
         response = jsonify(response_data)
-        
+
         print(f"✅ Login successful for: {email}")
         return response
-        
+
     except Exception as e:
         print(f"❌ Login error: {e}")
         traceback.print_exc()
@@ -8599,7 +8352,7 @@ def update_user():
         user = users_db.get(g.user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
-        
+
         data = request.json
         if 'firstName' in data:
             user.first_name = data['firstName']
@@ -8607,12 +8360,12 @@ def update_user():
             user.last_name = data['lastName']
         if 'preferences' in data:
             user.preferences.update(data['preferences'])
-        
+
         return jsonify({
             'success': True,
             'user': user.to_dict()
         })
-        
+
     except Exception as e:
         print(f"Update user error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -8625,21 +8378,21 @@ def change_password():
         user = users_db.get(g.user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
-        
+
         data = request.json
         current = data.get('currentPassword')
         new = data.get('newPassword')
-        
+
         if not user.check_password(current):
             return jsonify({'success': False, 'error': 'Current password is incorrect'}), 400
-        
+
         user.password_hash = user._hash_password(new)
-        
+
         return jsonify({
             'success': True,
             'message': 'Password updated successfully'
         })
-        
+
     except Exception as e:
         print(f"Change password error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -8653,12 +8406,12 @@ def admin_add_credits():
     data = flask_request.json
     user_id = data.get('user_id')
     credits = data.get('credits', 20)
-    
+
     if not user_id:
         return jsonify({'error': 'user_id required'}), 400
-    
+
     add_generator_credits_to_redis(user_id, credits)
-    
+
     return jsonify({
         'success': True,
         'message': f'Added {credits} credits to {user_id}'
@@ -8669,23 +8422,23 @@ def admin_reset_user():
     """Reset a user's generator data"""
     data = flask_request.json
     user_id = data.get('user_id')
-    
+
     if not user_id:
         return jsonify({'error': 'user_id required'}), 400
-    
+
     key = f"user:gen:{user_id}"
-    
+
     if "redis_client" in globals() and redis_client:
         # Delete the corrupted key
         redis_client.delete(key)
         print(f"✅ Deleted key for user {user_id}")
-        
+
         # Initialize fresh
         remaining = DAILY_LIMIT
         last_reset = datetime.utcnow().isoformat()
         redis_client.hset(key, mapping={"remaining": remaining, "last_reset": last_reset})
         redis_client.expire(key, 86400)
-        
+
         return jsonify({
             'success': True,
             'message': f'Reset user {user_id} with {remaining} credits'
@@ -8704,7 +8457,7 @@ def create_promo_code():
         discount_percent = data.get('discount_percent', 10)
         commission_rate = data.get('commission_rate', 10)
         max_uses = data.get('max_uses')
-        
+
         promo = create_influencer_promo(
             influencer_id=influencer_id,
             influencer_name=influencer_name,
@@ -8712,14 +8465,14 @@ def create_promo_code():
             commission_rate=commission_rate,
             max_uses=max_uses
         )
-        
+
         return jsonify({
             'success': True,
             'promo_code': promo.code,
             'discount': promo.discount_percent,
             'commission': promo.commission_rate
         }), 200
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -8743,10 +8496,10 @@ def influencer_stats():
     try:
         # Get influencer ID from the logged-in user
         influencer_id = g.user_id  # Assuming influencers are users in your system
-        
+
         stats = get_influencer_stats(influencer_id)
         return jsonify(stats), 200
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -8757,16 +8510,16 @@ def validate_promo_endpoint():
     try:
         data = request.json
         code = data.get('code')
-        
+
         if not code:
             return jsonify({'valid': False, 'error': 'No promo code provided'}), 400
-        
+
         print(f"🔍 Validating promo code: {code}")
-        
+
         # Retrieve the coupon directly
         coupon = stripe.Coupon.retrieve(code)
         print(f"✅ Found coupon: {coupon.id}, percent_off: {coupon.percent_off}, valid: {coupon.valid}")
-        
+
         # Check if coupon is valid and not deleted
         if coupon.valid and not getattr(coupon, 'deleted', False):
             return jsonify({
@@ -8775,7 +8528,7 @@ def validate_promo_endpoint():
             })
         else:
             return jsonify({'valid': False, 'message': 'Coupon expired or invalid'})
-        
+
     except stripe.error.InvalidRequestError as e:
         print(f"❌ Coupon not found: {e}")
         return jsonify({'valid': False, 'message': 'Promo code not found'})
@@ -8794,10 +8547,10 @@ def create_promo():
         code = data.get('code')
         promoter_name = data.get('promoter_name')
         promoter_email = data.get('promoter_email')
-        
+
         from services.promo_service import create_promo_code
         promo = create_promo_code(code, promoter_name, promoter_email)
-        
+
         return jsonify({
             'success': True,
             'promo': promo.to_dict()
@@ -8813,10 +8566,10 @@ def get_promoter_stats():
         user = users_db.get(g.user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
-        
+
         from services.promo_service import get_promoter_stats
         stats = get_promoter_stats(user.email)
-        
+
         return jsonify({
             'success': True,
             'stats': stats
@@ -8831,11 +8584,8 @@ def get_user_stats():
     if flask_request.method == 'OPTIONS':
         response = make_response()
         # CORS handled by Flask-CORS
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
-    
+
     try:
         # Get authorization header
         auth_header = flask_request.headers.get('Authorization')
@@ -8844,9 +8594,9 @@ def get_user_stats():
             response = make_response(jsonify({'error': 'No Bearer token found'}), 401)
             # CORS handled by Flask-CORS
             return response
-        
+
         token = auth_header.split(' ')[1]
-        
+
         # Verify Firebase token
         result = verify_firebase_token(token)
         if not result['valid']:
@@ -8854,11 +8604,11 @@ def get_user_stats():
             response = make_response(jsonify({'error': result.get('error')}), 401)
             # CORS handled by Flask-CORS
             return response
-        
+
         user_id = result['payload']['user_id']
-        
+
         print(f"🔍 Getting stats for user: {user_id}")
-        
+
         # Default stats - you can expand this with real data
         stats_data = {
             'totalPredictions': 0,
@@ -8867,7 +8617,7 @@ def get_user_stats():
             'activeDays': 1,
             'promo_codes': []
         }
-        
+
         # If you have a database, you can fetch real stats here
         if db:
             user_ref = db.collection('users').document(user_id)
@@ -8881,12 +8631,11 @@ def get_user_stats():
                     'activeDays': user_data.get('active_days', 1),
                     'promo_codes': user_data.get('promo_codes', [])
                 }
-        
+
         response = make_response(jsonify(stats_data), 200)
         # CORS handled by Flask-CORS
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
-        
+
     except Exception as e:
         print(f"❌ Get user stats error: {e}")
         traceback.print_exc()
@@ -8906,27 +8655,27 @@ def handle_checkout_completed(session_dict):
         customer_email = session_dict.get('customer_email')
         subscription_id = session_dict.get('subscription')
         metadata = session_dict.get('metadata', {})
-        
+
         # Get payment status safely
         payment_status = session_dict.get('payment_status')
-        
+
         print(f"🔍 Looking for user - ID: {user_id}, Email: {customer_email}")
         print(f"💰 Payment status: {payment_status}")
         print(f"📦 Mode: {session_dict.get('mode')}")
         print(f"🏷️ Metadata: {metadata}")
-        
+
         # ===== HANDLE GENERATOR CREDITS PURCHASE =====
         if metadata.get('type') == 'generator_credits':
             credits = int(metadata.get('credits', 20))
-            
+
             print(f"💰 GENERATOR CREDITS PURCHASE DETECTED")
             print(f"   User ID: {user_id}")
             print(f"   Credits: {credits}")
-            
+
             if payment_status == 'paid' and user_id:
                 add_generator_credits_to_redis(user_id, credits)
                 print(f"✅ Added {credits} credits to Redis for user {user_id}")
-                
+
                 if db:
                     try:
                         user_ref = db.collection('users').document(user_id)
@@ -8937,24 +8686,24 @@ def handle_checkout_completed(session_dict):
                         print(f"✅ Updated Firestore credits for {user_id}")
                     except Exception as e:
                         print(f"⚠️ Could not update Firestore: {e}")
-                
+
                 return {'success': True, 'credits_added': credits}
             else:
                 return {'success': False, 'error': 'Payment not completed or missing user_id'}
-        
+
         # ===== HANDLE GENERATOR PICK PURCHASE =====
         if metadata.get('type') == 'generator_pick':
             quantity = int(metadata.get('quantity', 1))
-            
+
             print(f"🎯 GENERATOR PICK PURCHASE DETECTED")
             print(f"   User ID: {user_id}")
             print(f"   Quantity: {quantity}")
-            
+
             if payment_status == 'paid' and user_id:
                 credits_to_add = quantity
                 add_generator_credits_to_redis(user_id, credits_to_add)
                 print(f"✅ Added {credits_to_add} credits for {quantity} pick(s)")
-                
+
                 if db:
                     try:
                         user_ref = db.collection('users').document(user_id)
@@ -8965,28 +8714,28 @@ def handle_checkout_completed(session_dict):
                         print(f"✅ Updated Firestore credits for {user_id}")
                     except Exception as e:
                         print(f"⚠️ Could not update Firestore: {e}")
-                
+
                 return {'success': True, 'credits_added': credits_to_add}
             else:
                 return {'success': False, 'error': 'Payment not completed or missing user_id'}
-        
+
         # ===== HANDLE SUBSCRIPTION PURCHASE =====
         if session_dict.get('mode') == 'subscription':
             plan_id = metadata.get('plan_id')
-            
+
             print(f"📊 SUBSCRIPTION PURCHASE DETECTED")
             print(f"   Plan: {plan_id}")
             print(f"   Subscription ID: {subscription_id}")
-            
+
             # Add generator credits for generator plan
             if plan_id == 'generator':
                 credits_to_add = 20
                 print(f"🎁 GENERATOR PACKAGE DETECTED! Adding {credits_to_add} generator credits")
-                
+
                 if user_id:
                     add_generator_credits_to_redis(user_id, credits_to_add)
                     print(f"✅ Added {credits_to_add} generator credits to Redis for user {user_id}")
-                    
+
                     if db:
                         try:
                             user_ref = db.collection('users').document(user_id)
@@ -8999,13 +8748,13 @@ def handle_checkout_completed(session_dict):
                             print(f"⚠️ Could not update Firestore: {e}")
                 else:
                     print(f"⚠️ No user_id found, cannot add generator credits")
-            
+
             # Update user subscription in Firestore
             if db and user_id:
                 try:
                     user_ref = db.collection('users').document(user_id)
                     user_doc = user_ref.get()
-                    
+
                     if user_doc.exists:
                         user_ref.update({
                             'plan': plan_id,
@@ -9018,11 +8767,11 @@ def handle_checkout_completed(session_dict):
                         print(f"⚠️ User {user_id} not found")
                 except Exception as e:
                     print(f"⚠️ Could not update user subscription: {e}")
-            
+
             return {'success': True, 'plan': plan_id}
-        
+
         return {'success': False, 'error': 'Unknown purchase type'}
-        
+
     except Exception as e:
         print(f"❌ Error in handle_checkout_completed: {e}")
         traceback.print_exc()
@@ -9037,30 +8786,30 @@ def stripe_webhook():
     import os
     import hashlib
     import hmac
-    
+
     print("=" * 80)
     print("📨 WEBHOOK RECEIVED - ENDPOINT HIT")
     print(f"   Time: {datetime.utcnow().isoformat()}")
-    
+
     payload = flask_request.data
     sig_header = flask_request.headers.get('Stripe-Signature')
     webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
-    
+
     print(f"   Signature header: {sig_header[:50] if sig_header else 'None'}...")
     print(f"   Webhook secret present: {bool(webhook_secret)}")
     print(f"   Payload length: {len(payload)} bytes")
-    
+
     try:
         payload_str = payload.decode('utf-8')
         print(f"   Payload preview: {payload_str[:200]}...")
     except:
         print(f"   Payload preview: {payload[:200]}...")
-    
+
     if webhook_secret:
         print(f"   Webhook secret length: {len(webhook_secret)}")
         print(f"   Webhook secret prefix: {webhook_secret[:15]}...")
         print(f"   Webhook secret suffix: ...{webhook_secret[-10:]}")
-    
+
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
         print(f"✅ Webhook signature verified successfully")
@@ -9076,19 +8825,19 @@ def stripe_webhook():
         print(f"❌ Unexpected error: {e}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 400
-    
+
     # ----- CHECKOUT SESSION COMPLETED -----
     if event['type'] == 'checkout.session.completed':
         print(f"\n💰 Processing checkout.session.completed")
-        
+
         session = event['data']['object']
-        
+
         # Convert to dictionary safely
         if hasattr(session, 'to_dict'):
             session_dict = session.to_dict()
         else:
             session_dict = dict(session)
-        
+
         # CRITICAL: Convert metadata from StripeObject to dict
         if 'metadata' in session_dict and session_dict['metadata']:
             if hasattr(session_dict['metadata'], 'to_dict'):
@@ -9096,50 +8845,50 @@ def stripe_webhook():
             elif hasattr(session_dict['metadata'], 'get'):
                 # It's already a dict-like object
                 session_dict['metadata'] = dict(session_dict['metadata'])
-        
+
         print(f"   Session ID: {session_dict.get('id')}")
         print(f"   Mode: {session_dict.get('mode')}")
         print(f"   Payment Status: {session_dict.get('payment_status')}")
         print(f"   Customer Email: {session_dict.get('customer_email')}")
         print(f"   Metadata: {session_dict.get('metadata')}")
-        
+
         # Also check client_reference_id for user_id if metadata doesn't have it
         if not session_dict.get('metadata', {}).get('user_id'):
             user_id = session_dict.get('client_reference_id')
             if user_id:
                 session_dict['metadata']['user_id'] = user_id
                 print(f"   Using client_reference_id as user_id: {user_id}")
-        
+
         result = handle_checkout_completed(session_dict)
-        
+
         if result.get('success'):
             print(f"✅ Checkout processed successfully: {result}")
             return jsonify({'received': True, 'result': result}), 200
         else:
             print(f"❌ Checkout processing failed: {result.get('error')}")
             return jsonify({'received': True, 'warning': result.get('error')}), 200
-    
+
     # ----- INVOICE PAYMENT SUCCEEDED -----
     elif event['type'] == 'invoice.payment_succeeded':
         print(f"\n💰 Invoice payment succeeded")
         invoice = event['data']['object']
-        
+
         if hasattr(invoice, 'to_dict'):
             invoice_dict = invoice.to_dict()
         else:
             invoice_dict = dict(invoice)
-        
+
         subscription_id = invoice_dict.get('subscription')
         print(f"   Subscription: {subscription_id}")
-        
+
         if subscription_id and db:
             try:
                 subscription = stripe.Subscription.retrieve(subscription_id)
                 customer_id = subscription.customer
-                
+
                 users_query = db.collection('users').where('stripe_customer_id', '==', customer_id).limit(1).stream()
                 users_list = list(users_query)
-                
+
                 if users_list:
                     user_ref = db.collection('users').document(users_list[0].id)
                     user_ref.update({
@@ -9149,7 +8898,7 @@ def stripe_webhook():
                         'updated_at': firestore.SERVER_TIMESTAMP
                     })
                     print(f"✅ Updated user subscription status")
-                
+
                 sub_ref = db.collection('subscriptions').document(subscription_id)
                 sub_ref.update({
                     'status': subscription.status,
@@ -9162,25 +8911,25 @@ def stripe_webhook():
             except Exception as e:
                 print(f"❌ Error processing invoice payment: {e}")
                 traceback.print_exc()
-    
+
     # ----- SUBSCRIPTION UPDATED -----
     elif event['type'] == 'customer.subscription.updated':
         print(f"\n🔄 Subscription updated")
         subscription = event['data']['object']
-        
+
         if hasattr(subscription, 'to_dict'):
             sub_dict = subscription.to_dict()
         else:
             sub_dict = dict(subscription)
-        
+
         subscription_id = sub_dict.get('id')
         status = sub_dict.get('status')
         cancel_at_period_end = sub_dict.get('cancel_at_period_end', False)
-        
+
         print(f"   Subscription ID: {subscription_id}")
         print(f"   Status: {status}")
         print(f"   Cancel at period end: {cancel_at_period_end}")
-        
+
         if subscription_id and db:
             sub_ref = db.collection('subscriptions').document(subscription_id)
             update_data = {
@@ -9188,15 +8937,15 @@ def stripe_webhook():
                 'cancel_at_period_end': cancel_at_period_end,
                 'updated_at': firestore.SERVER_TIMESTAMP
             }
-            
+
             if sub_dict.get('current_period_start'):
                 update_data['current_period_start'] = datetime.fromtimestamp(sub_dict['current_period_start'])
             if sub_dict.get('current_period_end'):
                 update_data['current_period_end'] = datetime.fromtimestamp(sub_dict['current_period_end'])
-            
+
             sub_ref.update(update_data)
             print(f"✅ Updated subscription status")
-            
+
             sub_doc = sub_ref.get()
             if sub_doc.exists:
                 user_id = sub_doc.to_dict().get('user_id')
@@ -9207,20 +8956,20 @@ def stripe_webhook():
                         'updated_at': firestore.SERVER_TIMESTAMP
                     })
                     print(f"✅ Updated user subscription status")
-    
+
     # ----- SUBSCRIPTION DELETED -----
     elif event['type'] == 'customer.subscription.deleted':
         print(f"\n❌ Subscription deleted")
         subscription = event['data']['object']
-        
+
         if hasattr(subscription, 'to_dict'):
             sub_dict = subscription.to_dict()
         else:
             sub_dict = dict(subscription)
-        
+
         subscription_id = sub_dict.get('id')
         print(f"   Subscription ID: {subscription_id}")
-        
+
         if subscription_id and db:
             sub_ref = db.collection('subscriptions').document(subscription_id)
             sub_ref.update({
@@ -9229,7 +8978,7 @@ def stripe_webhook():
                 'updated_at': firestore.SERVER_TIMESTAMP
             })
             print(f"✅ Marked subscription as canceled")
-            
+
             users_query = db.collection('users').where('subscription_id', '==', subscription_id).limit(1).stream()
             users_list = list(users_query)
             if users_list:
@@ -9239,7 +8988,7 @@ def stripe_webhook():
                     'updated_at': firestore.SERVER_TIMESTAMP
                 })
                 print(f"✅ Updated user subscription status")
-    
+
     print("=" * 80)
     return jsonify({'received': True}), 200
 
@@ -9249,7 +8998,7 @@ def get_user_subscription():
     """Get current user's subscription details"""
     try:
         user_id = g.user_id
-        
+
         # Query your database for user's subscription
         # This is a mock - replace with actual DB query
         subscription = {
@@ -9258,9 +9007,9 @@ def get_user_subscription():
             'creditsTotal': 3,
             'validUntil': '2026-04-18'
         }
-        
+
         return jsonify(subscription), 200
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -9275,11 +9024,6 @@ def get_user_profile():
     # Handle CORS preflight request
     if flask_request.method == 'OPTIONS':
         response = make_response()
-        response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Max-Age', '3600')
         return response, 200
 
     try:
@@ -9287,8 +9031,6 @@ def get_user_profile():
         auth_header = flask_request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             response = make_response(jsonify({'error': 'No Bearer token found'}), 401)
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
         token = auth_header.split(' ')[1]
@@ -9298,14 +9040,10 @@ def get_user_profile():
 
         if not isinstance(result, dict):
             response = make_response(jsonify({'error': 'Internal authentication error'}), 500)
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
         if not result.get('valid'):
             response = make_response(jsonify({'error': result.get('error', 'Invalid token')}), 401)
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
         user_id = result['payload'].get('uid')
@@ -9313,16 +9051,12 @@ def get_user_profile():
 
         if not user_id:
             response = make_response(jsonify({'error': 'Invalid token payload'}), 401)
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
         print(f"🔍 Getting profile for user: {user_id} ({user_email})")
 
         if not db:
             response = make_response(jsonify({'error': 'Database not available'}), 500)
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
 
         user_ref = db.collection('users').document(user_id)
@@ -9381,16 +9115,12 @@ def get_user_profile():
             print(f"✅ Created new user: {user_id}")
 
         response = make_response(jsonify(response_data), 200)
-        response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
 
     except Exception as e:
         print(f"❌ Get profile error: {e}")
         traceback.print_exc()
         response = make_response(jsonify({'error': str(e)}), 500)
-        response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
 
 @app.route("/api/user/activity", methods=['GET', 'OPTIONS'])
@@ -9400,11 +9130,8 @@ def get_user_activity():
     if flask_request.method == 'OPTIONS':
         response = make_response()
         # CORS handled by Flask-CORS
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
-    
+
     try:
         # Get authorization header
         auth_header = flask_request.headers.get('Authorization')
@@ -9412,29 +9139,28 @@ def get_user_activity():
             response = make_response(jsonify({'error': 'No Bearer token found'}), 401)
             # CORS handled by Flask-CORS
             return response
-        
+
         token = auth_header.split(' ')[1]
-        
+
         # Verify Firebase token
         result = verify_firebase_token(token)
         if not result['valid']:
             response = make_response(jsonify({'error': result.get('error')}), 401)
             # CORS handled by Flask-CORS
             return response
-        
+
         user_id = result['payload']['user_id']
-        
+
         print(f"🔍 Getting activity for user: {user_id}")
-        
+
         # Return empty activity array for now
         # You can expand this with real activity data from your database
         activity_data = []
-        
+
         response = make_response(jsonify(activity_data), 200)
         # CORS handled by Flask-CORS
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
-        
+
     except Exception as e:
         print(f"❌ Get user activity error: {e}")
         traceback.print_exc()
@@ -9502,17 +9228,17 @@ def manual_sync_subscription():
         print(f"🔄 MANUAL SYNC - User: {g.user_id}")
         print(f"   Email: {g.user_email}")
         print(f"   Time: {datetime.utcnow().isoformat()}")
-        
+
         # Initialize user variable
         user = None
         user_data = {}
-        
+
         # ===== STEP 1: GET USER FROM FIRESTORE =====
         if db:
             print(f"📡 Looking up user in Firestore: {g.user_id}")
             user_ref = db.collection('users').document(g.user_id)
             user_doc = user_ref.get()
-            
+
             if user_doc.exists:
                 user_data = user_doc.to_dict()
                 print(f"✅ Found user in Firestore:")
@@ -9521,7 +9247,7 @@ def manual_sync_subscription():
                 print(f"   Plan: {user_data.get('plan', 'None')}")
                 print(f"   Subscription ID: {user_data.get('subscription_id', 'None')}")
                 print(f"   Stripe Customer ID: {user_data.get('stripe_customer_id', 'None')}")
-                
+
                 # Create user object
                 from models import User
                 user = User(id=g.user_id, email=user_data.get('email', g.user_email))
@@ -9529,13 +9255,13 @@ def manual_sync_subscription():
                 user.plan = user_data.get('plan', 'free')
                 user.stripe_customer_id = user_data.get('stripe_customer_id')
                 user.subscription_status = user_data.get('subscription_status', 'inactive')
-                
+
                 # Add to in-memory cache for this request
                 users_db[g.user_id] = user
             else:
                 print(f"⚠️ User {g.user_id} not found in Firestore")
                 print(f"   Creating new user document...")
-                
+
                 # Create new user in Firestore
                 new_user_data = {
                     'email': g.user_email,
@@ -9547,10 +9273,10 @@ def manual_sync_subscription():
                     'created_at': firestore.SERVER_TIMESTAMP,
                     'updated_at': firestore.SERVER_TIMESTAMP
                 }
-                
+
                 user_ref.set(new_user_data)
                 print(f"✅ Created new user in Firestore: {g.user_id}")
-                
+
                 from models import User
                 user = User(id=g.user_id, email=g.user_email)
                 user.plan = 'free'
@@ -9565,19 +9291,19 @@ def manual_sync_subscription():
             else:
                 print(f"❌ User not found in memory")
                 return jsonify({'error': 'User not found in database'}), 404
-        
+
         if not user:
             print(f"❌ User object not available")
             return jsonify({'error': 'User not found'}), 404
-        
+
         # ===== STEP 2: GET STRIPE CUSTOMER ID =====
         stripe_customer_id = None
-        
+
         # Try to get from user object
         if hasattr(user, 'stripe_customer_id') and user.stripe_customer_id:
             stripe_customer_id = user.stripe_customer_id
             print(f"✅ Found Stripe customer ID in user record: {stripe_customer_id}")
-        
+
         # If not found, search by email
         if not stripe_customer_id:
             print(f"🔍 Searching for Stripe customer by email: {user.email}")
@@ -9586,10 +9312,10 @@ def manual_sync_subscription():
                 if customers.data:
                     stripe_customer_id = customers.data[0].id
                     print(f"✅ Found Stripe customer by email: {stripe_customer_id}")
-                    
+
                     # Update user with Stripe customer ID
                     user.stripe_customer_id = stripe_customer_id
-                    
+
                     # Update Firestore
                     if db:
                         user_ref = db.collection('users').document(g.user_id)
@@ -9601,13 +9327,13 @@ def manual_sync_subscription():
                 else:
                     print(f"⚠️ No Stripe customer found for email: {user.email}")
                     return jsonify({
-                        'success': False, 
+                        'success': False,
                         'message': 'No Stripe customer found. Please complete a purchase first.'
                     }), 404
             except Exception as e:
                 print(f"❌ Error searching Stripe customers: {e}")
                 return jsonify({'success': False, 'message': f'Stripe error: {str(e)}'}), 500
-        
+
         # ===== STEP 3: GET ACTIVE SUBSCRIPTIONS FROM STRIPE =====
         try:
             print(f"🔍 Fetching active subscriptions for customer: {stripe_customer_id}")
@@ -9616,7 +9342,7 @@ def manual_sync_subscription():
                 status='active',
                 limit=1
             )
-            
+
             if not subscriptions.data:
                 # Check for past_due or incomplete subscriptions
                 print(f"⚠️ No active subscriptions, checking for past_due...")
@@ -9625,47 +9351,47 @@ def manual_sync_subscription():
                     status='past_due',
                     limit=1
                 )
-                
+
                 if not subscriptions.data:
                     subscriptions = stripe.Subscription.list(
                         customer=stripe_customer_id,
                         status='incomplete',
                         limit=1
                     )
-            
+
             if subscriptions.data:
                 stripe_sub = subscriptions.data[0]
                 print(f"✅ Found subscription in Stripe:")
                 print(f"   ID: {stripe_sub.id}")
                 print(f"   Status: {stripe_sub.status}")
                 print(f"   Cancel at period end: {stripe_sub.cancel_at_period_end}")
-                
+
                 # Get plan from price
                 price_id = stripe_sub['items']['data'][0]['price']['id']
                 plan_id = get_plan_from_price_id(price_id)
                 print(f"   Price ID: {price_id}")
                 print(f"   Plan: {plan_id}")
-                
+
                 # Safely get period dates
                 current_period_start = None
                 current_period_end = None
-                
+
                 if hasattr(stripe_sub, 'current_period_start'):
                     current_period_start = datetime.fromtimestamp(stripe_sub.current_period_start)
                 elif 'current_period_start' in stripe_sub:
                     current_period_start = datetime.fromtimestamp(stripe_sub['current_period_start'])
-                
+
                 if hasattr(stripe_sub, 'current_period_end'):
                     current_period_end = datetime.fromtimestamp(stripe_sub.current_period_end)
                 elif 'current_period_end' in stripe_sub:
                     current_period_end = datetime.fromtimestamp(stripe_sub['current_period_end'])
-                
+
                 print(f"   Period: {current_period_start} to {current_period_end}")
-                
+
                 # ===== STEP 4: UPDATE USER IN FIRESTORE =====
                 if db:
                     user_ref = db.collection('users').document(g.user_id)
-                    
+
                     update_data = {
                         'subscription_id': stripe_sub.id,
                         'plan': plan_id,
@@ -9676,10 +9402,10 @@ def manual_sync_subscription():
                         'cancel_at_period_end': stripe_sub.cancel_at_period_end,
                         'updated_at': firestore.SERVER_TIMESTAMP
                     }
-                    
+
                     user_ref.update(update_data)
                     print(f"✅ Updated user in Firestore with subscription data")
-                
+
                 # Update in-memory user
                 user.subscription_id = stripe_sub.id
                 user.plan = plan_id
@@ -9689,10 +9415,10 @@ def manual_sync_subscription():
                 user.current_period_end = current_period_end
                 user.cancel_at_period_end = stripe_sub.cancel_at_period_end
                 users_db[g.user_id] = user
-                
+
                 # ===== STEP 5: CREATE/UPDATE SUBSCRIPTION RECORD =====
                 from models import Subscription
-                
+
                 # Check if subscription exists in subscriptions_db
                 if stripe_sub.id not in subscriptions_db:
                     subscription = Subscription(
@@ -9715,7 +9441,7 @@ def manual_sync_subscription():
                     subscription.current_period_end = current_period_end
                     subscription.cancel_at_period_end = stripe_sub.cancel_at_period_end
                     print(f"✅ Updated existing subscription record")
-                
+
                 # Also store subscription in Firestore if you have a subscriptions collection
                 if db:
                     sub_ref = db.collection('subscriptions').document(stripe_sub.id)
@@ -9731,7 +9457,7 @@ def manual_sync_subscription():
                         'updated_at': firestore.SERVER_TIMESTAMP
                     }, merge=True)
                     print(f"✅ Stored subscription in Firestore")
-                
+
                 # ===== STEP 6: GRANT GENERATOR CREDITS IF APPLICABLE =====
                 if plan_id == 'generator':
                     if db:
@@ -9741,14 +9467,14 @@ def manual_sync_subscription():
                             'next_credit_refresh': datetime.utcnow() + timedelta(days=30)
                         })
                     print(f"✅ Granted generator credits")
-                
+
                 print(f"\n✅ SYNC COMPLETE!")
                 print(f"   User: {user.email}")
                 print(f"   Plan: {plan_id}")
                 print(f"   Status: {stripe_sub.status}")
                 print(f"   Subscription ID: {stripe_sub.id}")
                 print("=" * 60)
-                
+
                 # Return subscription data
                 return jsonify({
                     'success': True,
@@ -9764,28 +9490,28 @@ def manual_sync_subscription():
             else:
                 print(f"⚠️ No active subscriptions found in Stripe for customer: {stripe_customer_id}")
                 print(f"   Checking if user has any subscriptions at all...")
-                
+
                 # Check for any subscriptions (including canceled)
                 all_subs = stripe.Subscription.list(
                     customer=stripe_customer_id,
                     limit=5
                 )
-                
+
                 if all_subs.data:
                     print(f"   Found {len(all_subs.data)} total subscriptions:")
                     for sub in all_subs.data:
                         print(f"     - {sub.id}: {sub.status}")
-                
+
                 return jsonify({
-                    'success': False, 
+                    'success': False,
                     'message': 'No active subscription found. Please purchase a plan first.'
                 }), 404
-                
+
         except Exception as e:
             print(f"❌ Error fetching Stripe subscriptions: {e}")
             traceback.print_exc()
             return jsonify({'success': False, 'message': f'Stripe error: {str(e)}'}), 500
-        
+
     except Exception as e:
         print(f"❌ Manual sync error: {e}")
         traceback.print_exc()
@@ -9818,25 +9544,26 @@ def refresh_subscription():
     try:
         user = users_db.get(g.user_id)
         if not user or not user.stripe_customer_id:
+    PLANS = {}  # TODO: Define your pricing plans
             return jsonify({'success': False, 'error': 'No Stripe customer found'}), 404
-        
+
         # Get all subscriptions for this customer from Stripe
         subscriptions = stripe.Subscription.list(
             customer=user.stripe_customer_id,
             limit=1,
             status='active'
         )
-        
+
         if subscriptions.data:
             stripe_sub = subscriptions.data[0]
-            
+
             # Update or create subscription in your DB
             subscription_id = stripe_sub.id
             plan_id = None  # You'll need to map from price ID
-            
+
             # Get price ID
             price_id = stripe_sub['items']['data'][0]['price']['id']
-            
+
             # Map to plan ID
             price_to_plan = {
                 'price_1TBpvaA3tlI8MNZjT4rmDzFm': 'starter',
@@ -9847,18 +9574,18 @@ def refresh_subscription():
                 'price_1TBqVUA3tlI8MNZjlDK9POuj': 'generator',
             }
             plan_id = price_to_plan.get(price_id, 'free')
-            
+
             # Update user
             user.subscription_id = subscription_id
             user.plan = plan_id
             user.subscription_status = stripe_sub.status
-            
+
             # Create or update subscription record
             if subscription_id not in subscriptions_db:
                 subscriptions_db[subscription_id] = Subscription(
                     user.id, plan_id, subscription_id, user.stripe_customer_id
                 )
-            
+
             return jsonify({
                 'success': True,
                 'subscription': {
@@ -9867,9 +9594,9 @@ def refresh_subscription():
                     'status': stripe_sub.status
                 }
             })
-        
+
         return jsonify({'success': False, 'error': 'No active subscription found'}), 404
-        
+
     except Exception as e:
         print(f"Refresh subscription error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -9883,18 +9610,18 @@ def verify_checkout_session():
     try:
         data = flask_request.json
         session_id = data.get('sessionId')
-        
+
         if not session_id:
             return jsonify({'error': 'Session ID required'}), 400
-        
+
         # Just check the user's subscription in Firestore
         user_ref = db.collection('users').document(g.user_id)
         user_doc = user_ref.get()
-        
+
         if user_doc.exists:
             user_data = user_doc.to_dict()
             plan = user_data.get('plan', 'free')
-            
+
             return jsonify({
                 'success': True,
                 'type': 'subscription',
@@ -9903,9 +9630,9 @@ def verify_checkout_session():
                     'status': 'active' if plan != 'free' else 'inactive'
                 }
             })
-        
+
         return jsonify({'success': False, 'message': 'User not found'}), 404
-        
+
     except Exception as e:
         print(f"❌ Error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -9918,15 +9645,15 @@ def validate_promo_code(promo_code):
         # First, try to retrieve as a promotion code
         promo = stripe.PromotionCode.retrieve(promo_code)
         print(f"🔍 Retrieved promotion code: {promo.code}, coupon: {promo.coupon.id}")
-        
+
         # Check if the promotion code is active and within its valid dates
         if not promo.active:
             return {'valid': False, 'message': 'Promotion code is inactive'}
-        
+
         # Check expiration
         if promo.expires_at and promo.expires_at < int(time.time()):
             return {'valid': False, 'message': 'Promotion code has expired'}
-        
+
         # Get the underlying coupon
         coupon = promo.coupon
         if coupon.valid:
@@ -9938,7 +9665,7 @@ def validate_promo_code(promo_code):
             }
         else:
             return {'valid': False, 'message': 'Coupon is invalid'}
-            
+
     except stripe.error.InvalidRequestError as e:
         # If not a promotion code, try as a coupon (fallback)
         try:
@@ -9986,20 +9713,20 @@ def create_subscription_checkout():
         data = flask_request.json
         plan_id = data.get('planId')
         interval = data.get('interval', 'month')
-        
+
         # Map plan_id to your price IDs
         price_ids = {
             'starter': 'price_YOUR_STARTER_PRICE_ID',     # Create this in Stripe
             'analytics': 'price_YOUR_ANALYTICS_PRICE_ID', # Create this in Stripe
             'generator': 'price_1TN2WPA3tlI8MNZjrgD5gGqB', # Your existing price ID
         }
-        
+
         price_id = price_ids.get(plan_id)
         if not price_id:
             return jsonify({'error': f'Invalid plan: {plan_id}'}), 400
-        
+
         FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
-        
+
         session_params = {
             'payment_method_types': ['card'],
             'mode': 'subscription',
@@ -10018,18 +9745,18 @@ def create_subscription_checkout():
                 'type': 'subscription'
             }
         }
-        
+
         session = stripe.checkout.Session.create(**session_params)
-        
+
         print(f"🔗 CHECKOUT URL: {session.url}")
         print(f"✅ Subscription checkout created: {session.id}")
-        
+
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url
         }), 200
-        
+
     except Exception as e:
         print(f"❌ Subscription checkout error: {e}")
         print(f"🔑 Using Stripe API key: {stripe.api_key[:20]}...")
@@ -10040,18 +9767,6 @@ def create_subscription_checkout():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/debug/stripe-account', methods=['GET'])
-def debug_stripe_account():
-    try:
-        account = stripe.Account.retrieve()
-        return jsonify({
-            'account_id': account.id,
-            'email': account.email,
-            'business_name': account.business_name
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 @app.route("/api/subscriptions/create-checkout-test", methods=['POST'])
 def create_subscription_checkout_test():
     try:
@@ -10060,13 +9775,13 @@ def create_subscription_checkout_test():
         interval = data.get('interval', 'month')
         user_id = "DRlS9wfiFnbNnC0rGgsGcrzEjuY2"
         user_email = "test6@gmail.com"
-        
+
         # Use the correct recurring price ID
         price_id = "price_1TN2WPA3tlI8MNZjrgD5gGqB"
-        
+
         FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
         PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_YOUR_KEY')
-        
+
         session_params = {
             'payment_method_types': ['card'],
             'mode': 'subscription',
@@ -10085,16 +9800,16 @@ def create_subscription_checkout_test():
                 'type': 'subscription'
             }
         }
-        
+
         session = stripe.checkout.Session.create(**session_params)
-        
+
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url,
             'publishableKey': PUBLISHABLE_KEY
         }), 200
-        
+
     except Exception as e:
         print(f"❌ Test checkout error: {e}")
         traceback.print_exc()
@@ -10108,22 +9823,22 @@ def cancel_subscription_endpoint():
         user = users_db.get(g.user_id)
         if not user or not user.subscription_id:
             return jsonify({'success': False, 'error': 'No active subscription'}), 404
-        
+
         subscription = subscriptions_db.get(user.subscription_id)
         if not subscription:
             return jsonify({'success': False, 'error': 'Subscription not found'}), 404
-        
+
         from services.stripe_service import cancel_subscription as stripe_cancel
         success = stripe_cancel(subscription.stripe_subscription_id)
-        
+
         if success:
             subscription.cancel_at_period_end = True
-        
+
         return jsonify({
             'success': success,
             'message': 'Subscription will be canceled at the end of the billing period'
         })
-        
+
     except Exception as e:
         print(f"Cancel subscription error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -10136,22 +9851,22 @@ def reactivate_subscription_endpoint():
         user = users_db.get(g.user_id)
         if not user or not user.subscription_id:
             return jsonify({'success': False, 'error': 'No subscription found'}), 404
-        
+
         subscription = subscriptions_db.get(user.subscription_id)
         if not subscription:
             return jsonify({'success': False, 'error': 'Subscription not found'}), 404
-        
+
         from services.stripe_service import reactivate_subscription
         success = reactivate_subscription(subscription.stripe_subscription_id)
-        
+
         if success:
             subscription.cancel_at_period_end = False
-        
+
         return jsonify({
             'success': success,
             'message': 'Subscription reactivated successfully'
         })
-        
+
     except Exception as e:
         print(f"Reactivate subscription error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -10166,25 +9881,25 @@ def create_generator_pick_checkout():
     try:
         data = flask_request.json
         quantity = data.get('quantity', 1)
-        
+
         if quantity < 1 or quantity > 100:
             return jsonify({'error': 'Invalid quantity'}), 400
-        
+
         user_id = g.user_id
         user_email = g.user_email
-        
+
         FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
-        
+
         # Individual generator pick price ID
         price_id = 'price_1TBr3CA3tlI8MNZj70WwJBuN'
-        
+
         # Calculate amount for metadata (assuming $0.99 per pick)
         amount_per_pick = 0.99
         total_amount = amount_per_pick * quantity
-        
+
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
-            line_items=[{ 
+            line_items=[{
                 'price': price_id,
                 'quantity': quantity,
             }],
@@ -10194,25 +9909,25 @@ def create_generator_pick_checkout():
             client_reference_id=user_id,
             customer_email=user_email,
             metadata={
-                'user_id': user_id,   
+                'user_id': user_id,
                 'type': 'generator_pick',
                 'quantity': quantity
             }
         )
-        
+
         print(f"✅ Generator pick checkout created: {session.id}")
         print(f"   Quantity: {quantity}")
         print(f"   Amount: ${total_amount}")
-        
+
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url
         })
-            
+
     except Exception as e:
         print(f"❌ Generator pick checkout error: {str(e)}")
-        traceback.print_exc()  
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route("/api/generator/items", methods=['GET'])
@@ -10245,21 +9960,21 @@ def create_generator_checkout_endpoint():
         user = users_db.get(g.user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
-        
+
         data = request.json
         items = data.get('items', [])
-        
+
         if not items:
             return jsonify({'success': False, 'error': 'No items selected'}), 400
-        
+
         result = create_generator_checkout(user.id, user.email, items)
-        
+
         return jsonify({
             'success': True,
             'sessionId': result['session_id'],
             'url': result['url']
         })
-        
+
     except Exception as e:
         print(f"Create generator checkout error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -10270,13 +9985,13 @@ def generator_credits_checkout():
     """Create Stripe checkout for generator credits using dynamic pricing"""
     try:
         print(f"🛒 Creating generator credits checkout for user: {g.user_id}")
-               
+
         if not stripe.api_key:
             return jsonify({'error': 'Stripe not configured'}), 500
-            
+
         data = flask_request.json
         credits_amount = data.get('credits', 10)
-            
+
         # Map credits to prices - MATCH YOUR ACTUAL STRIPE PRICES
         credit_prices = {
             1: 1.99,
@@ -10288,7 +10003,7 @@ def generator_credits_checkout():
         amount = credit_prices.get(credits_amount)
         if not amount:
             return jsonify({'error': f'Invalid credits amount: {credits_amount}. Available: 1, 10, 20, 50'}), 400
-    
+
         # Get base URL
         base_url = flask_request.host_url.rstrip('/')
         is_dev = 'localhost' in base_url or '127.0.0.1' in base_url
@@ -10300,11 +10015,11 @@ def generator_credits_checkout():
         else:
             success_url = f'https://sportsanalyticsgpt.com/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&type=credits&credits={credits_amount}&value={amount}'
             cancel_url = 'https://sportsanalyticsgpt.com/subscription/cancel'
-        
+
         # Create a product name for this purchase
         product_name = f"{credits_amount} Generator Credits"
         product_description = f"Purchase {credits_amount} generator credits for AI predictions and generator features"
-            
+
         # Create checkout session with dynamic line item (one-time payment)
         checkout_params = {
             'payment_method_types': ['card'],
@@ -10315,7 +10030,7 @@ def generator_credits_checkout():
                         'name': product_name,
                         'description': product_description,
                     },
-                    'unit_amount': int(amount * 100),  # Convert to cents   
+                    'unit_amount': int(amount * 100),  # Convert to cents
                 },
                 'quantity': 1,
             }],
@@ -10336,13 +10051,13 @@ def generator_credits_checkout():
         print(f"✅ Credits checkout session created: {session.id}")
         print(f"   Credits: {credits_amount}")
         print(f"   Amount: ${amount}")
-    
+
         return jsonify({
             'success': True,
             'sessionId': session.id,
             'url': session.url
-        }), 200   
-            
+        }), 200
+
     except Exception as e:
         print(f"❌ Credits checkout error: {e}")
         traceback.print_exc()
@@ -10351,47 +10066,84 @@ def generator_credits_checkout():
 @app.route("/api/generator/use", methods=['POST'])
 @login_required
 def use_generator_credit():
-    """Use a generator credit"""
+    """Use a generator credit - uses Redis system"""
     try:
-        user = users_db.get(g.user_id)
-        if not user:
-            return jsonify({'success': False, 'error': 'User not found'}), 404
-        
-        data = request.json
-        pick_type = data.get('pickType')
-        pick_data = data.get('pickData')
-        
-        # Check if user has unlimited credits from subscription
-        has_unlimited = False
-        if user.subscription_id and user.subscription_id in subscriptions_db:
-            sub = subscriptions_db[user.subscription_id]
-            has_unlimited = sub.features.get('generator_credits_per_month') == -1
-        
-        if not has_unlimited and user.generator_credits < 1:
-            return jsonify({'success': False, 'error': 'Insufficient credits'}), 400
-        
-        if not has_unlimited:
-            user.generator_credits -= 1
-        
-        # Record usage
-        # Find most recent generator pick
-        for pick in generator_picks_db.values():
-            if pick.user_id == user.id and pick.status == 'completed' and pick.credits_added:
-                pick.used_at.append({
-                    'date': datetime.utcnow().isoformat(),
-                    'pick': json.dumps(pick_data),
-                    'result': 'pending'
-                })
-                break
-        
-        return jsonify({
-            'success': True,
-            'credits_remaining': user.generator_credits if not has_unlimited else -1,
-            'message': 'Generator pick used successfully'
-        })
-        
+        user_id = g.user_id
+
+        # Check if user has unlimited credits (admin)
+        if user_has_unlimited_credits(user_id):
+            return jsonify({
+                'success': True,
+                'credits_remaining': 999999,
+                'message': 'Generator pick used successfully (unlimited)'
+            })
+
+        # Use the Redis-based decrement system
+        key = f"user:gen:{user_id}"
+
+        if "redis_client" in globals() and redis_client:
+            # Get current remaining
+            remaining_raw = redis_client.hget(key, "remaining")
+            if remaining_raw is None:
+                remaining = DAILY_LIMIT
+            else:
+                if isinstance(remaining_raw, bytes):
+                    remaining_raw = remaining_raw.decode('utf-8')
+                remaining = int(remaining_raw)
+
+            # Check daily reset
+            last_reset_raw = redis_client.hget(key, "last_reset")
+            if last_reset_raw:
+                if isinstance(last_reset_raw, bytes):
+                    last_reset_raw = last_reset_raw.decode('utf-8')
+                try:
+                    last_reset_dt = datetime.fromisoformat(last_reset_raw)
+                    if datetime.utcnow() - last_reset_dt > timedelta(hours=24):
+                        remaining = remaining + DAILY_LIMIT  # ✅ ADD to existing credits
+                        redis_client.hset(key, "remaining", remaining)
+                        redis_client.hset(key, "last_reset", datetime.utcnow().isoformat())
+                        print(f"🔄 Daily reset: Added {DAILY_LIMIT} credits to user {user_id}. New total: {remaining}")
+                except:
+                    pass
+
+            if remaining <= 0:
+                return jsonify({'success': False, 'error': 'Insufficient credits'}), 400
+
+            # Decrement
+            new_remaining = remaining - 1
+            redis_client.hset(key, "remaining", new_remaining)
+
+            return jsonify({
+                'success': True,
+                'credits_remaining': new_remaining,
+                'message': 'Generator pick used successfully'
+            })
+        else:
+            # Fallback to in-memory store
+            if user_id not in user_gen_store:
+                user_gen_store[user_id] = {"remaining": DAILY_LIMIT, "last_reset": datetime.utcnow().isoformat()}
+
+            # Check reset
+            data = user_gen_store[user_id]
+            last_reset_dt = datetime.fromisoformat(data["last_reset"])
+            if datetime.utcnow() - last_reset_dt > timedelta(hours=24):
+                data["remaining"] = data["remaining"] + DAILY_LIMIT
+                data["last_reset"] = datetime.utcnow().isoformat()
+
+            if data["remaining"] <= 0:
+                return jsonify({'success': False, 'error': 'Insufficient credits'}), 400
+
+            data["remaining"] -= 1
+
+            return jsonify({
+                'success': True,
+                'credits_remaining': data["remaining"],
+                'message': 'Generator pick used successfully'
+            })
+
     except Exception as e:
         print(f"Use generator credit error: {e}")
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ------------------------------------------------------------------------------
@@ -10474,7 +10226,7 @@ def debug_kalshi_markets():
                 "error": "Failed to fetch markets",
                 "markets": []
             }), 500
-        
+
         # Show sample of markets
         sample_markets = []
         for market in markets[:5]:
@@ -10487,7 +10239,7 @@ def debug_kalshi_markets():
                 "close_time": market.get('close_time'),
                 "status": market.get('status')
             })
-        
+
         return jsonify({
             "success": True,
             "total_markets": len(markets),
@@ -10507,7 +10259,7 @@ def kalshi_predictions():
         print(f"📊 GET /api/kalshi/predictions: sport={sport}")
 
         markets = fetch_kalshi_markets(sport)
-        
+
         if markets is None:
             print("⚠️ Kalshi API unavailable, using mock data")
             mock_markets = generate_mock_kalshi_markets(sport)
@@ -10520,7 +10272,7 @@ def kalshi_predictions():
             is_mock = True
         else:
             print(f"✅ Retrieved {len(markets)} raw markets from Kalshi")
-            
+
             # Transform all markets first
             all_predictions = []
             for market in markets:
@@ -10530,13 +10282,13 @@ def kalshi_predictions():
                 except Exception as e:
                     print(f"❌ Error transforming market {market.get('ticker')}: {e}")
                     continue
-            
+
             # Filter out sports markets (category "Sports")
             predictions = [p for p in all_predictions if p.get('category') != 'Sports']
-            
+
             # Also filter out markets with very low volume or that are closed
             predictions = [p for p in predictions if p.get('volume', '0') != '0']
-            
+
             print(f"📊 After filtering: {len(predictions)} non-sports predictions")
             is_mock = False
 
@@ -10577,28 +10329,28 @@ def get_fantasy_players():
         if sport == "nba":
             # Import your comprehensive NBA database
             from nba_static_data import NBA_PLAYERS_2026
-            
+
             print(
                 f"📦 Using comprehensive NBA static data ({len(NBA_PLAYERS_2026)} players)",
                 flush=True,
             )
-            
+
             transformed = []
             # Optionally sort by fantasy points to get best players first
             sorted_players = sorted(
-                NBA_PLAYERS_2026, 
-                key=lambda x: x.get("fantasy_points", 0), 
+                NBA_PLAYERS_2026,
+                key=lambda x: x.get("fantasy_points", 0),
                 reverse=True
             )
 
             # Use all players up to the limit
             players_to_use = sorted_players[:min(len(sorted_players), limit)]
-            
+
             print(f"✅ Returning {len(players_to_use)} players from comprehensive NBA database", flush=True)
 
             for player in players_to_use:
                 fp = player.get("fantasy_points", 0)
-                
+
                 # Calculate salary based on fantasy points
                 BASE_SALARY_MIN = 3000
                 BASE_SALARY_MAX = 11000
@@ -10619,7 +10371,7 @@ def get_fantasy_players():
                     "G": 1.0,
                     "F": 1.1,
                 }.get(player.get("position", ""), 1.0)
-                
+
                 rand_factor = random.uniform(0.9, 1.1)
                 salary = int(base_salary * pos_mult * rand_factor)
                 salary = max(3000, min(15000, salary))
@@ -10684,11 +10436,11 @@ def get_fantasy_players():
         elif sport == "nfl":
             from nfl_static_data import NFL_PLAYERS
             # ... handle NFL ...
-            
+
         elif sport == "mlb":
             from mlb_static_data import MLB_PLAYERS
             # ... handle MLB ...
-            
+
         elif sport == "nhl":
             from nhl_static_data import NHL_PLAYERS
             # ... handle NHL ...
@@ -10834,7 +10586,7 @@ def get_tank01_injuries():
     """Get injuries from Tank01 API"""
     try:
         sport = flask_request.args.get("sport", "nba").lower()
-        
+
         # Map sport to Tank01 endpoint
         tank01_endpoints = {
             'nba': 'getNBAInjuryList',
@@ -10842,35 +10594,35 @@ def get_tank01_injuries():
             'mlb': 'getMLBInjuryList',
             'nhl': 'getNHLInjuryList'
         }
-        
+
         endpoint = tank01_endpoints.get(sport, 'getNBAInjuryList')
-        
+
         # Make request to Tank01 API
         url = f"https://tank01-fantasy-stats.p.rapidapi.com/{endpoint}"
-        
+
         headers = {
             "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY", "your-key-here"),
             "x-rapidapi-host": "tank01-fantasy-stats.p.rapidapi.com"
         }
-        
+
         print(f"📡 Tank01 request: {url}")
         response = requests.get(url, headers=headers, timeout=15)
-        
+
         if response.status_code == 200:
             data = response.json()
-            
+
             # Transform Tank01 data to our format
             injuries = []
-            
+
             if sport == 'nba' and 'body' in data:
                 for player in data['body']:
                     # Extract player name
                     player_name = player.get('longName', '')
-                    
+
                     # Skip if no name
                     if not player_name:
                         continue
-                    
+
                     # Parse injury details
                     injury = {
                         'player': player_name,
@@ -10887,9 +10639,9 @@ def get_tank01_injuries():
                         'publishedAt': datetime.now(timezone.utc).isoformat()
                     }
                     injuries.append(injury)
-            
+
             print(f"✅ Processed {len(injuries)} injuries for {sport}")
-            
+
             return jsonify({
                 "success": True,
                 "data": injuries,
@@ -10903,7 +10655,7 @@ def get_tank01_injuries():
                 "error": f"Tank01 API error: {response.status_code}",
                 "data": []
             })
-            
+
     except Exception as e:
         print(f"❌ Error fetching Tank01 injuries: {e}")
         import traceback
@@ -10919,15 +10671,15 @@ def get_beat_writers():
     """Get list of beat writers for a sport"""
     try:
         sport = flask_request.args.get("sport", "NBA").upper()
-        
+
         sport_writers = BEAT_WRITERS_BY_SPORT.get(sport, NBA_BEAT_WRITERS)
-        
+
         # Count total writers
         total_writers = 0
         for team, writers in sport_writers.items():
             if isinstance(writers, list):
                 total_writers += len(writers)
-        
+
         return jsonify({
             "success": True,
             "sport": sport,
@@ -10935,7 +10687,7 @@ def get_beat_writers():
             "total_writers": total_writers,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
-        
+
     except Exception as e:
         print(f"❌ Error in beat-writers: {e}")
         return jsonify({"success": False, "error": str(e), "beat_writers": {}})
@@ -10945,28 +10697,28 @@ def get_sports_wire_frontend_format():
     """Transform existing sports wire data to match frontend SportsWireScreen expectations"""
     try:
         sport = flask_request.args.get("sport", "nba").lower()
-        
+
         # Call your existing enhanced endpoint
         enhanced_response = get_enhanced_sports_wire()
-        
+
         # Extract the JSON data
         if hasattr(enhanced_response, 'get_json'):
             data = enhanced_response.get_json()
         else:
             data = enhanced_response
-        
+
         if not data.get("success"):
             return jsonify({"success": False, "error": "Failed to fetch data"})
-        
+
         # Transform to frontend PlayerProp format
         transformed_news = []
         injury_list = []
         beat_writer_list = []
-        
+
         for item in data.get("news", []):
             category = item.get("category", "news")
             sport_name = item.get("sport", sport.upper())
-            
+
             # Handle source object properly
             source_name = ""
             source_twitter = ""
@@ -10975,7 +10727,7 @@ def get_sports_wire_frontend_format():
                 source_twitter = item.get("source", {}).get("twitter", "")
             else:
                 source_name = str(item.get("source", "Unknown"))
-            
+
             # Extract player name with better logic
             player_name = item.get("player", "")
             if not player_name and category == "beat-writers":
@@ -11003,7 +10755,7 @@ def get_sports_wire_frontend_format():
                             player_name = " ".join(words) if words else "NBA Player"
                 elif not player_name:
                     player_name = "NBA Player"
-            
+
             # Extract team with better logic
             team = item.get("team", "")
             if not team and category == "beat-writers":
@@ -11012,14 +10764,14 @@ def get_sports_wire_frontend_format():
                 desc = item.get("description", "")
                 combined = title + " " + desc
                 # Check for team abbreviations
-                nba_teams = ["ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW", 
-                            "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK", 
+                nba_teams = ["ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
+                            "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
                             "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS"]
                 for team_abbr in nba_teams:
                     if team_abbr in combined:
                         team = team_abbr
                         break
-            
+
             # Format time nicely
             time_str = item.get("publishedAt", "")
             try:
@@ -11028,7 +10780,7 @@ def get_sports_wire_frontend_format():
                 now = datetime.now(timezone.utc)
                 diff = now - pub_time
                 minutes = diff.total_seconds() / 60
-                
+
                 if minutes < 1:
                     time_display = "Just now"
                 elif minutes < 60:
@@ -11039,7 +10791,7 @@ def get_sports_wire_frontend_format():
                     time_display = f"{int(minutes / 1440)} days ago"
             except:
                 time_display = item.get("time", "Recently")
-            
+
             # Build the PlayerProp object
             player_prop = {
                 "id": item.get("id", f"{category}-{hash(str(item))}"),
@@ -11057,18 +10809,18 @@ def get_sports_wire_frontend_format():
                 "category": category,
                 "url": item.get("url", f"https://www.google.com/search?q={item.get('title', '')}"),
                 "image": item.get("urlToImage"),
-                
+
                 # Injury specific fields
                 "injuryStatus": item.get("injury_status") if category == "injury" else None,
                 "rawInjuryStatus": item.get("injury_status") if category == "injury" else None,
                 "expectedReturn": item.get("expected_return") if category == "injury" else None,
-                
+
                 # Beat writer specific fields
                 "isBeatWriter": category == "beat-writers",
                 "author": item.get("author", source_name),
                 "outlet": source_name,
                 "twitter": source_twitter or item.get("twitter", ""),
-                
+
                 # Original article
                 "originalArticle": {
                     "id": item.get("id"),
@@ -11082,22 +10834,22 @@ def get_sports_wire_frontend_format():
                     "team": team
                 }
             }
-            
+
             transformed_news.append(player_prop)
-            
+
             # Separate by type
             if category == "injury":
                 injury_list.append(player_prop)
             elif category == "beat-writers":
                 beat_writer_list.append(player_prop)
-        
+
         # Calculate breakdowns for injury dashboard
         severity_breakdown = {
             "severe": len([i for i in injury_list if i.get("injuryStatus") in ["Out", "Doubtful"]]),
             "moderate": len([i for i in injury_list if i.get("injuryStatus") in ["Questionable"]]),
             "mild": len([i for i in injury_list if i.get("injuryStatus") in ["Day-to-day", "Probable"]])
         }
-        
+
         status_breakdown = {
             "out": len([i for i in injury_list if i.get("injuryStatus") == "Out"]),
             "questionable": len([i for i in injury_list if i.get("injuryStatus") == "Questionable"]),
@@ -11105,14 +10857,14 @@ def get_sports_wire_frontend_format():
             "day_to_day": len([i for i in injury_list if i.get("injuryStatus") == "Day-to-day"]),
             "probable": len([i for i in injury_list if i.get("injuryStatus") == "Probable"])
         }
-        
+
         team_injuries = {}
         for injury in injury_list:
             team_name = injury.get("team", "Unknown")
             team_injuries[team_name] = team_injuries.get(team_name, 0) + 1
-        
+
         top_injured_teams = sorted(team_injuries.items(), key=lambda x: x[1], reverse=True)[:5]
-        
+
         injury_dashboard = {
             "total_injuries": len(injury_list),
             "severity_breakdown": severity_breakdown,
@@ -11126,9 +10878,9 @@ def get_sports_wire_frontend_format():
                 "expected_return": i.get("expectedReturn", "TBD")
             } for i in injury_list[:15]]
         }
-        
+
         print(f"📊 Transformation complete: {len(transformed_news)} total ({len(injury_list)} injuries, {len(beat_writer_list)} beat writers)")
-        
+
         return jsonify({
             "success": True,
             "processedNews": transformed_news,
@@ -11142,7 +10894,7 @@ def get_sports_wire_frontend_format():
             },
             "sport": sport
         })
-        
+
     except Exception as e:
         print(f"❌ Error transforming sports wire: {e}")
         import traceback
@@ -11159,27 +10911,27 @@ def extract_player_name(item):
     """Extract player name from news item"""
     if item.get("player"):
         return item["player"]
-    
+
     title = item.get("title", "")
     # Look for common patterns like "Player Name Injury Update"
     if "injury update" in title.lower():
         parts = title.split(" Injury Update")
         if parts:
             return parts[0].strip()
-    
+
     return "Unknown Player"
 
 def extract_team(item):
     """Extract team from news item"""
     if item.get("team"):
         return item["team"]
-    
+
     # Try to extract from description or title
     text = item.get("description", "") + item.get("title", "")
     for team in NBA_TEAM_ABBR:
         if team in text:
             return team
-    
+
     return "Unknown"
 
 def get_prop_type(category):
@@ -11197,15 +10949,15 @@ def format_time_ago(published_at):
     """Format publishedAt to relative time string"""
     if not published_at:
         return "Recently"
-    
+
     try:
         from dateutil import parser
         pub_time = parser.parse(published_at)
         now = datetime.now(timezone.utc)
-        
+
         diff = now - pub_time
         minutes = diff.total_seconds() / 60
-        
+
         if minutes < 60:
             return f"{int(minutes)} minutes ago"
         elif minutes < 1440:
@@ -11222,13 +10974,13 @@ def get_enhanced_sports_wire():
         sport = flask_request.args.get("sport", "nba").lower()
         include_beat_writers = flask_request.args.get("include_beat_writers", "true").lower() == "true"
         include_injuries = flask_request.args.get("include_injuries", "true").lower() == "true"
-        
+
         print(f"🔍 ENHANCED ENDPOINT CALLED - Sport: {sport.upper()}, Beat Writers: {include_beat_writers}, Injuries: {include_injuries}")
-        
+
         all_news = []
         regular_count = beat_count = injury_count = 0
         sport_counts = {"nba": 0, "nfl": 0, "mlb": 0, "nhl": 0, "other": 0}
-        
+
         # ----- Regular news -----
         try:
             print(f"📰 Fetching regular sports wire for {sport}...")
@@ -11247,13 +10999,13 @@ def get_enhanced_sports_wire():
                                 sport_counts[item_sport] += 1
                             else:
                                 sport_counts["other"] += 1
-                    
+
                     all_news.extend(filtered_news)
                     regular_count = len(filtered_news)
                     print(f"✅ Regular news: {len(news)} total, {regular_count} filtered for {sport}")
         except Exception as e:
             print(f"⚠️ Error fetching regular news: {e}")
-        
+
         # ----- Beat writer news -----
         if include_beat_writers:
             try:
@@ -11262,7 +11014,7 @@ def get_enhanced_sports_wire():
                 with app.test_request_context(f"/api/beat-writer-news?sport={sport.upper()}"):
                     beat_resp = get_beat_writer_news()
                     beat_data = beat_resp.get_json() if hasattr(beat_resp, "get_json") else beat_resp
-                    
+
                     if isinstance(beat_data, dict) and beat_data.get("success") and beat_data.get("news"):
                         news = beat_data["news"]
                         if isinstance(news, list):
@@ -11276,7 +11028,7 @@ def get_enhanced_sports_wire():
                                         sport_counts[item_sport] += 1
                                     else:
                                         sport_counts["other"] += 1
-                            
+
                             all_news.extend(filtered_news)
                             beat_count = len(filtered_news)
                             print(f"✅ Beat writer news: {len(news)} total, {beat_count} filtered for {sport}")
@@ -11284,17 +11036,17 @@ def get_enhanced_sports_wire():
                 print(f"⚠️ Error fetching beat writer news: {e}")
                 import traceback
                 traceback.print_exc()
-        
+
         # ----- Injuries (with fallback) -----
         if include_injuries:
             try:
                 print(f"🏥 Fetching injuries for {sport}...")
-                
+
                 # Use the fallback function
                 injuries_list = get_injuries_with_fallback(sport)
-                
+
                 print(f"📋 Raw injuries count: {len(injuries_list)}")
-                
+
                 for i, injury in enumerate(injuries_list):
                     player_name = injury.get("player", "Unknown")
                     team = injury.get("team", "")
@@ -11302,13 +11054,13 @@ def get_enhanced_sports_wire():
                     description = injury.get("injury", "")
                     expected_return = injury.get("expected_return", "TBD")
                     published_at = injury.get("date", datetime.now(timezone.utc).isoformat())
-                    
+
                     # Standardize status for better display
                     status_upper = status.upper() if status else "INJURED"
-                    
+
                     # Generate a better title
                     title = f"{player_name} Injury Update: {status_upper}"
-                    
+
                     injury_news = {
                         "id": injury.get("id", f"injury-{i}-{int(time.time())}-{random.randint(1000, 9999)}"),
                         "title": title,
@@ -11328,28 +11080,28 @@ def get_enhanced_sports_wire():
                     }
                     all_news.append(injury_news)
                     injury_count += 1
-                    
+
                     # Track sport
                     if sport in sport_counts:
                         sport_counts[sport] += 1
                     else:
                         sport_counts["other"] += 1
-                
+
                 print(f"✅ Injuries: {len(injuries_list)} total, {injury_count} processed")
             except Exception as e:
                 print(f"❌ Error fetching injuries: {e}")
                 import traceback
                 traceback.print_exc()
-        
+
         # Sort by date (newest first)
         all_news.sort(key=lambda x: x.get("publishedAt", ""), reverse=True)
-        
+
         # Final breakdown
         print(f"\n📊 FINAL SPORT BREAKDOWN:")
         for sport_name, count in sport_counts.items():
             if count > 0:
                 print(f"  {sport_name.upper()}: {count} items")
-        
+
         response_data = {
             "success": True,
             "news": all_news,
@@ -11364,10 +11116,10 @@ def get_enhanced_sports_wire():
             "sport": sport,
             "is_enhanced": True
         }
-        
+
         print(f"✅ Enhanced endpoint returning {len(all_news)} total items (regular: {regular_count}, beat: {beat_count}, injuries: {injury_count})")
         return jsonify(response_data)
-        
+
     except Exception as e:
         print(f"❌ Fatal error in enhanced sports wire: {e}")
         import traceback
@@ -11386,25 +11138,25 @@ def get_injuries():
         # Get sport from query params, default to "nba"
         sport = flask_request.args.get("sport", "nba").lower()
         player_map = get_player_master_map(sport)
-        
+
         print(f"🏥 Fetching injuries for {sport}...")
         print(f"📊 Player map has {len(player_map)} entries")
-        
+
         response = requests.get(
             f"{NODE_API_BASE}/api/tank01/injuries",
             params={"sport": sport},
             timeout=10
         )
-        
+
         if response.status_code == 200:
             data = response.json()
             injuries = []
-            
+
             print("🔍 RAW TANK01 INJURY SAMPLE:", json.dumps(data.get("data", [])[:2], indent=2))
-            
+
             if data.get("success") and data.get("data"):
                 raw_data = data["data"]
-                
+
                 # Handle both dict and list responses
                 if isinstance(raw_data, dict):
                     for player_id, info in raw_data.items():
@@ -11416,7 +11168,7 @@ def get_injuries():
                         injury = extract_injury_from_tank01(item, item.get("playerID"), player_map, sport)
                         if injury:
                             injuries.append(injury)
-                
+
                 # Deduplicate by player ID, keep latest
                 latest = {}
                 for inj in injuries:
@@ -11424,69 +11176,26 @@ def get_injuries():
                     if pid not in latest or (inj.get("injDate", "0") > latest[pid].get("injDate", "0")):
                         latest[pid] = inj
                 injuries = list(latest.values())
-                
+
                 print(f"✅ Processed {len(injuries)} injuries for {sport}")
-                
+
                 if injuries:
                     return jsonify({
-                        "success": True, 
+                        "success": True,
                         "injuries": injuries,
                         "sport": sport,
                         "count": len(injuries)
                     })
-        
+
         # If no real data, use enhanced mock data
         print(f"⚠️ No real injury data for {sport}, using mock data")
         return generate_mock_injuries(sport)
-    
+
     except Exception as e:
         print(f"⚠️ Injuries proxy failed: {e}")
         import traceback
         traceback.print_exc()
         return generate_mock_injuries(sport)
-
-def get_player_master_map(sport="nba"):
-    """Get a comprehensive mapping of player IDs to player info"""
-    try:
-        player_map = {}
-        
-        # Load your player database based on sport
-        if sport == "nba":
-            # This should return a list of players with id, name, team
-            # Example structure:
-            players = get_nba_players_from_database()  # Your existing function
-            
-            for player in players:
-                # Store by various ID formats
-                player_id = str(player.get('id', ''))
-                
-                # Store by the ID
-                player_map[player_id] = {
-                    'name': player.get('name', ''),
-                    'team': player.get('team', ''),
-                    'id': player_id
-                }
-                
-                # Also store by name variations for fuzzy matching
-                name = player.get('name', '')
-                if name:
-                    # Store by full name lowercase
-                    player_map[name.lower()] = player_map[player_id]
-                    
-                    # Store by last name
-                    name_parts = name.split()
-                    if name_parts:
-                        last_name = name_parts[-1].lower()
-                        player_map[last_name] = player_map[player_id]
-            
-            print(f"✅ Loaded {len(players)} players into master map with {len(player_map)} lookup keys")
-            return player_map
-        else:
-            return {}
-            
-    except Exception as e:
-        print(f"⚠️ Error loading player map: {e}")
-        return {}
 
 # Add these helper functions at the top of your routes file
 
@@ -11530,28 +11239,28 @@ def extract_player_name_from_description(description, name_mapping):
     """Extract full player name from injury description"""
     if not description:
         return "Unknown"
-    
+
     import re
-    
+
     # Pattern 1: Look for "FirstName LastName" after date
     # Example: "Feb 18: Franz Wagner will be sidelined..."
     date_pattern = r'[A-Z][a-z]{2} \d{1,2}:?\s+([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+\.?)?)'
     date_match = re.search(date_pattern, description)
     if date_match:
         return date_match.group(1).strip()
-    
+
     # Pattern 2: Look for name at beginning of description
     name_match = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+\.?)?)', description)
     if name_match:
         return name_match.group(1).strip()
-    
+
     # Pattern 3: Look for name in parentheses like "Wagner (ankle)"
     paren_match = re.search(r'([A-Z][a-z]+)\s+\(', description)
     if paren_match:
         last_name = paren_match.group(1)
         if last_name in name_mapping:
             return name_mapping[last_name]
-    
+
     return "Unknown"
 
 def get_nba_players_from_database():
@@ -11560,7 +11269,7 @@ def get_nba_players_from_database():
         # This should be replaced with your actual database query
         # Example using your comprehensive NBA static data
         players = []
-        
+
         # Load from your NBA_TABLE or wherever you store players
         # For now, including key players that appear in your logs:
         key_players = [
@@ -11576,13 +11285,13 @@ def get_nba_players_from_database():
             {"id": "999999999", "name": "Simone Fontecchio", "team": "DET"},
             {"id": "888888888", "name": "Julian Champagnie", "team": "SAS"},
         ]
-        
+
         # Add all your players here
         players.extend(key_players)
-        
+
         # You should load this from your actual data source
         # For example: players = NBA_TABLE.values()
-        
+
         return players
     except Exception as e:
         print(f"⚠️ Error loading NBA players: {e}")
@@ -11591,7 +11300,7 @@ def get_nba_players_from_database():
 def generate_mock_injuries(sport):
     """Generate enhanced mock injury data for a specific sport"""
     sport = sport.lower()
-    
+
     # Comprehensive injury data for all sports
     mock_injuries_by_sport = {
         "nba": [
@@ -11689,7 +11398,7 @@ def generate_mock_injuries(sport):
             }
         ]
     }
-    
+
     # Get injuries for requested sport, or combine all if sport is "all"
     if sport == "all":
         injuries = []
@@ -11710,7 +11419,7 @@ def generate_mock_injuries(sport):
             inj_copy["date"] = datetime.now(timezone.utc).strftime("%Y%m%d")
             inj_copy["publishedAt"] = datetime.now(timezone.utc).isoformat()
             injuries.append(inj_copy)
-    
+
     return jsonify({
         "success": True,
         "injuries": injuries,
@@ -11728,7 +11437,7 @@ def extract_injury_from_tank01(item, default_id, player_map=None, sport="nba"):
     enriched = player_map.get(str(player_id), {})
     full_name = enriched.get("name")
     team = enriched.get("team", "")
-    
+
     # If no name from player map, try to extract from description
     if not full_name or full_name == "Unknown":
         description = item.get("description", "")
@@ -11749,10 +11458,10 @@ def extract_injury_from_tank01(item, default_id, player_map=None, sport="nba"):
                     full_name = "Unknown"
         else:
             full_name = "Unknown"
-    
+
     status = item.get("designation", "out").lower()
     injury_desc = item.get("description", "unknown injury")
-    
+
     # Determine confidence based on status
     if status in ["out", "doubtful"]:
         confidence = 90
@@ -11760,7 +11469,7 @@ def extract_injury_from_tank01(item, default_id, player_map=None, sport="nba"):
         confidence = 75
     else:
         confidence = 60
-    
+
     # Try to extract expected return date
     expected_return = "TBD"
     if "return" in injury_desc.lower():
@@ -11768,7 +11477,7 @@ def extract_injury_from_tank01(item, default_id, player_map=None, sport="nba"):
         date_match = re.search(r'return (?:in|within|by)?\s*(\d+-\d+-\d+|\w+ \d{1,2})', injury_desc, re.IGNORECASE)
         if date_match:
             expected_return = date_match.group(1)
-    
+
     return {
         "id": player_id,
         "player": full_name,
@@ -12147,55 +11856,6 @@ def get_trends():
         traceback.print_exc()
         return fallback_trends_logic(player_filter, sport)
 
-
-def fallback_trends_logic(player_name, sport):
-    """
-    Return mock trends for testing when real data unavailable.
-    """
-    mock_players = [
-        {"name": "LeBron James", "team": "LAL", "pos": "F"},
-        {"name": "Stephen Curry", "team": "GSW", "pos": "G"},
-        {"name": "Giannis Antetokounmpo", "team": "MIL", "pos": "F"},
-        {"name": "Luka Doncic", "team": "LAL", "pos": "G"},
-        {"name": "Nikola Jokic", "team": "DEN", "pos": "C"},
-    ]
-    metrics = [
-        ("Points", 25.3, 27.1, "up", "+1.8%"),
-        ("Rebounds", 8.2, 9.5, "up", "+1.3%"),
-        ("Assists", 6.1, 5.8, "down", "-0.3%"),
-        ("Steals", 1.2, 1.5, "up", "+0.3%"),
-        ("Blocks", 0.8, 0.6, "down", "-0.2%"),
-    ]
-    trends = []
-    for pid, p in enumerate(mock_players):
-        if player_name and player_name not in p["name"].lower():
-            continue
-        for m in metrics:
-            trends.append(
-                {
-                    "id": f"mock-{pid}-{m[0]}",
-                    "player": p["name"],
-                    "team": p["team"],
-                    "position": p["pos"],
-                    "sport": sport,
-                    "metric": m[0],
-                    "current": m[1],
-                    "previous": m[2],
-                    "change": m[4],
-                    "trend": m[3],
-                    "last_5_games": [25, 26, 27, 28, 29],
-                    "is_real_data": False,
-                    "player_id": pid,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-    return api_response(
-        success=True,
-        data={"trends": trends, "is_real_data": False, "count": len(trends)},
-        message="Mock trend data (real data unavailable)",
-    )
-
-
 @app.route("/api/picks")
 def get_daily_picks():
     """Generate daily picks from top players – with static NBA 2026 fallback."""
@@ -12330,10 +11990,8 @@ def get_history():
         response = jsonify({"status": "ok"})
         # CORS handled by Flask-CORS
         response.headers.add(
-            "Access-Control-Allow-Headers",
             "Content-Type, Authorization, X-Requested-With, Cache-Control",
         )
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
         return response, 200
 
     try:
@@ -12400,7 +12058,7 @@ def get_player_props():
     try:
         sport = flask_request.args.get("sport", "nba").lower()
         print(f"🎯 Fetching player props for sport: {sport}")
-        
+
         # Map sport to Odds API format
         sport_map = {
             "nba": "basketball_nba",
@@ -12409,10 +12067,10 @@ def get_player_props():
             "nhl": "icehockey_nhl"
         }
         odds_sport = sport_map.get(sport, sport)
-        
+
         # First, fetch today's games with scores
         games_data = fetch_game_odds(sport)
-        
+
         if not games_data:
             print(f"⚠️ No games data for {sport}")
             return jsonify({
@@ -12421,43 +12079,43 @@ def get_player_props():
                 "count": 0,
                 "message": f"No games found for {sport}"
             }), 404
-        
+
         # Generate player props for each game
         all_props = []
-        
+
         for game in games_data:
             away_team = game.get('away_team')
             home_team = game.get('home_team')
             game_id = game.get('id')
             game_time = game.get('commence_time')
-            
+
             if not away_team or not home_team:
                 continue
-            
+
             # Get player projections from your data source
             # For now, we'll generate realistic mock props based on player averages
             players = get_players_for_game(away_team, home_team, sport)
-            
+
             for player in players:
                 # Generate props for common markets
                 markets = ['points', 'assists', 'rebounds', 'threes_made']
-                
+
                 for market in markets:
                     # Get player's average for this market
                     avg = get_player_average(player['name'], market, sport)
-                    
+
                     # Generate line (round to nearest 0.5)
                     line = round(avg, 1)
                     if line == 0:
                         continue
-                    
+
                     # Generate odds based on line and average
                     over_odds = generate_odds(avg, line, 'over')
                     under_odds = generate_odds(avg, line, 'under')
-                    
+
                     # Calculate confidence based on historical accuracy
                     confidence = calculate_confidence(player['name'], market, sport, avg, line)
-                    
+
                     prop = {
                         "id": f"{game_id}_{player['id']}_{market}",
                         "player_id": player['id'],
@@ -12476,11 +12134,11 @@ def get_player_props():
                         "is_real_data": False,  # Set to True when using real odds
                         "last_updated": datetime.now(timezone.utc).isoformat()
                     }
-                    
+
                     all_props.append(prop)
-        
+
         print(f"✅ Generated {len(all_props)} props for {sport}")
-        
+
         return jsonify({
             "success": True,
             "props": all_props,
@@ -12489,7 +12147,7 @@ def get_player_props():
             "is_real_data": False,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
-        
+
     except Exception as e:
         print(f"❌ Error in /api/player-props: {e}")
         traceback.print_exc()
@@ -12505,7 +12163,7 @@ def get_players_for_game(away_team: str, home_team: str, sport: str) -> List[Dic
     # This should fetch from your player database
     # For now, return mock players
     mock_players = []
-    
+
     # Common NBA players for demo
     nba_players = [
         {"id": 666581, "name": "Darius Garland", "team": "CLE"},
@@ -12517,19 +12175,19 @@ def get_players_for_game(away_team: str, home_team: str, sport: str) -> List[Dic
         {"id": 666587, "name": "Norman Powell", "team": "LAC"},
         {"id": 666588, "name": "Bennedict Mathurin", "team": "IND"},
     ]
-    
+
     # Filter players for the teams in this game
     for player in nba_players:
         if player['team'] in [away_team, home_team]:
             mock_players.append(player)
-    
+
     return mock_players
 
 def get_player_average(player_name: str, market: str, sport: str) -> float:
     """Get player's average for a specific market."""
     # In production, fetch from your stats database
     # For demo, return realistic averages based on player
-    
+
     averages = {
         "Darius Garland": {"points": 21.5, "assists": 6.8, "rebounds": 2.5, "threes_made": 2.3},
         "Kawhi Leonard": {"points": 24.8, "assists": 4.5, "rebounds": 6.2, "threes_made": 1.9},
@@ -12540,7 +12198,7 @@ def get_player_average(player_name: str, market: str, sport: str) -> float:
         "Norman Powell": {"points": 15.8, "assists": 2.2, "rebounds": 3.5, "threes_made": 2.1},
         "Bennedict Mathurin": {"points": 16.2, "assists": 2.1, "rebounds": 4.5, "threes_made": 1.7},
     }
-    
+
     player_stats = averages.get(player_name, {})
     return player_stats.get(market, 10.0)  # Default to 10.0 if not found
 
@@ -12548,7 +12206,7 @@ def generate_odds(avg: float, line: float, side: str) -> int:
     """Generate realistic odds based on average and line."""
     # Calculate probability based on how close line is to average
     diff = abs(avg - line)
-    
+
     if diff == 0:
         probability = 0.5
     else:
@@ -12557,28 +12215,28 @@ def generate_odds(avg: float, line: float, side: str) -> int:
             probability = 0.5 - (diff / avg) * 0.3
         else:
             probability = 0.5 - (diff / avg) * 0.3
-    
+
     # Clamp probability between 0.3 and 0.7
     probability = max(0.3, min(0.7, probability))
-    
+
     # Convert probability to American odds
     if probability > 0.5:
         odds = int(-100 * probability / (1 - probability))
     else:
         odds = int(100 * (1 - probability) / probability)
-    
+
     # Round to nearest 5
     odds = round(odds / 5) * 5
-    
+
     return odds
 
 def calculate_confidence(player_name: str, market: str, sport: str, avg: float, line: float) -> int:
     """Calculate confidence percentage for the prop."""
     # In production, use historical accuracy
     # For demo, generate based on how close line is to average
-    
+
     diff_percent = abs(avg - line) / avg if avg > 0 else 0
-    
+
     if diff_percent < 0.1:
         confidence = 85
     elif diff_percent < 0.2:
@@ -12587,16 +12245,15 @@ def calculate_confidence(player_name: str, market: str, sport: str, avg: float, 
         confidence = 55
     else:
         confidence = 45
-    
+
     # Adjust based on player consistency
     consistent_players = ["Darius Garland", "Kawhi Leonard", "Pascal Siakam"]
     if player_name in consistent_players:
         confidence += 10
-    
+
     return min(95, confidence)
 
 # ========== USER GENERATION LIMITS ==========
-DAILY_LIMIT = 2
 user_gen_store = {}  # fallback in‑memory store if Redis unavailable
 
 
@@ -12612,74 +12269,70 @@ class PurchaseRequest(BaseModel):
 def get_generations(user_id):
     """Return remaining generations for a user (resets daily)."""
     try:
+        # Debug - check what's happening
+        print(f"🔍 get_generations called for user: {user_id}")
+        is_admin = user_has_unlimited_credits(user_id)
+        print(f"🔍 user_has_unlimited_credits returned: {is_admin}")
+
         # Admin check
-        if user_has_unlimited_credits(user_id):
+        if is_admin:
+            print(f"⚠️ Returning 999999 for user {user_id}")
             return jsonify({"remaining": 999999})
 
         key = f"user:gen:{user_id}"
-        
+
         if "redis_client" in globals() and redis_client:
-            # Get or initialize user data
-            remaining = DAILY_LIMIT
-            last_reset = datetime.utcnow()
-            
-            # Try to get existing data
-            try:
-                remaining_raw = redis_client.hget(key, "remaining")
-                last_reset_raw = redis_client.hget(key, "last_reset")
-                
-                if remaining_raw is not None:
-                    if isinstance(remaining_raw, bytes):
-                        remaining_raw = remaining_raw.decode('utf-8')
-                    remaining = int(remaining_raw)
-                
-                if last_reset_raw is not None:
-                    if isinstance(last_reset_raw, bytes):
-                        last_reset_raw = last_reset_raw.decode('utf-8')
-                    if last_reset_raw:
-                        try:
-                            last_reset = datetime.fromisoformat(last_reset_raw)
-                        except:
-                            last_reset = datetime.utcnow()
-                    else:
-                        last_reset = datetime.utcnow()
-                else:
-                    last_reset = datetime.utcnow()
-                    
-            except Exception as e:
-                print(f"Error reading Redis: {e}")
-                # If any error, initialize fresh
+            data = redis_client.hgetall(key)
+
+            if not data:
+                # First time user - initialize
                 remaining = DAILY_LIMIT
-                last_reset = datetime.utcnow()
-            
-            # Check if reset is needed
-            if datetime.utcnow() - last_reset > timedelta(hours=24):
-                remaining = DAILY_LIMIT
-                last_reset = datetime.utcnow()
-            
-            # Save back to Redis
-            redis_client.hset(key, "remaining", remaining)
-            redis_client.hset(key, "last_reset", last_reset.isoformat())
-            redis_client.expire(key, 86400)
-            
+                last_reset = datetime.utcnow().isoformat()
+                redis_client.hset(key, mapping={"remaining": remaining, "last_reset": last_reset})
+                redis_client.expire(key, 86400)
+                return jsonify({"remaining": remaining})
+
+            # Get current values
+            remaining = int(data.get(b"remaining", data.get("remaining", DAILY_LIMIT)))
+            last_reset_str = data.get(b"last_reset", data.get("last_reset", ""))
+
+            if isinstance(last_reset_str, bytes):
+                last_reset_str = last_reset_str.decode('utf-8')
+
+            # Parse or create last_reset
+            if not last_reset_str:
+                last_reset_dt = datetime.utcnow()
+            else:
+                try:
+                    last_reset_dt = datetime.fromisoformat(last_reset_str)
+                except (ValueError, TypeError):
+                    last_reset_dt = datetime.utcnow()
+
+            # Check if 24 hours have passed - ADD daily limit, don't replace
+            if datetime.utcnow() - last_reset_dt > timedelta(hours=24):
+                remaining = remaining + DAILY_LIMIT  # ✅ ADD to existing credits
+                redis_client.hset(key, "remaining", remaining)
+                redis_client.hset(key, "last_reset", datetime.utcnow().isoformat())
+                print(f"🔄 Daily reset: Added {DAILY_LIMIT} credits to user {user_id}. New total: {remaining}")
+
             return jsonify({"remaining": remaining})
         else:
-            # In-memory fallback
+            # In-memory fallback with same logic
             if user_id not in user_gen_store:
                 user_gen_store[user_id] = {
                     "remaining": DAILY_LIMIT,
                     "last_reset": datetime.utcnow().isoformat(),
                 }
-            
+
             data = user_gen_store[user_id]
-            last_reset = datetime.fromisoformat(data["last_reset"])
-            
-            if datetime.utcnow() - last_reset > timedelta(hours=24):
-                data["remaining"] = DAILY_LIMIT
+            last_reset_dt = datetime.fromisoformat(data["last_reset"])
+
+            if datetime.utcnow() - last_reset_dt > timedelta(hours=24):
+                data["remaining"] = data["remaining"] + DAILY_LIMIT  # ✅ ADD
                 data["last_reset"] = datetime.utcnow().isoformat()
-            
+
             return jsonify({"remaining": data["remaining"]})
-            
+
     except Exception as e:
         print(f"Error in get_generations: {e}")
         traceback.print_exc()
@@ -12692,13 +12345,13 @@ def decrement_generations():
     try:
         req = DecrementRequest(**flask_request.json)
         user_id = req.user_id
-        
+
         # Admin bypass
         if user_has_unlimited_credits(user_id):
             return jsonify({"remaining": 999999})
-        
+
         key = f"user:gen:{user_id}"
-        
+
         if "redis_client" in globals() and redis_client:
             # Simple decrement without complex pipeline
             try:
@@ -12709,19 +12362,45 @@ def decrement_generations():
                     last_reset = datetime.utcnow().isoformat()
                     redis_client.hset(key, mapping={"remaining": remaining, "last_reset": last_reset})
                     redis_client.expire(key, 86400)
-                
-                # Get current remaining
-                remaining = int(redis_client.hget(key, "remaining") or DAILY_LIMIT)
-                
+
+                # Get current remaining and last_reset
+                remaining_raw = redis_client.hget(key, "remaining")
+                last_reset_raw = redis_client.hget(key, "last_reset")
+
+                if remaining_raw is not None:
+                    if isinstance(remaining_raw, bytes):
+                        remaining_raw = remaining_raw.decode('utf-8')
+                    remaining = int(remaining_raw)
+                else:
+                    remaining = DAILY_LIMIT
+
+                # Handle last_reset
+                if last_reset_raw is not None:
+                    if isinstance(last_reset_raw, bytes):
+                        last_reset_raw = last_reset_raw.decode('utf-8')
+                    try:
+                        last_reset_dt = datetime.fromisoformat(last_reset_raw)
+                    except (ValueError, TypeError):
+                        last_reset_dt = datetime.utcnow()
+                else:
+                    last_reset_dt = datetime.utcnow()
+
+                # Check if 24 hours have passed - ADD daily limit to remaining
+                if datetime.utcnow() - last_reset_dt > timedelta(hours=24):
+                    remaining = remaining + DAILY_LIMIT
+                    redis_client.hset(key, "remaining", remaining)
+                    redis_client.hset(key, "last_reset", datetime.utcnow().isoformat())
+                    print(f"🔄 Daily reset: Added {DAILY_LIMIT} credits to user {user_id}. New total: {remaining}")
+
                 if remaining <= 0:
                     return jsonify({"error": "No generations left"}), 400
-                
+
                 # Decrement
                 new_remaining = remaining - 1
                 redis_client.hset(key, "remaining", new_remaining)
-                
+
                 return jsonify({"remaining": new_remaining})
-                
+
             except Exception as e:
                 print(f"Redis error in decrement: {e}")
                 return jsonify({"error": str(e)}), 500
@@ -12732,20 +12411,27 @@ def decrement_generations():
                     "remaining": DAILY_LIMIT,
                     "last_reset": datetime.utcnow().isoformat(),
                 }
-            
-            if user_gen_store[user_id]["remaining"] <= 0:
+
+            # Check for daily reset
+            data = user_gen_store[user_id]
+            last_reset_dt = datetime.fromisoformat(data["last_reset"])
+            if datetime.utcnow() - last_reset_dt > timedelta(hours=24):
+                data["remaining"] = data["remaining"] + DAILY_LIMIT
+                data["last_reset"] = datetime.utcnow().isoformat()
+                print(f"🔄 Daily reset: Added {DAILY_LIMIT} credits to user {user_id}. New total: {data['remaining']}")
+
+            if data["remaining"] <= 0:
                 return jsonify({"error": "No generations left"}), 400
-            
-            user_gen_store[user_id]["remaining"] -= 1
-            return jsonify({"remaining": user_gen_store[user_id]["remaining"]})
-            
+
+            data["remaining"] -= 1
+            return jsonify({"remaining": data["remaining"]})
+
     except Exception as e:
         print(f"Error in decrement_generations: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/user/generations/purchase", methods=["POST", "OPTIONS"])
-@cross_origin(origins="*", supports_credentials=True)
 def purchase_generations():
     """Add purchased generations to a user's remaining count."""
     try:
@@ -13008,7 +12694,20 @@ def parlay_suggestions():
                 "version": "1.0",
             }
         )
-
+@app.route("/api/admin/trigger-reset/<user_id>", methods=['POST'])
+def trigger_reset(user_id):
+    """Manually trigger a daily reset for testing"""
+    key = f"user:gen:{user_id}"
+    if "redis_client" in globals() and redis_client:
+        # Set last_reset to 25 hours ago
+        old_reset = (datetime.utcnow() - timedelta(hours=25)).isoformat()
+        redis_client.hset(key, "last_reset", old_reset)
+        return jsonify({
+            'success': True,
+            'message': f'Set last_reset to {old_reset}',
+            'current_remaining': redis_client.hget(key, "remaining")
+        })
+    return jsonify({'error': 'Redis not available'}), 500
 
 @app.route("/api/parlay/submit", methods=["POST"])
 def submit_parlay():
@@ -13160,10 +12859,8 @@ def get_predictions():
         response = jsonify({"status": "ok"})
         # CORS handled by Flask-CORS
         response.headers.add(
-            "Access-Control-Allow-Headers",
             "Content-Type, Authorization, X-Requested-With, Cache-Control",
         )
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
         return response, 200
 
     try:
@@ -13378,10 +13075,8 @@ def get_predictions_outcome():
         response = jsonify({"status": "ok"})
         # CORS handled by Flask-CORS
         response.headers.add(
-            "Access-Control-Allow-Headers",
             "Content-Type, Authorization, X-Requested-With, Cache-Control",
         )
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
         return response, 200
 
     try:
@@ -13670,26 +13365,25 @@ def generate_mock_prediction_outcomes(sport="nba"):
     return outcomes
 
 @app.route("/api/user/generations/sync", methods=["POST", "OPTIONS"])
-@cross_origin(origins="*", supports_credentials=True)
 def sync_generations():
     """Sync profile credits to generations system."""
     try:
         req = flask_request.json
         user_id = req.get('user_id')
-        
+
         if not user_id:
             return jsonify({"error": "user_id required"}), 400
-        
+
         # Get profile credits first
         from models import User
         user = User.query.filter_by(firebase_uid=user_id).first()
         if not user:
             return jsonify({"error": "User not found"}), 404
-        
+
         profile_credits = user.credits if user.credits else 0
-        
+
         key = f"user:gen:{user_id}"
-        
+
         if "redis_client" in globals() and redis_client:
             # Check if generations already exist
             existing = redis_client.hgetall(key)
@@ -13702,7 +13396,7 @@ def sync_generations():
                 # Set initial generations to profile credits
                 redis_client.hset(key, mapping={"remaining": profile_credits, "last_reset": datetime.utcnow().isoformat()})
                 redis_client.expire(key, 86400)
-            
+
             return jsonify({"remaining": profile_credits, "synced": True})
         else:
             # In-memory fallback
@@ -13713,9 +13407,9 @@ def sync_generations():
                 }
             else:
                 user_gen_store[user_id]["remaining"] += profile_credits
-            
+
             return jsonify({"remaining": user_gen_store[user_id]["remaining"], "synced": True})
-        
+
     except Exception as e:
         print(f"Error syncing generations: {e}")
         traceback.print_exc()
@@ -13760,12 +13454,12 @@ def get_advanced_analytics():
     try:
         sport = flask_request.args.get("sport", "nba").lower()
         limit = int(flask_request.args.get("limit", 20))
-        
+
         # Use timestamp and random seed for variety
         timestamp = flask_request.args.get("_t")
         force_refresh = flask_request.args.get("force", "").lower() in ['true', '1', 'yes']
         seed = flask_request.args.get("seed")
-        
+
         # Create a seed from timestamp if not provided
         if seed:
             random.seed(int(seed))
@@ -13773,17 +13467,17 @@ def get_advanced_analytics():
             random.seed(int(timestamp) % 10000)
         else:
             random.seed()  # Use system time for true randomness
-            
+
         selections = []
-        
+
         # Add randomness to static NBA data
         if sport == "nba" and NBA_PLAYERS_2026:
             print("📦 Using static NBA data for advanced analytics (with randomization)", flush=True)
-            
+
             # Get all players and shuffle them randomly
             all_players = NBA_PLAYERS_2026.copy()
             random.shuffle(all_players)
-            
+
             stat_types = [
                 {"stat": "Points", "base_key": "pts_per_game", "range": (-5, 8)},
                 {"stat": "Rebounds", "base_key": "reb_per_game", "range": (-3, 4)},
@@ -13791,29 +13485,29 @@ def get_advanced_analytics():
                 {"stat": "Steals", "base_key": "stl_per_game", "range": (-1, 2)},
                 {"stat": "Blocks", "base_key": "blk_per_game", "range": (-1, 2)},
             ]
-            
+
             for player in all_players[:limit * 3]:  # Get more players for variety
                 player_name = player.get("name", "Unknown")
                 team = player.get("team", "UNKNOWN")
-                
+
                 # Randomly select 1-2 stats per player for variety
                 num_stats = random.randint(1, 2)
                 selected_stats = random.sample(stat_types, num_stats)
-                
+
                 for st in selected_stats:
                     base = player.get(st["base_key"], 0)
                     if base < 0.5:
                         continue
-                    
+
                     # Add random variation to projection
                     variation = random.uniform(st["range"][0], st["range"][1])
                     projection = base + variation
                     projection = max(0.5, round(projection * 2) / 2)
-                    
+
                     # Create line based on projection with random offset
                     line_offset = random.uniform(-2, 2)
                     line = max(0.5, round((base + line_offset) * 2) / 2)
-                    
+
                     diff = projection - line
                     if diff > 0:
                         value_side = "over"
@@ -13821,7 +13515,7 @@ def get_advanced_analytics():
                     else:
                         value_side = "under"
                         edge_pct = (abs(diff) / line) * 100 if line > 0 else 0
-                    
+
                     # Randomize confidence based on edge
                     if abs(edge_pct) > 15:
                         confidence = "high"
@@ -13829,14 +13523,14 @@ def get_advanced_analytics():
                         confidence = "medium"
                     else:
                         confidence = "low"
-                    
+
                     odds = random.choice(["-110", "-115", "-105", "+100", "+105", "+110"])
                     bookmaker = random.choice(["FanDuel", "DraftKings", "BetMGM", "BetOnline.ag", "Fanatics"])
-                    
+
                     # Random game selection
                     games = ["LAL vs GSW", "BOS vs NYK", "PHX vs DEN", "MIL vs PHI", "DAL vs MIN"]
                     game = random.choice(games)
-                    
+
                     selections.append({
                         "id": f"adv-{player_name.replace(' ', '-')}-{st['stat'].lower()}-{random.randint(1000, 9999)}",
                         "player": player_name,
@@ -13855,22 +13549,22 @@ def get_advanced_analytics():
                         "source": "static-nba",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
-                    
+
                     if len(selections) >= limit * 2:
                         break
-                
+
                 if len(selections) >= limit * 2:
                     break
-        
+
         # Limit and shuffle final list with randomization
         random.shuffle(selections)
         selections = selections[:limit]
-        
+
         # Add variety metadata
         for sel in selections:
             sel["variation_id"] = f"v{random.randint(1, 100)}"
             sel["generated_at"] = datetime.now(timezone.utc).isoformat()
-        
+
         return jsonify({
             "success": True,
             "selections": selections,
@@ -13880,7 +13574,7 @@ def get_advanced_analytics():
             "seed_used": seed or int(time.time()),
             "randomized": True
         })
-        
+
     except Exception as e:
         print(f"❌ Error in advanced analytics: {e}", flush=True)
         traceback.print_exc()
@@ -13917,7 +13611,7 @@ def generate_random_mock_advanced_analytics(sport, limit):
             ("Ronald Acuña Jr.", "ATL"), ("Juan Soto", "NYY"), ("Mike Trout", "LAA")
         ]
     }
-    
+
     players = players_by_sport.get(sport, players_by_sport["nba"])
     stats_by_sport = {
         "nba": ["Points", "Rebounds", "Assists", "Steals", "Blocks", "3PM"],
@@ -13925,7 +13619,7 @@ def generate_random_mock_advanced_analytics(sport, limit):
         "mlb": ["Hits", "HR", "RBI", "Strikeouts", "Walks", "SB"]
     }
     stats = stats_by_sport.get(sport, stats_by_sport["nba"])
-    
+
     selections = []
     for _ in range(limit):
         player, team = random.choice(players)
@@ -13933,7 +13627,7 @@ def generate_random_mock_advanced_analytics(sport, limit):
         line = round(random.uniform(5, 30), 1)
         projection = line + random.uniform(-10, 15)
         projection = max(0.5, round(projection * 2) / 2)
-        
+
         diff = projection - line
         if diff > 0:
             value_side = "over"
@@ -13941,11 +13635,11 @@ def generate_random_mock_advanced_analytics(sport, limit):
         else:
             value_side = "under"
             edge_pct = (abs(diff) / line) * 100 if line > 0 else 0
-        
+
         confidence = "high" if abs(edge_pct) > 12 else "medium" if abs(edge_pct) > 6 else "low"
         odds = random.choice(["-110", "-115", "-105", "+100", "+105", "+110"])
         bookmaker = random.choice(["FanDuel", "DraftKings", "BetMGM", "BetOnline.ag"])
-        
+
         selections.append({
             "id": f"mock-{player.replace(' ', '-')}-{stat.lower()}-{random.randint(1000, 9999)}",
             "player": player,
@@ -13965,7 +13659,7 @@ def generate_random_mock_advanced_analytics(sport, limit):
             "variation_id": f"v{random.randint(1, 100)}",
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
-    
+
     return selections
 
 @app.route("/api/analytics")
@@ -14158,7 +13852,7 @@ def get_odds_games():
         # Get parameters
         sport_param = flask_request.args.get("sport", "nba").lower()
         limit = int(flask_request.args.get("limit", 50))
-        
+
         # Map common frontend sport names to backend format
         sport_mapping = {
             'basketball_nba': 'nba',
@@ -14170,14 +13864,14 @@ def get_odds_games():
             'mlb': 'mlb',
             'nhl': 'nhl'
         }
-        
+
         sport = sport_mapping.get(sport_param, sport_param)
-        
+
         print(f"🎯 Received request for sport: {sport_param} -> normalized to: {sport}", flush=True)
-        
+
         # Cache key
         cache_key = f"odds_games:{sport}:{limit}"
-        
+
         # Check cache
         cached = get_cached(cache_key)
         if cached:
@@ -14195,17 +13889,17 @@ def get_odds_games():
 
         # ----- TRY THE ODDS API -----
         odds_data = fetch_game_odds(sport)  # This already uses your existing function
-        
+
         if odds_data and len(odds_data) > 0:
             print(f"✅ Got {len(odds_data)} games from Odds API for {sport}", flush=True)
-            
+
             # Format the response
             games = []
             for game in odds_data[:limit]:
                 # Extract scores and ensure they're integers
                 away_score = int(game.get('away_score', 0))
                 home_score = int(game.get('home_score', 0))
-                
+
                 games.append({
                     "id": game.get("id"),
                     "sport": sport.upper(),
@@ -14220,10 +13914,10 @@ def get_odds_games():
                     "odds": game.get("bookmakers", []),
                     "source": "the-odds-api",
                 })
-            
+
             # Cache the data
             set_cache(cache_key, odds_data)
-            
+
             response_data = {
                 "success": True,
                 "games": games,
@@ -14232,13 +13926,13 @@ def get_odds_games():
                 "source": "the-odds-api",
                 "cached": False,
             }
-            
+
             return jsonify(response_data)
-        
+
         # ----- FALLBACK TO MOCK DATA -----
         print(f"⚠️ No real data for {sport}, generating mock data", flush=True)
         mock_games = generate_mock_games(sport)
-        
+
         if mock_games and len(mock_games) > 0:
             # Format mock games
             games = []
@@ -14257,7 +13951,7 @@ def get_odds_games():
                     "odds": [],
                     "source": "mock",
                 })
-            
+
             response_data = {
                 "success": True,
                 "games": games,
@@ -14267,9 +13961,9 @@ def get_odds_games():
                 "cached": False,
                 "note": f"Using mock data for {sport.upper()} - real API data not available"
             }
-            
+
             return jsonify(response_data)
-        
+
         # ----- NO DATA AT ALL -----
         print(f"❌ No data available for sport: {sport}", flush=True)
         return jsonify({
@@ -14296,25 +13990,25 @@ def get_sports_list():
     """Get available sports from Odds API."""
     import os
     import requests
-    
+
     ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
     if not ODDS_API_KEY:
         return jsonify({
             "success": False,
             "error": "ODDS_API_KEY not configured"
         }), 500
-    
+
     try:
         url = "https://api.the-odds-api.com/v4/sports/"
         params = {'apiKey': ODDS_API_KEY}
-        
+
         response = requests.get(url, params=params, timeout=10)
-        
+
         if response.status_code == 200:
             sports = response.json()
             # Filter to only the sports we care about
             relevant_sports = [
-                s for s in sports 
+                s for s in sports
                 if s['key'] in ['basketball_nba', 'americanfootball_nfl', 'baseball_mlb', 'icehockey_nhl']
             ]
             return jsonify({
@@ -14327,7 +14021,7 @@ def get_sports_list():
                 "success": False,
                 "error": f"Failed to fetch sports: {response.status_code}"
             }), 500
-            
+
     except Exception as e:
         return jsonify({
             "success": False,
@@ -14338,10 +14032,10 @@ def get_sports_list():
 def get_game_odds_by_id(game_id):
     """Get odds for a specific game."""
     sport = flask_request.args.get("sport", "basketball_nba")
-    
+
     try:
         odds_data = fetch_game_odds_by_id(game_id, sport)
-        
+
         if odds_data:
             return jsonify({
                 "success": True,
@@ -14354,7 +14048,7 @@ def get_game_odds_by_id(game_id):
                 "error": "Game not found",
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }), 404
-            
+
     except Exception as e:
         return jsonify({
             "success": False,
@@ -14847,12 +14541,12 @@ def generate_enhanced_nba_props_from_static(limit=50, sport="nba", timestamp=Non
     """
     import random
     import hashlib
-    
+
     # Use timestamp to seed random for variety
     if timestamp:
         seed_value = int(hashlib.md5(str(timestamp).encode()).hexdigest(), 16) % 10000
         random.seed(seed_value)
-    
+
     # Sport-specific static data with more players for variety
     sport_data = {
         "nba": {
@@ -14914,22 +14608,22 @@ def generate_enhanced_nba_props_from_static(limit=50, sport="nba", timestamp=Non
             "opponents": ["EDM", "TOR", "COL", "BOS", "TBL", "DAL", "VGK", "FLA"]
         }
     }
-    
+
     # Get data for the requested sport, default to NBA
     data = sport_data.get(sport, sport_data["nba"])
     players = data["players"]
     stats = data["stats"]
     opponents = data.get("opponents", ["TBD"])
-    
+
     selections = []
     seen_combinations = set()
-    
+
     # Generate multiple props per player
     for i in range(limit * 2):  # Generate more than needed then deduplicate
         player = random.choice(players)
         stat = random.choice(stats)
         opponent = random.choice(opponents)
-        
+
         # Get base value from player data or generate random
         if stat == "points":
             base_value = player.get("points", 20)
@@ -14949,28 +14643,28 @@ def generate_enhanced_nba_props_from_static(limit=50, sport="nba", timestamp=Non
             base_value = player.get("shots", 4)
         else:
             base_value = random.uniform(5, 25)
-        
+
         # Generate line with more variation
         line = round(base_value * random.uniform(0.7, 1.3), 1)
-        
+
         # Create unique key to avoid duplicates
         key = f"{player['name']}|{stat}|{line}"
         if key in seen_combinations:
             continue
         seen_combinations.add(key)
-        
+
         # Generate projection with significant variation
         projection = round(line + random.uniform(-3, 4), 1)
-        
+
         # Calculate edge
         if line > 0:
             edge = round(((projection - line) / line) * 100, 1)
         else:
             edge = 0
-        
+
         # Determine type based on projection vs line
         prop_type = "Over" if projection > line else "Under"
-        
+
         # Generate confidence based on edge with more variation
         if abs(edge) > 15:
             confidence = random.randint(85, 98)
@@ -14982,12 +14676,12 @@ def generate_enhanced_nba_props_from_static(limit=50, sport="nba", timestamp=Non
             confidence = random.randint(55, 70)
         else:
             confidence = random.randint(40, 55)
-        
+
         # Generate odds with variety
         odds_options = ["-110", "-115", "-120", "-125", "-130", "+100", "+105", "+110", "+115", "+120", "+125"]
         odds = random.choice(odds_options)
         odds_num = int(odds) if odds.startswith(("-", "+")) else -110
-        
+
         selection = {
             "id": f"static-{sport}-{i}-{random.randint(1000, 9999)}",
             "player": player["name"],
@@ -15012,41 +14706,41 @@ def generate_enhanced_nba_props_from_static(limit=50, sport="nba", timestamp=Non
             "source": "enhanced-static-generator",
             "bookmaker": random.choice(["FanDuel", "DraftKings", "BetMGM", "Caesars", "PointsBet", "BetRivers", "Bovada"])
         }
-        
+
         selections.append(selection)
-        
+
         # Break if we have enough
         if len(selections) >= limit:
             break
-    
+
     # Shuffle for variety
     random.shuffle(selections)
-    
+
     # Reset random seed
     random.seed()
-    
+
     return selections[:limit]
 
 
 def call_node_microservice(path, params=None, headers=None):
     """Call the Node.js microservice with cache busting headers."""
     import requests
-    
+
     node_url = "https://prizepicks-production.up.railway.app"
     url = f"{node_url}{path}"
-    
+
     default_headers = {
         "User-Agent": "python-microservice/1.0",
         "Accept": "application/json"
     }
-    
+
     if headers:
         default_headers.update(headers)
-    
+
     try:
         print(f"🔄 Calling Node microservice: {url} with params {params}")
         response = requests.get(url, params=params, headers=default_headers, timeout=10)
-        
+
         if response.status_code == 200:
             return response.json()
         else:
@@ -15121,10 +14815,10 @@ def get_sports_wire():
     try:
         sport = flask_request.args.get("sport", "all").lower()
         limit = int(flask_request.args.get("limit", 50))
-        
+
         # Generate comprehensive sports news for all sports
         news_items = []
-        
+
         # NBA News
         nba_news = [
             {
@@ -15155,7 +14849,7 @@ def get_sports_wire():
                 "confidence": 85
             }
         ]
-        
+
         # NHL News
         nhl_news = [
             {
@@ -15185,7 +14879,7 @@ def get_sports_wire():
                 "confidence": 90
             }
         ]
-        
+
         # MLB News
         mlb_news = [
             {
@@ -15215,19 +14909,19 @@ def get_sports_wire():
                 "confidence": 88
             }
         ]
-        
+
         # Combine all news
         all_news = nba_news + nhl_news + mlb_news
-        
+
         # Filter by sport
         if sport != "all":
             filtered_news = [n for n in all_news if n["sport"] == sport]
         else:
             filtered_news = all_news
-        
+
         # Sort by date
         filtered_news.sort(key=lambda x: x["publishedAt"], reverse=True)
-        
+
         return jsonify({
             "success": True,
             "news": filtered_news[:limit],
@@ -15235,7 +14929,7 @@ def get_sports_wire():
             "sport": sport,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
-        
+
     except Exception as e:
         print(f"❌ Error in get_sports_wire: {e}")
         return jsonify({"success": False, "error": str(e), "news": []})
@@ -15816,16 +15510,16 @@ def get_beat_writer_news():
     try:
         sport = flask_request.args.get("sport", "NBA").upper()
         team = flask_request.args.get("team")
-        
+
         print(f"📝 Generating beat writer news for {sport}...")
-        
+
         news_items = []
-        
+
         # Get beat writers for this sport
         sport_writers = BEAT_WRITERS_BY_SPORT.get(sport, NBA_BEAT_WRITERS)
-        
+
         all_sources = []
-        
+
         if team:
             # Get writers for specific team
             team_writers = sport_writers.get(team, [])
@@ -15835,11 +15529,11 @@ def get_beat_writer_news():
             for team_name, writers in sport_writers.items():
                 if team_name != "national":
                     all_sources.extend(writers)
-        
+
         # Add national insiders
         national_insiders = sport_writers.get("national", [])
         all_sources.extend(national_insiders)
-        
+
         # Remove duplicates (same writer might appear multiple times)
         seen = set()
         unique_sources = []
@@ -15848,9 +15542,9 @@ def get_beat_writer_news():
             if writer_key not in seen:
                 seen.add(writer_key)
                 unique_sources.append(writer)
-        
+
         print(f"📊 Found {len(unique_sources)} unique beat writers for {sport}")
-        
+
         # Realistic topics based on sport
         topics_by_sport = {
             "NBA": [
@@ -15873,9 +15567,9 @@ def get_beat_writer_news():
                 "playoff race", "trade rumors", "goaltending", "coaching change"
             ]
         }
-        
+
         topics = topics_by_sport.get(sport, topics_by_sport["NBA"])
-        
+
         # Get actual NBA players from your player database
         players = []
         try:
@@ -15890,7 +15584,7 @@ def get_beat_writer_news():
                 "Shai Gilgeous-Alexander", "Anthony Davis", "Kyrie Irving", "James Harden",
                 "Jimmy Butler", "Kawhi Leonard", "Paul George", "Devin Booker"
             ]
-        
+
         # Generate realistic news for each beat writer
         for i, writer in enumerate(unique_sources[:50]):  # Limit to 50 sources
             # Pick a random player or team-specific
@@ -15916,12 +15610,12 @@ def get_beat_writer_news():
                     title = f"{writer['name']}: {team_choice} {topic}"
                     description = f"{writer['name']} of {writer['outlet']} shares insights on the {team_choice}."
                     player = f"{team_choice} player"
-            
+
             # Create timestamp within last 24 hours
             hours_ago = random.randint(1, 23)
             minutes_ago = random.randint(0, 59)
             published_at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago, minutes=minutes_ago)).isoformat()
-            
+
             # Generate more realistic content
             content_templates = [
                 f"According to sources, {player} has been {topic.replace('-', 'ing')} with the team. {writer['name']} has the latest details.",
@@ -15930,7 +15624,7 @@ def get_beat_writer_news():
                 f"League sources tell {writer['name']} that {player} is expected to {topic.replace('-', '')} soon.",
             ]
             content = random.choice(content_templates)
-            
+
             news_item = {
                 "id": f"beat-{sport}-{i}-{int(time.time())}-{random.randint(1000, 9999)}",
                 "title": title,
@@ -15953,10 +15647,10 @@ def get_beat_writer_news():
                 "twitter": writer.get('twitter', '')
             }
             news_items.append(news_item)
-        
+
         # Sort by date (newest first)
         news_items.sort(key=lambda x: x["publishedAt"], reverse=True)
-        
+
         response_data = {
             "success": True,
             "sport": sport,
@@ -15967,10 +15661,10 @@ def get_beat_writer_news():
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "is_mock": False
         }
-        
+
         print(f"✅ Beat writer news: {len(news_items)} items generated from {len(unique_sources)} sources")
         return jsonify(response_data)
-        
+
     except Exception as e:
         print(f"❌ Error in beat-writer-news: {e}")
         import traceback
@@ -15983,25 +15677,25 @@ def get_team_news():
     try:
         sport = flask_request.args.get("sport", "NBA").upper()
         team = flask_request.args.get("team")
-        
+
         if not team:
             return jsonify({"success": False, "error": "Team parameter is required"})
-        
+
         print(f"📰 Fetching news for {sport} team: {team}")
-        
+
         news_items = []
-        
+
         # 1. Beat writers for this team
         beat_writers = BEAT_WRITERS.get(sport, {}).get(team, [])
-        
+
         # Generate beat writer news for this team
         topics = ["practice notes", "injury update", "starting lineup", "coaching decisions"]
         players = ["LeBron James", "Stephen Curry", "Giannis Antetokounmpo", "Nikola Jokic"]  # Will be overridden by actual team players
-        
+
         for i, writer in enumerate(beat_writers):
             player = f"{team} player"  # Generic if no specific player
             topic = topics[i % len(topics)]
-            
+
             news_items.append({
                 "id": f"team-beat-{team}-{i}",
                 "title": f"{writer['name']}: Latest {topic} for {team}",
@@ -16015,14 +15709,14 @@ def get_team_news():
                 "team": team,
                 "confidence": 88,
             })
-        
+
         # 2. Injury updates for this team
         injuries_response = get_injuries()
         if hasattr(injuries_response, "json"):
             injuries = injuries_response.json
         else:
             injuries = injuries_response
-            
+
         if injuries.get("success") and injuries.get("injuries"):
             team_injuries = [i for i in injuries["injuries"] if i.get("team") == team]
             for injury in team_injuries:
@@ -16041,24 +15735,24 @@ def get_team_news():
                     "expected_return": injury.get('expected_return', 'TBD'),
                     "confidence": injury.get('confidence', 85),
                 })
-        
+
         # 3. General team news from regular feed
         regular_response = get_sports_wire()
         if hasattr(regular_response, "json"):
             regular = regular_response.json
         else:
             regular = regular_response
-            
+
         if regular.get("success") and regular.get("news"):
             team_news = [
                 n for n in regular["news"]
                 if n.get("teams") and team in n.get("teams", []) or team in n.get("title", "")
             ]
             news_items.extend(team_news)
-        
+
         # Sort all news by date
         news_items.sort(key=lambda x: x.get("publishedAt", ""), reverse=True)
-        
+
         return jsonify({
             "success": True,
             "sport": sport,
@@ -16068,7 +15762,7 @@ def get_team_news():
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "beat_writers": beat_writers,
         })
-        
+
     except Exception as e:
         print(f"❌ Error in team news: {e}")
         import traceback
@@ -16431,10 +16125,8 @@ def get_player_trends():
         response = jsonify({"status": "ok"})
         # CORS handled by Flask-CORS
         response.headers.add(
-            "Access-Control-Allow-Headers",
             "Content-Type, Authorization, X-Requested-With, Cache-Control, Pragma",
         )
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
         return response, 200
 
     try:
@@ -16444,7 +16136,7 @@ def get_player_trends():
         force_refresh = should_skip_cache(flask_request.args)
 
         cache_key = f"trends:{sport}:{limit}:{trend_filter}"
-        
+
         # Log the request with refresh status
         refresh_msg = " (FORCE REFRESH)" if force_refresh else ""
         print(f"[TRENDS] Called with sport={sport}, limit={limit}, filter={trend_filter}{refresh_msg}")
@@ -16458,9 +16150,9 @@ def get_player_trends():
                 cached['from_cache'] = True
                 cached['cached_at'] = cached.get('cached_at', datetime.now(timezone.utc).isoformat())
                 return api_response(
-                    success=True, 
-                    data=cached, 
-                    message="Cached trends", 
+                    success=True,
+                    data=cached,
+                    message="Cached trends",
                     sport=sport,
                     cached=True
                 )
@@ -16515,7 +16207,7 @@ def get_player_trends():
                 variation = random.uniform(-0.1, 0.1)  # ±10% variation
                 base_value = player.get("fantasy_points", 0)
                 varied_value = base_value * (1 + variation)
-                
+
                 trend = random.choice(["🔥 Hot", "📈 Rising", "🎯 Value", "❄️ Cold"])
                 trends.append(
                     {
@@ -16547,8 +16239,8 @@ def get_player_trends():
         # ---------- Prepare result with timestamp ----------
         current_time = datetime.now(timezone.utc).isoformat()
         result = {
-            "trends": trends, 
-            "source": data_source, 
+            "trends": trends,
+            "source": data_source,
             "count": len(trends),
             "fetched_at": current_time,
             "force_refreshed": force_refresh
@@ -16563,10 +16255,10 @@ def get_player_trends():
             print(f"[TRENDS] Skipped caching due to force refresh")
 
         return api_response(
-            success=True, 
-            data=result, 
-            message="Trends" + (" (fresh)" if force_refresh else ""), 
-            sport=sport, 
+            success=True,
+            data=result,
+            message="Trends" + (" (fresh)" if force_refresh else ""),
+            sport=sport,
             scraped=scraped,
             timestamp=current_time
         )
@@ -16588,8 +16280,6 @@ def ai_fantasy_lineup():
     if flask_request.method == "OPTIONS":
         response = jsonify({"success": True})
         # CORS handled by Flask-CORS
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
         return response
 
     try:
@@ -17243,7 +16933,7 @@ def ncaab_rankings():
 @app.route("/api/ncaab/bracket")
 def ncaab_bracket():
     """Get NCAA tournament bracket games.
-    
+
     If season=2025, returns a hardcoded bracket with correct first‑round matchups.
     Otherwise, forwards the request to balldontlie.
     """
@@ -17432,102 +17122,6 @@ def ncaab_odds():
     return jsonify(result)
 
 
-# ==============================================================================
-# HELPER FUNCTIONS FOR DATA TRANSFORMATION
-# ==============================================================================
-
-
-def parse_purse(purse_str):
-    """Convert '$20,000,000' -> 20000000"""
-    if not purse_str:
-        return 0
-    return (
-        int("".join(filter(str.isdigit, purse_str)))
-        if any(c.isdigit() for c in purse_str)
-        else 0
-    )
-
-
-def map_status(api_status):
-    """Convert API status string to our internal status."""
-    if not api_status:
-        return "upcoming"
-    upper = api_status.upper()
-    if "COMPLETE" in upper:
-        return "completed"
-    if "UPCOMING" in upper:
-        return "upcoming"
-    if "LIVE" in upper or "ONGOING" in upper:
-        return "ongoing"
-    return "upcoming"
-
-
-def map_api_player(player):
-    """Transform raw balldontlie player to our frontend format."""
-    return {
-        "id": player["id"],
-        "name": player["display_name"],
-        "first_name": player["first_name"],
-        "last_name": player["last_name"],
-        "country": player["country"],
-        "country_code": player["country_code"],
-        "world_ranking": player.get("owgr"),  # may be None
-        "age": None,  # could calculate from birth_date if needed
-        "turned_pro": player.get("turned_pro"),
-        # additional fields set to None (frontend will show '—')
-        "points_avg": None,
-        "events_played": None,
-        "wins": None,
-        "top10s": None,
-        "earnings_usd": None,
-    }
-
-
-def map_api_tournament(t):
-    """Transform raw balldontlie tournament to our frontend format."""
-    location_parts = [t.get("city", ""), t.get("state", "")]
-    location = ", ".join(p for p in location_parts if p)
-    champion = t.get("champion")
-    winner_name = (
-        f"{champion['first_name']} {champion['last_name']}" if champion else None
-    )
-
-    return {
-        "id": t["id"],
-        "name": t["name"],
-        "location": location,
-        "course": t.get("course_name", ""),
-        "country": t.get("country", ""),
-        "start_date": t["start_date"],
-        "end_date": t["end_date"],
-        "purse_usd": parse_purse(t.get("purse")),
-        "format": "Stroke Play",
-        "tour": "PGA",
-        "status": map_status(t.get("status")),
-        "defending_champion": None,
-        "winner": winner_name,
-        "winner_score": None,
-    }
-
-
-def map_api_result(result):
-    """Transform a tournament result entry to leaderboard format."""
-    return {
-        "position": result["position"],
-        "position_numeric": result.get("position_numeric"),
-        "player": result["player"]["display_name"],
-        "player_id": result["player"]["id"],
-        "country": result["player"]["country_code"],
-        "to_par": (
-            f"{result['par_relative_score']:+d}"
-            if result["par_relative_score"] is not None
-            else None
-        ),
-        "total_score": result["total_score"],
-        "earnings": result.get("earnings"),
-        "tournament": result["tournament"]["name"],
-        # round scores not provided by this endpoint
-    }
 
 
 # ==============================================================================
@@ -17578,7 +17172,7 @@ def map_status(api_status):
         return "ongoing"
     return "upcoming"
 
-
+1
 def map_api_player(player):
     """Transform raw balldontlie player to our frontend format."""
     return {
@@ -18277,7 +17871,7 @@ def get_players():
         sport = flask_request.args.get("sport", "nba").lower()
         limit = int(flask_request.args.get("limit", "200"))
         use_realtime = flask_request.args.get("realtime", "true").lower() == "true"
-        
+
         print(f"🎯 GET /api/players: sport={sport}, limit={limit}, realtime={use_realtime}", flush=True)
 
         # ------------------------------------------------------------------
@@ -20106,6 +19700,18 @@ def get_stats_database():
 # ==============================================================================
 # 16. DEBUG ENDPOINTS (for troubleshooting)
 # ==============================================================================
+@app.route("/api/debug/redis/<user_id>", methods=['GET'])
+def debug_redis(user_id):
+    key = f"user:gen:{user_id}"
+    if "redis_client" in globals() and redis_client:
+        data = redis_client.hgetall(key)
+        return jsonify({
+            'key': key,
+            'data': {k.decode('utf-8') if isinstance(k, bytes) else k: v.decode('utf-8') if isinstance(v, bytes) else v
+                     for k, v in data.items()}
+        })
+    return jsonify({'error': 'Redis not available'}), 500
+
 @app.route("/api/debug/update-plan", methods=['POST'])
 @login_required
 def debug_update_plan():
@@ -20117,9 +19723,9 @@ def debug_update_plan():
         subscription_status = data.get('subscription_status', 'active')
         current_period_start = data.get('current_period_start')
         current_period_end = data.get('current_period_end')
-        
+
         print(f"🔧 Force updating user {g.user_id} to plan: {new_plan}")
-        
+
         if db:
             user_ref = db.collection('users').document(g.user_id)
             update_data = {
@@ -20128,22 +19734,22 @@ def debug_update_plan():
                 'subscription_status': subscription_status,
                 'updated_at': firestore.SERVER_TIMESTAMP
             }
-            
+
             if current_period_start:
                 update_data['current_period_start'] = datetime.fromisoformat(current_period_start.replace('Z', '+00:00'))
             if current_period_end:
                 update_data['current_period_end'] = datetime.fromisoformat(current_period_end.replace('Z', '+00:00'))
-            
+
             user_ref.update(update_data)
             print(f"✅ Force updated user to {new_plan}")
-            
+
             return jsonify({
                 'success': True,
                 'message': f'User plan updated to {new_plan}'
             })
         else:
             return jsonify({'error': 'Database not available'}), 500
-            
+
     except Exception as e:
         print(f"Error updating plan: {e}")
         return jsonify({'error': str(e)}), 500
@@ -20156,18 +19762,18 @@ def debug_add_user():
         data = flask_request.json
         email = data.get('email')
         user_id = data.get('user_id')
-        
+
         if not email:
             return jsonify({'error': 'Email required'}), 400
-        
+
         print(f"📝 Adding user to Firestore - ID: {user_id}, Email: {email}")
-        
+
         # Use Firestore if available
         if db:
             # Check if user already exists
             user_ref = db.collection('users').document(user_id or email)
             user_doc = user_ref.get()
-            
+
             if user_doc.exists:
                 print(f"✅ User already exists in Firestore: {user_doc.id}")
                 return jsonify({
@@ -20178,7 +19784,7 @@ def debug_add_user():
                         'plan': user_doc.to_dict().get('plan')
                     }
                 })
-            
+
             # Create new user document
             user_data = {
                 'email': email,
@@ -20188,15 +19794,15 @@ def debug_add_user():
                 'subscription_status': 'inactive',
                 'created_at': firestore.SERVER_TIMESTAMP
             }
-            
+
             user_ref.set(user_data)
             print(f"✅ Created new user in Firestore: {user_id or email}")
-            
+
             # Also add to in-memory for this session
             from models import User
             user = User(id=user_id or email, email=email)
             users_db[user.id] = user
-            
+
             return jsonify({
                 'success': True,
                 'user': {
@@ -20217,7 +19823,7 @@ def debug_add_user():
                     'email': user.email
                 }
             })
-        
+
     except Exception as e:
         print(f"❌ Error adding user: {e}")
         traceback.print_exc()
@@ -20265,62 +19871,11 @@ def debug_all_users():
                 })
             else:
                 return jsonify({'error': 'No database available'}), 500
-                
+
     except Exception as e:
         print(f"Debug error: {e}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-@app.route("/api/debug/user-subscription", methods=['GET'])
-@login_required
-def debug_user_subscription():
-    """Debug endpoint to check user subscription data"""
-    try:
-        user = users_db.get(g.user_id)
-        
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        # Get subscription if exists
-        subscription = None
-        if hasattr(user, 'subscription_id') and user.subscription_id:
-            subscription = subscriptions_db.get(user.subscription_id)
-        
-        return jsonify({
-            'user_id': g.user_id,
-            'user_email': user.email,
-            'has_subscription_id': hasattr(user, 'subscription_id'),
-            'subscription_id': getattr(user, 'subscription_id', None),
-            'user_plan': getattr(user, 'plan', None),
-            'user_subscription_status': getattr(user, 'subscription_status', None),
-            'user_stripe_customer_id': getattr(user, 'stripe_customer_id', None),
-            'subscription': subscription.to_dict() if subscription else None,
-            'subscriptions_db_keys': list(subscriptions_db.keys())
-        })
-        
-    except Exception as e:
-        print(f"Debug error: {e}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-# Check what fields your user objects have
-# Add this debug endpoint temporarily
-@app.route("/api/debug/user", methods=['GET'])
-@login_required
-def debug_user():
-    """Debug endpoint to see user data"""
-    user = users_db.get(g.user_id)
-    if user:
-        return jsonify({
-            'id': user.id,
-            'email': user.email,
-            'subscription_id': getattr(user, 'subscription_id', None),
-            'plan': getattr(user, 'plan', None),
-            'subscription_status': getattr(user, 'subscription_status', None),
-            'has_subscription': hasattr(user, 'subscription_id') and user.subscription_id is not None
-        })
-    return jsonify({'error': 'User not found'}), 404
-
 
 @app.route("/debug/balldontlie-url")
 def debug_url():
@@ -20371,7 +19926,7 @@ def debug_prices():
         # Determine mode (test or live)
         is_test_mode = stripe.api_key.startswith('sk_test_')
         is_live_mode = stripe.api_key.startswith('sk_live_')
-        
+
         # Your configured price IDs
         configured_prices = {
             'starter_month': {
@@ -20417,20 +19972,20 @@ def debug_prices():
                 'expected': '$2.99 one-time'
             }
         }
-        
+
         results = {}
         all_valid = True
-        
+
         # Verify each price ID with Stripe
         for key, price_info in configured_prices.items():
             price_id = price_info['id']
             try:
                 # Attempt to retrieve the price from Stripe
                 price = stripe.Price.retrieve(price_id)
-                
+
                 # Check if the amount matches what we expect
                 amount_matches = price.unit_amount == price_info['amount']
-                
+
                 results[key] = {
                     'id': price_id,
                     'name': price_info['name'],
@@ -20445,11 +20000,11 @@ def debug_prices():
                     'livemode': price.livemode,
                     'created': datetime.fromtimestamp(price.created).isoformat() if price.created else None
                 }
-                
+
                 if not amount_matches:
                     all_valid = False
                     results[key]['warning'] = f"Amount mismatch: Expected {price_info['amount']/100}, got {price.unit_amount/100}"
-                    
+
             except stripe.error.InvalidRequestError as e:
                 all_valid = False
                 results[key] = {
@@ -20476,7 +20031,7 @@ def debug_prices():
                     'error': str(e),
                     'expected': price_info['expected']
                 }
-        
+
         # Try to get account info to verify connectivity
         account_info = None
         try:
@@ -20489,7 +20044,7 @@ def debug_prices():
             }
         except Exception as e:
             account_info = {'error': str(e)}
-        
+
         return jsonify({
             'success': True,
             'timestamp': datetime.utcnow().isoformat(),
@@ -20507,7 +20062,7 @@ def debug_prices():
             },
             'prices': results
         }), 200
-        
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({
@@ -21055,7 +20610,6 @@ def debug_player_sample(sport):
         )
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
-
 
 # ------------------------------------------------------------------------------
 # Block unwanted endpoints
