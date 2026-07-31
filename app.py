@@ -197,6 +197,28 @@ if key:
 else:
     print("⚠️ KALSHI_PRIVATE_KEY not set - crypto features disabled")
 
+
+def ttl_cache(ttl_seconds: int):
+    """Cache a function's successful result in memory for a bounded interval."""
+    cache: Dict[tuple, tuple[float, Any]] = {}
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            cache_key = (args, tuple(sorted(kwargs.items())))
+            cached = cache.get(cache_key)
+            now = time.time()
+            if cached and now - cached[0] < ttl_seconds:
+                return cached[1]
+
+            result = func(*args, **kwargs)
+            cache[cache_key] = (now, result)
+            return result
+
+        return wrapper
+
+    return decorator
+
 # Helper function to add credits to the Redis generation counter
 def add_generator_credits_to_redis(user_id, quantity):
     """Add purchased generator credits to Redis counter."""
