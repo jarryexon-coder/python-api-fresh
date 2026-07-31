@@ -6847,7 +6847,8 @@ def parlay_suggestions():
     except Exception as e:
         print(f"❌ Error in parlay/suggestions: {e}")
         traceback.print_exc()
-        fallback = generate_simple_parlay_suggestions("NBA")[: int(limit_param)]
+        # Do not turn an upstream failure into made-up recommendations.
+        fallback = []
         for s in fallback:
             s["is_real_data"] = False
         return jsonify(
@@ -8088,50 +8089,16 @@ def get_odds_games():
 
             return jsonify(response_data)
 
-        # ----- FALLBACK TO MOCK DATA -----
-        print(f"⚠️ No real data for {sport}, generating mock data", flush=True)
-        mock_games = generate_mock_games(sport)
-
-        if mock_games and len(mock_games) > 0:
-            # Format mock games
-            games = []
-            for game in mock_games[:limit]:
-                games.append({
-                    "id": game.get("id"),
-                    "sport": sport.upper(),
-                    "home_team": game.get("home_team"),
-                    "away_team": game.get("away_team"),
-                    "home_score": game.get("home_score", 0),
-                    "away_score": game.get("away_score", 0),
-                    "commence_time": game.get("commence_time"),
-                    "status": game.get("status", "scheduled"),
-                    "period": game.get("period"),
-                    "clock": game.get("clock"),
-                    "odds": [],
-                    "source": "mock",
-                })
-
-            response_data = {
-                "success": True,
-                "games": games,
-                "count": len(games),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "mock",
-                "cached": False,
-                "note": f"Using mock data for {sport.upper()} - real API data not available"
-            }
-
-            return jsonify(response_data)
-
-        # ----- NO DATA AT ALL -----
-        print(f"❌ No data available for sport: {sport}", flush=True)
+        # No fabricated fallback: return an honest empty state when no odds are available.
+        print(f"ℹ️ No real data available for sport: {sport}", flush=True)
         return jsonify({
-            "success": False,
+            "success": True,
             "games": [],
             "count": 0,
-            "message": f"No games found for sport: {sport}",
+            "message": f"No live games are currently available for {sport.upper()}.",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }), 404
+            "source": "The Odds API",
+        })
 
     except Exception as e:
         print(f"❌ Error in /api/odds/games: {e}", flush=True)

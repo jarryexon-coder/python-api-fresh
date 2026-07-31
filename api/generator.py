@@ -56,7 +56,8 @@ def generate():
             players_by_id = {str(player.get("id")): player for player in players}
             response = requests.get(f"{BASE_URL}/v1/season_averages", headers=headers, params=[("season", season), *[("player_ids[]", player.get("id")) for player in players if player.get("id")]], timeout=15)
         else:
-            response = requests.get(f"{BASE_URL}/{SUPPORTED_SPORTS[sport]}/v1/player_season_stats", headers=headers, params={"season": season, "per_page": 100}, timeout=15)
+            season_path = "season_stats" if sport == "nfl" else "player_season_stats"
+            response = requests.get(f"{BASE_URL}/{SUPPORTED_SPORTS[sport]}/v1/{season_path}", headers=headers, params={"season": season, "per_page": 100}, timeout=15)
         response.raise_for_status()
         generated = []
         for index, row in enumerate(_rows(response.json())):
