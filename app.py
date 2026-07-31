@@ -1295,8 +1295,21 @@ def get_active_subscription(user_id):
 # ------------------------------------------------------------------------------
 # Load JSON databases
 # ------------------------------------------------------------------------------
-players_data_list = safe_load_json("players_data_comprehensive_fixed.json", [])
-nfl_players_data = safe_load_json("nfl_players_data_comprehensive_fixed.json", [])
+def load_player_dataset(filename: str) -> List[Dict[str, Any]]:
+    """Load an optional player dataset without preventing the API from booting."""
+    data = safe_load_json(filename, [])
+    if isinstance(data, list):
+        return data
+    print(f"⚠️ {filename} is not a player list - using an empty dataset")
+    return []
+
+
+players_data_list = load_player_dataset("players_data_comprehensive_fixed.json")
+nfl_players_data = load_player_dataset("nfl_players_data_comprehensive_fixed.json")
+mlb_players_data = load_player_dataset("mlb_players_data_comprehensive_fixed.json")
+nhl_players_data = load_player_dataset("nhl_players_data_comprehensive_fixed.json")
+tennis_players_data = load_player_dataset("tennis_players_data.json")
+golf_players_data = load_player_dataset("golf_players_data.json")
 fantasy_teams_data_raw = safe_load_json("fantasy_teams_data_comprehensive.json", {})
 sports_stats_database = safe_load_json("sports_stats_database_comprehensive.json", {})
 # Normalize fantasy teams
@@ -1341,6 +1354,10 @@ all_players_data = (
 print("\n📊 DATABASES LOADED:")
 print(f"   NBA Players: {len(players_data_list)}")
 print(f"   NFL Players: {len(nfl_players_data)}")
+print(f"   MLB Players: {len(mlb_players_data)}")
+print(f"   NHL Players: {len(nhl_players_data)}")
+print(f"   Tennis Players: {len(tennis_players_data)}")
+print(f"   Golf Players: {len(golf_players_data)}")
 print(f"   Fantasy Teams: {len(fantasy_teams_data)}")
 print(f"   Sports Stats: {'Yes' if sports_stats_database else 'No'}")
 print("=" * 50)
