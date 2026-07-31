@@ -1032,6 +1032,10 @@ CACHE_TTL = 3600
 app = Flask(__name__)
 from api.ncaa import ncaa_bp
 app.register_blueprint(ncaa_bp)
+from api.team_context import team_context_bp
+from api.generator import generator_bp
+app.register_blueprint(team_context_bp)
+app.register_blueprint(generator_bp)
 
 # Single source of truth for CORS
 CORS(
