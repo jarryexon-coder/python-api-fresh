@@ -192,9 +192,10 @@ def user_has_unlimited_credits(user_id):
     return False
 
 key = os.environ.get('KALSHI_PRIVATE_KEY')
-print(f"Key starts with: {key[:50]}")
-print(f"Key ends with: {key[-50:]}")
-print(f"Key length: {len(key)}")
+if key:
+    print(f"KALSHI_PRIVATE_KEY configured ({len(key)} characters)")
+else:
+    print("⚠️ KALSHI_PRIVATE_KEY not set - crypto features disabled")
 
 # Helper function to add credits to the Redis generation counter
 def add_generator_credits_to_redis(user_id, quantity):
