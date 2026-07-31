@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 
 mlb_bp = Blueprint("mlb", __name__, url_prefix="/api/mlb")
 BDL_BASE_URL = "https://api.balldontlie.io"
+TANK01_MLB_HOST = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
 
 
 def _rows(payload: Any) -> list[dict[str, Any]]:
@@ -45,6 +46,28 @@ def _bdl_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     response = requests.get(f"{BDL_BASE_URL}{path}", headers={"Authorization": key, "Accept": "application/json"}, params=params, timeout=15)
     response.raise_for_status()
     return response.json()
+
+
+@mlb_bp.get("/news")
+def news():
+    """Latest MLB news from Tank01, normalized for SportsWire and NewsDesk."""
+    key = os.getenv("RAPIDAPI_KEY_TANK01") or os.getenv("RAPIDAPI_KEY")
+    if not key:
+        return jsonify({"success": False, "error": "RAPIDAPI_KEY_TANK01 or RAPIDAPI_KEY is not configured in Railway Variables."}), 503
+    limit = min(max(request.args.get("limit", 10, type=int), 1), 50)
+    try:
+        response = requests.get(
+            f"https://{TANK01_MLB_HOST}/getMLBNews",
+            headers={"X-RapidAPI-Key": key, "X-RapidAPI-Host": TANK01_MLB_HOST, "Accept": "application/json"},
+            params={"recentNews": "true", "maxItems": limit}, timeout=15,
+        )
+        response.raise_for_status()
+        data = []
+        for index, item in enumerate(_rows(response.json())):
+            data.append({"id": item.get("link") or f"tank01-mlb-news-{index}", "title": item.get("title") or "MLB update", "description": item.get("description") or "Tank01 MLB news", "url": item.get("link"), "image": item.get("image"), "sport": "mlb", "player_ids": item.get("playerIDs", [])})
+        return jsonify({"success": True, "source": "Tank01 MLB Top News and Headlines", "data": data, "news": data, "count": len(data)})
+    except requests.RequestException as error:
+        return jsonify({"success": False, "error": f"Tank01 MLB news request failed: {error}"}), 502
 
 
 def _player_name(row: dict[str, Any]) -> tuple[dict[str, Any], str]:
