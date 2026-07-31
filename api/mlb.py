@@ -61,16 +61,32 @@ def _player_card(row: dict[str, Any], index: int) -> dict[str, Any]:
         "hits": _number(row, "batting_h", "hits"), "runs": _number(row, "batting_r", "runs"),
         "rbis": _number(row, "batting_rbi", "rbi"), "home_runs": _number(row, "batting_hr", "home_runs"),
         "strikeouts": _number(row, "pitching_k", "strikeouts", "k"), "batting_average": _number(row, "batting_avg", "avg"),
-        "era": _number(row, "pitching_era", "era"),
+        "era": _number(row, "pitching_era", "era"), "ops": _number(row, "batting_ops", "ops"),
+        "obp": _number(row, "batting_obp", "obp"), "slugging": _number(row, "batting_slg", "slg"),
+        "whip": _number(row, "pitching_whip", "whip"), "k_per_9": _number(row, "pitching_k_per_9", "k_per_9"),
     }
-    # Per-game projections are intentionally transparent and derive from the live season totals.
-    projections = {key: round((value / games) * 1.02, 2) if value is not None and games else None for key, value in stats.items() if key not in {"batting_average", "era"}}
+    # Transparent per-game model. It uses real season production plus context rates,
+    # rather than claiming unavailable Statcast measures such as barrel% or xwOBA.
+    ops = stats["ops"]
+    batting_modifier = max(.88, min(1.12, 1 + .15 * (((ops or .720) - .720) / .720)))
+    k9 = stats["k_per_9"]
+    strikeout_modifier = max(.88, min(1.12, 1 + .10 * (((k9 or 8.5) - 8.5) / 8.5)))
+    projections = {}
+    for key in ("hits", "runs", "rbis", "home_runs", "strikeouts"):
+        value = stats[key]
+        modifier = strikeout_modifier if key == "strikeouts" else batting_modifier
+        projections[key] = round((value / games) * modifier, 2) if value is not None and games else None
     return {
         "id": str(player.get("id") or row.get("player_id") or index), "name": name,
         "team": team.get("abbreviation") or team.get("name") or row.get("team_name") or "",
         "position": player.get("position") or row.get("position") or "", "games_played": games,
         "stats": {key: value for key, value in stats.items() if value is not None},
         "projections": {key: value for key, value in projections.items() if value is not None},
+        "model": {
+            "version": "mlb-season-context-v1", "batting_modifier": round(batting_modifier, 3),
+            "strikeout_modifier": round(strikeout_modifier, 3), "statcast_metrics_available": False,
+            "formula": "season stat per game × capped OPS or K/9 context modifier",
+        },
     }
 
 
