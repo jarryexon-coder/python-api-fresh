@@ -98,22 +98,26 @@ def players():
     limit = min(max(request.args.get("limit", 50, type=int), 1), 100)
     try:
         if view == "props":
-            url = os.getenv("TANK01_MLB_RAPIDAPI_URL")
-            key = os.getenv("RAPIDAPI_KEY_TANK01") or os.getenv("RAPIDAPI_KEY")
-            if not url or not key:
-                return jsonify({"success": True, "source": "Tank01", "message": "Configure TANK01_MLB_RAPIDAPI_URL and RAPIDAPI_KEY_TANK01 for live MLB props.", "data": [], "count": 0})
-            headers = {"X-RapidAPI-Key": key, "Accept": "application/json"}
-            if host := os.getenv("TANK01_MLB_RAPIDAPI_HOST"):
-                headers["X-RapidAPI-Host"] = host
-            response = requests.get(url, headers=headers, params={"limit": limit}, timeout=15)
-            response.raise_for_status()
+            # Tank01 has live stats and fantasy projections but not player prop lines.
+            # BallDontLie GOAT exposes the real MLB player-prop market per game.
+            game_ids = [request.args["game_id"]] if request.args.get("game_id") else []
+            if not game_ids:
+                games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": request.args.get("date", datetime.now().strftime("%Y-%m-%d")), "per_page": 100}))
+                game_ids = [str(game.get("id")) for game in games if game.get("id") is not None]
             data = []
-            for index, row in enumerate(_rows(response.json())):
-                player = row.get("player") if isinstance(row.get("player"), dict) else row
-                line = _number(row, "line", "line_value", "value", "overUnder")
-                projection = _number(row, "projection", "projected", "projected_value")
-                data.append({"id": str(row.get("id") or index), "name": player.get("name") or row.get("playerName") or row.get("player") or "Unknown player", "team": row.get("team") or row.get("teamAbv") or "", "market": row.get("stat") or row.get("propType") or row.get("market") or "MLB prop", "line": line, "projection": projection, "edge": round(((projection - line) / line) * 100, 1) if projection is not None and line not in (None, 0) else None, "odds": row.get("odds") or row.get("overOdds")})
-            return jsonify({"success": True, "source": "Tank01 MLB", "is_real_data": True, "data": data, "count": len(data)})
+            for game_id in game_ids:
+                payload = _bdl_get("/mlb/v1/odds/player_props", {"game_id": game_id})
+                for index, row in enumerate(_rows(payload)):
+                    player = row.get("player") if isinstance(row.get("player"), dict) else {}
+                    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+                    line = _number(row, "line_value", "line", "value")
+                    odds = market.get("over_odds") or market.get("odds")
+                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {row.get('player_id', '')}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": row.get("prop_type") or "MLB prop", "line": line, "projection": None, "edge": None, "odds": odds, "game_id": game_id, "vendor": row.get("vendor")})
+                    if len(data) >= limit:
+                        break
+                if len(data) >= limit:
+                    break
+            return jsonify({"success": True, "source": "BallDontLie MLB player props", "is_real_data": True, "data": data, "count": len(data), "message": None if data else "No live MLB player props are currently posted for this date."})
 
         payload = _bdl_get("/mlb/v1/season_stats", {"season": _season(), "per_page": limit, "sort_by": "batting_hr", "sort_order": "desc"})
         data = [_player_card(row, index) for index, row in enumerate(_rows(payload))]
