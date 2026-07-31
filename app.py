@@ -1310,6 +1310,27 @@ mlb_players_data = load_player_dataset("mlb_players_data_comprehensive_fixed.jso
 nhl_players_data = load_player_dataset("nhl_players_data_comprehensive_fixed.json")
 tennis_players_data = load_player_dataset("tennis_players_data.json")
 golf_players_data = load_player_dataset("golf_players_data.json")
+
+# Backwards-compatible names used by the older API handlers below. Keep these
+# derived from the same validated datasets so every sport is always defined.
+MLB_PLAYERS = mlb_players_data
+NHL_PLAYERS = nhl_players_data
+TENNIS_PLAYERS = {
+    "ATP": [player for player in tennis_players_data if player.get("tour") == "ATP"],
+    "WTA": [player for player in tennis_players_data if player.get("tour") == "WTA"],
+}
+GOLF_PLAYERS = {
+    "PGA": [player for player in golf_players_data if player.get("tour") == "PGA"],
+    "LPGA": [player for player in golf_players_data if player.get("tour") == "LPGA"],
+}
+FALLBACK_PLAYERS = {
+    "nba": players_data_list,
+    "nfl": nfl_players_data,
+    "mlb": MLB_PLAYERS,
+    "nhl": NHL_PLAYERS,
+    "tennis": tennis_players_data,
+    "golf": golf_players_data,
+}
 fantasy_teams_data_raw = safe_load_json("fantasy_teams_data_comprehensive.json", {})
 sports_stats_database = safe_load_json("sports_stats_database_comprehensive.json", {})
 # Normalize fantasy teams
@@ -2644,33 +2665,20 @@ def fantasyhub_players():
         players = []
         teams_playing_today = []
 
-        if sport == 'nba':
-            players = [p for p in NBA_PLAYERS_2026 if p.get('injury_status', 'Active') == 'Active']
-            if filter_by_today:
-                today = get_todays_games('nba')
-                teams_playing_today = today['teams']
-                players = [p for p in players if p.get('team') in teams_playing_today]
-
-        elif sport == 'nfl':
-            players = [p for p in NFL_PLAYERS if p.get('injury_status', 'Active') == 'Active']
-            if filter_by_today:
-                today = get_todays_games('nfl')
-                teams_playing_today = today['teams']
-                players = [p for p in players if p.get('team') in teams_playing_today]
-
-        elif sport == 'nhl':
-            players = [p for p in NHL_PLAYERS if p.get('injury_status', 'Active') == 'Active']
-            if filter_by_today:
-                today = get_todays_games('nhl')
-                teams_playing_today = today['teams']
-                players = [p for p in players if p.get('team') in teams_playing_today]
-
-        elif sport == 'mlb':
-            players = [p for p in MLB_PLAYERS if p.get('injury_status', 'Active') == 'Active']
-            if filter_by_today:
-                today = get_todays_games('mlb')
-                teams_playing_today = today['teams']
-                players = [p for p in players if p.get('team') in teams_playing_today]
+        player_sources = {
+            'nba': players_data_list,
+            'nfl': nfl_players_data,
+            'nhl': nhl_players_data,
+            'mlb': mlb_players_data,
+        }
+        players = [
+            player for player in player_sources.get(sport, [])
+            if player.get('injury_status', 'Active') == 'Active'
+        ]
+        if filter_by_today and sport in player_sources:
+            today = get_todays_games(sport)
+            teams_playing_today = today.get('teams', [])
+            players = [player for player in players if player.get('team') in teams_playing_today]
 
         transformed_players = []
         for p in players:
@@ -4753,16 +4761,13 @@ def get_fantasy_players():
 
         # ----- For other sports, use their respective databases -----
         elif sport == "nfl":
-            from nfl_static_data import NFL_PLAYERS
-            # ... handle NFL ...
+            data_source = nfl_players_data
 
         elif sport == "mlb":
-            from mlb_static_data import MLB_PLAYERS
-            # ... handle MLB ...
+            data_source = MLB_PLAYERS
 
         elif sport == "nhl":
-            from nhl_static_data import NHL_PLAYERS
-            # ... handle NHL ...
+            data_source = NHL_PLAYERS
 
         # ----- Ultimate fallback: generate mock players -----
         mock_players = generate_mock_players(sport, limit)
@@ -8727,16 +8732,6 @@ def call_node_microservice(path, params=None, headers=None):
     except Exception as e:
         print(f"❌ Error calling Node microservice: {e}")
         return None
-
-@app.route("/api/ fantasyhub/players")
-def fantasyhub_players():
-    params = {
-        "date": flask_request.args.get("date", "today"),
-        "detailed": flask_request.args.get("detailed", "false"),
-    }
-    result = call_node_microservice("/api/fantasyhub/players", params)
-    return jsonify(result)
-
 
 # ------------------------------------------------------------------------------
 # News & wire
