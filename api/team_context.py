@@ -125,3 +125,32 @@ def opponent_strength(sport: str):
         return jsonify({"success": False, "error": str(error)}), 503
     except requests.RequestException as error:
         return jsonify({"success": False, "error": f"Opponent-strength provider request failed: {error}"}), 502
+
+
+@team_context_bp.get("/<sport>/player-stats")
+def player_stats(sport: str):
+    """Normalized provider-backed season statistics for NFL, NCAAF and NCAAB."""
+    sport = sport.lower()
+    if sport not in SPORT_PATHS:
+        return jsonify({"success": False, "error": "sport must be nfl, ncaaf, or ncaab"}), 400
+    season = request.args.get("season", type=int) or int(os.getenv("SPORT_STATS_SEASON", datetime.now().year - 1))
+    limit = min(max(request.args.get("limit", 50, type=int), 1), 100)
+    key = os.getenv("BALLDONTLIE_API_KEY")
+    if not key:
+        return jsonify({"success": False, "error": "BALLDONTLIE_API_KEY is not configured in Railway Variables."}), 503
+    try:
+        response = requests.get(
+            f"{BDL_BASE_URL}/{SPORT_PATHS[sport]}/v1/player_season_stats",
+            headers={"Authorization": key, "Accept": "application/json"},
+            params={"season": season, "per_page": limit}, timeout=15,
+        )
+        response.raise_for_status()
+        data = []
+        for index, row in enumerate(_rows(response.json())):
+            player, team = _team(row.get("player")), _team(row.get("team"))
+            name = " ".join(filter(None, [str(player.get("first_name") or ""), str(player.get("last_name") or "")])).strip() or str(player.get("name") or "Unknown player")
+            stats = {key: row.get(key) for key in ("pts", "reb", "ast", "passing_yards", "rushing_yards", "receiving_yards", "touchdowns") if row.get(key) is not None}
+            data.append({"id": str(player.get("id") or row.get("player_id") or index), "name": name, "team": team.get("abbreviation") or team.get("name") or "", "position": player.get("position") or "", "stats": stats, **stats})
+        return jsonify({"success": True, "sport": sport, "season": season, "source": "BallDontLie player season stats", "data": data, "count": len(data)})
+    except requests.RequestException as error:
+        return jsonify({"success": False, "error": f"Player-stat provider request failed: {error}"}), 502
