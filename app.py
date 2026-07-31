@@ -1030,6 +1030,8 @@ CACHE_TTL = 3600
 # Replace your existing CORS configuration with this:
 
 app = Flask(__name__)
+from api.ncaa import ncaa_bp
+app.register_blueprint(ncaa_bp)
 
 # Single source of truth for CORS
 CORS(
