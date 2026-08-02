@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from typing import Any
 
@@ -11,6 +12,7 @@ from flask import Blueprint, jsonify, request
 mlb_bp = Blueprint("mlb", __name__, url_prefix="/api/mlb")
 BDL_BASE_URL = "https://api.balldontlie.io"
 TANK01_MLB_HOST = "tank01-mlb-live-in-game-real-time-statistics.p.rapidapi.com"
+_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _rows(payload: Any) -> list[dict[str, Any]]:
@@ -46,6 +48,27 @@ def _bdl_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     response = requests.get(f"{BDL_BASE_URL}{path}", headers={"Authorization": key, "Accept": "application/json"}, params=params, timeout=15)
     response.raise_for_status()
     return response.json()
+
+
+def _cached_rows(key: str, path: str, params: dict[str, Any], ttl: int = 600) -> list[dict[str, Any]]:
+    """Fetch every cursor page once, then reuse it for a short period."""
+    cached = _cache.get(key)
+    if cached and time.time() - cached[0] < ttl:
+        return cached[1]
+    rows: list[dict[str, Any]] = []
+    cursor: Any = None
+    for _ in range(20):
+        query = {**params, "per_page": 100}
+        if cursor is not None:
+            query["cursor"] = cursor
+        payload = _bdl_get(path, query)
+        page = _rows(payload)
+        rows.extend(page)
+        cursor = payload.get("meta", {}).get("next_cursor") if isinstance(payload, dict) else None
+        if not cursor or not page:
+            break
+    _cache[key] = (time.time(), rows)
+    return rows
 
 
 @mlb_bp.get("/news")
@@ -165,3 +188,88 @@ def team_stats():
         return jsonify({"success": False, "error": str(error)}), 503
     except requests.RequestException as error:
         return jsonify({"success": False, "error": f"MLB provider request failed: {error}"}), 502
+
+
+@mlb_bp.get("/rosters")
+def rosters():
+    """Current active MLB roster, grouped by all 30 teams."""
+    try:
+        players = _cached_rows("active-players", "/mlb/v1/players/active", {})
+        grouped: dict[str, dict[str, Any]] = {}
+        for player in players:
+            team = player.get("team") if isinstance(player.get("team"), dict) else {}
+            team_id = str(team.get("id") or "unassigned")
+            roster = grouped.setdefault(team_id, {
+                "id": team_id, "name": team.get("display_name") or team.get("name") or "Unassigned",
+                "abbreviation": team.get("abbreviation") or "", "league": team.get("league") or "",
+                "division": team.get("division") or "", "players": [],
+            })
+            roster["players"].append({
+                "id": str(player.get("id")), "name": player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")])),
+                "position": player.get("position") or "", "jersey": player.get("jersey") or "", "bats_throws": player.get("bats_throws") or "",
+            })
+        data = sorted(grouped.values(), key=lambda team: team["name"])
+        for team in data:
+            team["players"].sort(key=lambda player: (player["position"], player["name"]))
+        return jsonify({"success": True, "source": "BallDontLie active MLB players", "data": data, "count": len(data)})
+    except RuntimeError as error:
+        return jsonify({"success": False, "error": str(error)}), 503
+    except requests.RequestException as error:
+        return jsonify({"success": False, "error": f"MLB roster request failed: {error}"}), 502
+
+
+def _team_projection(team_stats: dict[str, Any] | None, opponent_stats: dict[str, Any] | None) -> float | None:
+    if not team_stats:
+        return None
+    games = _number(team_stats, "gp") or 0
+    runs = _number(team_stats, "batting_r")
+    if not games or runs is None:
+        return None
+    baseline = runs / games
+    opponent_era = _number(opponent_stats or {}, "pitching_era")
+    # A bounded opponent ERA adjustment; not a sportsbook line.
+    adjustment = max(.88, min(1.12, 1 + ((opponent_era or 4.10) - 4.10) * .045))
+    return round(baseline * adjustment, 1)
+
+
+@mlb_bp.get("/matchups")
+def matchups():
+    """Today's real MLB schedule with transparent team and player projections."""
+    game_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": game_date, "per_page": 100, "season_type": "regular"}))
+        season = _season()
+        active_ids = {str(player.get("id")) for player in _cached_rows("active-players", "/mlb/v1/players/active", {})}
+        team_stats = _cached_rows(f"team-season-{season}", "/mlb/v1/teams/season_stats", {"season": season})
+        stats_by_team = {str((row.get("team") or {}).get("id")): row for row in team_stats if isinstance(row.get("team"), dict)}
+        data = []
+        for game in games:
+            home = game.get("home_team") if isinstance(game.get("home_team"), dict) else {}
+            away = game.get("away_team") if isinstance(game.get("away_team"), dict) else {}
+            home_id, away_id = str(home.get("id")), str(away.get("id"))
+            game_players = _cached_rows(
+                f"matchup-season-{season}-{home_id}-{away_id}", "/mlb/v1/season_stats",
+                {"season": season, "team_id": home_id}, ttl=300,
+            ) + _cached_rows(
+                f"matchup-season-{season}-{away_id}-{home_id}", "/mlb/v1/season_stats",
+                {"season": season, "team_id": away_id}, ttl=300,
+            )
+            sides = []
+            for team, opponent, team_id, opponent_id in ((away, home, away_id, home_id), (home, away, home_id, away_id)):
+                roster = [_player_card(row, index) for index, row in enumerate(game_players)
+                          if str(((row.get("team") or {}).get("id"))) == team_id and str((row.get("player") or {}).get("id")) in active_ids]
+                roster.sort(key=lambda player: (player["projections"].get("runs") or 0, player["projections"].get("rbis") or 0), reverse=True)
+                sides.append({
+                    "id": team_id, "name": team.get("display_name") or team.get("name") or "Team", "abbreviation": team.get("abbreviation") or "",
+                    "projected_runs": _team_projection(stats_by_team.get(team_id), stats_by_team.get(opponent_id)),
+                    "players": roster,
+                })
+            data.append({
+                "id": str(game.get("id")), "date": game.get("date"), "status": game.get("status"), "venue": game.get("venue"),
+                "away": sides[0], "home": sides[1], "projection_method": "Team runs per game × bounded opponent ERA adjustment; player values are current-season per-game OPS/K/9 adjusted projections.",
+            })
+        return jsonify({"success": True, "source": "BallDontLie MLB schedule and season statistics", "date": game_date, "data": data, "count": len(data)})
+    except RuntimeError as error:
+        return jsonify({"success": False, "error": str(error)}), 503
+    except requests.RequestException as error:
+        return jsonify({"success": False, "error": f"MLB matchup request failed: {error}"}), 502
