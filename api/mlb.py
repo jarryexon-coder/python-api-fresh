@@ -111,6 +111,10 @@ def _player_card(row: dict[str, Any], index: int) -> dict[str, Any]:
         "obp": _number(row, "batting_obp", "obp"), "slugging": _number(row, "batting_slg", "slg"),
         "whip": _number(row, "pitching_whip", "whip"), "k_per_9": _number(row, "pitching_k_per_9", "k_per_9"),
     }
+
+
+def _season_rows(season: int) -> list[dict[str, Any]]:
+    return _cached_rows(f"player-season-{season}", "/mlb/v1/season_stats", {"season": season}, ttl=600)
     # Transparent per-game model. It uses real season production plus context rates,
     # rather than claiming unavailable Statcast measures such as barrel% or xwOBA.
     ops = stats["ops"]
@@ -195,6 +199,7 @@ def rosters():
     """Current active MLB roster, grouped by all 30 teams."""
     try:
         players = _cached_rows("active-players", "/mlb/v1/players/active", {})
+        season_cards = {str((row.get("player") or {}).get("id")): _player_card(row, index) for index, row in enumerate(_season_rows(_season()))}
         grouped: dict[str, dict[str, Any]] = {}
         for player in players:
             team = player.get("team") if isinstance(player.get("team"), dict) else {}
@@ -204,9 +209,13 @@ def rosters():
                 "abbreviation": team.get("abbreviation") or "", "league": team.get("league") or "",
                 "division": team.get("division") or "", "players": [],
             })
+            season_card = season_cards.get(str(player.get("id")))
             roster["players"].append({
                 "id": str(player.get("id")), "name": player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")])),
                 "position": player.get("position") or "", "jersey": player.get("jersey") or "", "bats_throws": player.get("bats_throws") or "",
+                "games_played": season_card.get("games_played") if season_card else 0,
+                "stats": season_card.get("stats", {}) if season_card else {},
+                "projections": season_card.get("projections", {}) if season_card else {},
             })
         data = sorted(grouped.values(), key=lambda team: team["name"])
         for team in data:
@@ -239,25 +248,28 @@ def matchups():
     try:
         games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": game_date, "per_page": 100, "season_type": "regular"}))
         season = _season()
-        active_ids = {str(player.get("id")) for player in _cached_rows("active-players", "/mlb/v1/players/active", {})}
+        active_players = _cached_rows("active-players", "/mlb/v1/players/active", {})
+        active_by_team: dict[str, list[dict[str, Any]]] = {}
+        for player in active_players:
+            team = player.get("team") if isinstance(player.get("team"), dict) else {}
+            active_by_team.setdefault(str(team.get("id")), []).append(player)
         team_stats = _cached_rows(f"team-season-{season}", "/mlb/v1/teams/season_stats", {"season": season})
         stats_by_team = {str((row.get("team") or {}).get("id")): row for row in team_stats if isinstance(row.get("team"), dict)}
+        season_cards = {str((row.get("player") or {}).get("id")): _player_card(row, index) for index, row in enumerate(_season_rows(season))}
         data = []
         for game in games:
             home = game.get("home_team") if isinstance(game.get("home_team"), dict) else {}
             away = game.get("away_team") if isinstance(game.get("away_team"), dict) else {}
             home_id, away_id = str(home.get("id")), str(away.get("id"))
-            game_players = _cached_rows(
-                f"matchup-season-{season}-{home_id}-{away_id}", "/mlb/v1/season_stats",
-                {"season": season, "team_id": home_id}, ttl=300,
-            ) + _cached_rows(
-                f"matchup-season-{season}-{away_id}-{home_id}", "/mlb/v1/season_stats",
-                {"season": season, "team_id": away_id}, ttl=300,
-            )
             sides = []
             for team, opponent, team_id, opponent_id in ((away, home, away_id, home_id), (home, away, home_id, away_id)):
-                roster = [_player_card(row, index) for index, row in enumerate(game_players)
-                          if str(((row.get("team") or {}).get("id"))) == team_id and str((row.get("player") or {}).get("id")) in active_ids]
+                roster = []
+                for index, player in enumerate(active_by_team.get(team_id, [])):
+                    card = season_cards.get(str(player.get("id")))
+                    roster.append(card or {
+                        "id": str(player.get("id")), "name": player.get("full_name") or "Unknown player", "team": team.get("abbreviation") or "",
+                        "position": player.get("position") or "", "games_played": 0, "stats": {}, "projections": {},
+                    })
                 roster.sort(key=lambda player: (player["projections"].get("runs") or 0, player["projections"].get("rbis") or 0), reverse=True)
                 sides.append({
                     "id": team_id, "name": team.get("display_name") or team.get("name") or "Team", "abbreviation": team.get("abbreviation") or "",
