@@ -111,10 +111,6 @@ def _player_card(row: dict[str, Any], index: int) -> dict[str, Any]:
         "obp": _number(row, "batting_obp", "obp"), "slugging": _number(row, "batting_slg", "slg"),
         "whip": _number(row, "pitching_whip", "whip"), "k_per_9": _number(row, "pitching_k_per_9", "k_per_9"),
     }
-
-
-def _season_rows(season: int) -> list[dict[str, Any]]:
-    return _cached_rows(f"player-season-{season}", "/mlb/v1/season_stats", {"season": season}, ttl=600)
     # Transparent per-game model. It uses real season production plus context rates,
     # rather than claiming unavailable Statcast measures such as barrel% or xwOBA.
     ops = stats["ops"]
@@ -140,6 +136,10 @@ def _season_rows(season: int) -> list[dict[str, Any]]:
     }
 
 
+def _season_rows(season: int) -> list[dict[str, Any]]:
+    return _cached_rows(f"player-season-{season}", "/mlb/v1/season_stats", {"season": season}, ttl=600)
+
+
 @mlb_bp.get("/players")
 def players():
     view = request.args.get("view", "stats").lower()
@@ -154,15 +154,18 @@ def players():
             if not game_ids:
                 games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": request.args.get("date", datetime.now().strftime("%Y-%m-%d")), "per_page": 100}))
                 game_ids = [str(game.get("id")) for game in games if game.get("id") is not None]
+            active_players = {str(player.get("id")): player for player in _cached_rows("active-players", "/mlb/v1/players/active", {})}
             data = []
             for game_id in game_ids:
                 payload = _bdl_get("/mlb/v1/odds/player_props", {"game_id": game_id})
                 for index, row in enumerate(_rows(payload)):
                     player = row.get("player") if isinstance(row.get("player"), dict) else {}
+                    player_id = str(row.get("player_id") or player.get("id") or "")
+                    player = player or active_players.get(player_id, {})
                     market = row.get("market") if isinstance(row.get("market"), dict) else {}
                     line = _number(row, "line_value", "line", "value")
                     odds = market.get("over_odds") or market.get("odds")
-                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {row.get('player_id', '')}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": row.get("prop_type") or "MLB prop", "line": line, "projection": None, "edge": None, "odds": odds, "game_id": game_id, "vendor": row.get("vendor")})
+                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": row.get("prop_type") or "MLB prop", "line": line, "projection": None, "edge": None, "odds": odds, "game_id": game_id, "vendor": row.get("vendor")})
                     if len(data) >= limit:
                         break
                 if len(data) >= limit:
