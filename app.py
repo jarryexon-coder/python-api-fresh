@@ -394,6 +394,21 @@ def calculate_fanduel_salary(fantasy_points, player_name=None, sport='nba'):
             salary = 4400
         else:
             salary = 3800
+    elif sport == 'nfl':
+        if fantasy_points >= 25:
+            salary = 10500
+        elif fantasy_points >= 22:
+            salary = 9300
+        elif fantasy_points >= 19:
+            salary = 8200
+        elif fantasy_points >= 16:
+            salary = 7200
+        elif fantasy_points >= 13:
+            salary = 6200
+        elif fantasy_points >= 10:
+            salary = 5300
+        else:
+            salary = 4400
     elif sport == 'nhl':
         if fantasy_points >= 5.0:
             salary = 9500
@@ -2694,8 +2709,17 @@ def fantasyhub_players():
 
         transformed_players = []
         for p in players:
-            fantasy_points = p.get('fantasy_points', 0)
-            salary = calculate_fanduel_salary(fantasy_points, p.get('name'), sport)
+            fantasy_points = (
+                p.get('fantasy_points')
+                or p.get('projection')
+                or p.get('projFP')
+                or p.get('fantasyScore')
+                or p.get('fp')
+                or 0
+            )
+            # Prefer a provider-supplied DFS salary when available; otherwise use
+            # the sport-aware research salary model above.
+            salary = p.get('salary') or calculate_fanduel_salary(fantasy_points, p.get('name'), sport)
 
             player_data = {
                 'player_id': f"{sport}-{p.get('name', '').replace(' ', '-').lower()}",
@@ -3035,8 +3059,15 @@ def draft_rankings():
 
         ranked = []
         for idx, p in enumerate(players[:limit]):
-            fantasy_points = p.get('fantasy_points', 0)
-            salary = calculate_fanduel_salary(fantasy_points, p.get('name'), sport)
+            fantasy_points = (
+                p.get('fantasy_points')
+                or p.get('projection')
+                or p.get('projFP')
+                or p.get('fantasyScore')
+                or p.get('fp')
+                or 0
+            )
+            salary = p.get('salary') or calculate_fanduel_salary(fantasy_points, p.get('name'), sport)
 
             ranked.append({
                 'playerId': f"{sport}-{p.get('name', '').replace(' ', '-').lower()}",
