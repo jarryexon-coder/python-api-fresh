@@ -106,6 +106,7 @@ def _player_card(row: dict[str, Any], index: int) -> dict[str, Any]:
     stats = {
         "hits": _number(row, "batting_h", "hits"), "runs": _number(row, "batting_r", "runs"),
         "rbis": _number(row, "batting_rbi", "rbi"), "home_runs": _number(row, "batting_hr", "home_runs"),
+        "doubles": _number(row, "batting_2b", "doubles"), "total_bases": _number(row, "batting_tb", "total_bases"),
         "strikeouts": _number(row, "pitching_k", "strikeouts", "k"), "batting_average": _number(row, "batting_avg", "avg"),
         "era": _number(row, "pitching_era", "era"), "ops": _number(row, "batting_ops", "ops"),
         "obp": _number(row, "batting_obp", "obp"), "slugging": _number(row, "batting_slg", "slg"),
@@ -118,7 +119,7 @@ def _player_card(row: dict[str, Any], index: int) -> dict[str, Any]:
     k9 = stats["k_per_9"]
     strikeout_modifier = max(.88, min(1.12, 1 + .10 * (((k9 or 8.5) - 8.5) / 8.5)))
     projections = {}
-    for key in ("hits", "runs", "rbis", "home_runs", "strikeouts"):
+    for key in ("hits", "runs", "rbis", "home_runs", "doubles", "total_bases", "strikeouts"):
         value = stats[key]
         modifier = strikeout_modifier if key == "strikeouts" else batting_modifier
         projections[key] = round((value / games) * modifier, 2) if value is not None and games else None
@@ -155,6 +156,7 @@ def players():
                 games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": request.args.get("date", datetime.now().strftime("%Y-%m-%d")), "per_page": 100}))
                 game_ids = [str(game.get("id")) for game in games if game.get("id") is not None]
             active_players = {str(player.get("id")): player for player in _cached_rows("active-players", "/mlb/v1/players/active", {})}
+            season_cards = {str((row.get("player") or {}).get("id")): _player_card(row, index) for index, row in enumerate(_season_rows(_season()))}
             data = []
             for game_id in game_ids:
                 payload = _bdl_get("/mlb/v1/odds/player_props", {"game_id": game_id})
@@ -165,7 +167,15 @@ def players():
                     market = row.get("market") if isinstance(row.get("market"), dict) else {}
                     line = _number(row, "line_value", "line", "value")
                     odds = market.get("over_odds") or market.get("odds")
-                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": row.get("prop_type") or "MLB prop", "line": line, "projection": None, "edge": None, "odds": odds, "game_id": game_id, "vendor": row.get("vendor")})
+                    prop_type = str(row.get("prop_type") or "MLB prop").lower()
+                    projection_key = {
+                        "hits": "hits", "runs": "runs", "rbis": "rbis", "rbi": "rbis", "home_runs": "home_runs",
+                        "first_home_run": "home_runs", "strikeouts": "strikeouts", "pitcher_strikeouts": "strikeouts",
+                        "doubles": "doubles", "total_bases": "total_bases",
+                    }.get(prop_type)
+                    projection = (season_cards.get(player_id, {}).get("projections", {}).get(projection_key) if projection_key else None)
+                    edge = round(((projection - line) / line) * 100, 1) if projection is not None and line not in (None, 0) else None
+                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "vendor": row.get("vendor")})
                     if len(data) >= limit:
                         break
                 if len(data) >= limit:
