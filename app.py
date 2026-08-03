@@ -3016,16 +3016,22 @@ def draft_rankings():
         today = get_todays_games(sport)
         teams_playing_today = today['teams']
 
-        players = []
+        source_players = []
 
         if sport == 'nba':
-            players = [p for p in NBA_PLAYERS_2026 if p.get('team') in teams_playing_today and p.get('injury_status', 'Active') == 'Active']
+            source_players = NBA_PLAYERS_2026
         elif sport == 'nfl':
-            players = [p for p in NFL_PLAYERS if p.get('team') in teams_playing_today and p.get('injury_status', 'Active') == 'Active']
+            source_players = NFL_PLAYERS
         elif sport == 'nhl':
-            players = [p for p in NHL_PLAYERS if p.get('team') in teams_playing_today and p.get('injury_status', 'Active') == 'Active']
+            source_players = NHL_PLAYERS
         elif sport == 'mlb':
-            players = [p for p in MLB_PLAYERS if p.get('team') in teams_playing_today and p.get('injury_status', 'Active') == 'Active']
+            source_players = MLB_PLAYERS
+
+        eligible = [p for p in source_players if p.get('injury_status', 'Active') == 'Active']
+        slate_players = [p for p in eligible if p.get('team') in teams_playing_today]
+        # Draft preparation must stay available before a slate exists (especially NFL preseason).
+        players = slate_players or eligible
+        players.sort(key=lambda player: player.get('fantasy_points') or player.get('projection') or 0, reverse=True)
 
         ranked = []
         for idx, p in enumerate(players[:limit]):
