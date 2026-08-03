@@ -151,15 +151,24 @@ def players():
         if view == "props":
             # Tank01 has live stats and fantasy projections but not player prop lines.
             # BallDontLie GOAT exposes the real MLB player-prop market per game.
+            games_by_id: dict[str, dict[str, Any]] = {}
             game_ids = [request.args["game_id"]] if request.args.get("game_id") else []
             if not game_ids:
                 games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": request.args.get("date", datetime.now().strftime("%Y-%m-%d")), "per_page": 100}))
                 game_ids = [str(game.get("id")) for game in games if game.get("id") is not None]
+                games_by_id = {str(game.get("id")): game for game in games if game.get("id") is not None}
             active_players = {str(player.get("id")): player for player in _cached_rows("active-players", "/mlb/v1/players/active", {})}
             season_cards = {str((row.get("player") or {}).get("id")): _player_card(row, index) for index, row in enumerate(_season_rows(_season()))}
             data = []
-            for game_id in game_ids:
+            per_game_limit = max(1, limit // max(len(game_ids), 1))
+            extra_slots = limit % max(len(game_ids), 1)
+            for game_number, game_id in enumerate(game_ids):
                 payload = _bdl_get("/mlb/v1/odds/player_props", {"game_id": game_id})
+                game = games_by_id.get(str(game_id), {})
+                away = game.get("away_team") if isinstance(game.get("away_team"), dict) else {}
+                home = game.get("home_team") if isinstance(game.get("home_team"), dict) else {}
+                game_label = f"{away.get('abbreviation', 'Away')} @ {home.get('abbreviation', 'Home')}"
+                game_cap = per_game_limit + (1 if game_number < extra_slots else 0)
                 for index, row in enumerate(_rows(payload)):
                     player = row.get("player") if isinstance(row.get("player"), dict) else {}
                     player_id = str(row.get("player_id") or player.get("id") or "")
@@ -175,11 +184,9 @@ def players():
                     }.get(prop_type)
                     projection = (season_cards.get(player_id, {}).get("projections", {}).get(projection_key) if projection_key else None)
                     edge = round(((projection - line) / line) * 100, 1) if projection is not None and line not in (None, 0) else None
-                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "vendor": row.get("vendor")})
-                    if len(data) >= limit:
+                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "game": game_label, "date": game.get("date"), "vendor": row.get("vendor")})
+                    if index + 1 >= game_cap:
                         break
-                if len(data) >= limit:
-                    break
             return jsonify({"success": True, "source": "BallDontLie MLB player props", "is_real_data": True, "data": data, "count": len(data), "message": None if data else "No live MLB player props are currently posted for this date."})
 
         payload = _bdl_get("/mlb/v1/season_stats", {"season": _season(), "per_page": limit, "sort_by": "batting_hr", "sort_order": "desc"})
