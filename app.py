@@ -3039,9 +3039,6 @@ def draft_rankings():
         sport = flask_request.args.get('sport', 'nba').lower()
         limit = int(flask_request.args.get('limit', 50))
 
-        today = get_todays_games(sport)
-        teams_playing_today = today['teams']
-
         source_players = []
 
         if sport == 'nba':
@@ -3053,10 +3050,13 @@ def draft_rankings():
         elif sport == 'mlb':
             source_players = MLB_PLAYERS
 
-        eligible = [p for p in source_players if p.get('injury_status', 'Active') == 'Active']
-        slate_players = [p for p in eligible if p.get('team') in teams_playing_today]
-        # Draft preparation must stay available before a slate exists (especially NFL preseason).
-        players = slate_players or eligible
+        # Drafts are not daily-slates. Keep all usable players, including sources
+        # that report healthy players as "healthy" rather than "Active".
+        inactive_statuses = {'injured', 'out', 'suspended', 'inactive'}
+        players = [
+            player for player in source_players
+            if str(player.get('injury_status', 'active')).strip().lower() not in inactive_statuses
+        ]
         players.sort(key=lambda player: player.get('fantasy_points') or player.get('projection') or 0, reverse=True)
 
         ranked = []
@@ -6159,9 +6159,9 @@ def get_daily_picks():
                 position = player.get("position", "N/A")
                 # Choose the best stat among points, rebounds, assists
                 stat_options = {
-                    "Points": player.get("pts_per_game", 0),
-                    "Rebounds": player.get("reb_per_game", 0),
-                    "Assists": player.get("ast_per_game", 0),
+                    "Points": player.get("points", player.get("pts_per_game", 0)),
+                    "Rebounds": player.get("rebounds", player.get("reb_per_game", 0)),
+                    "Assists": player.get("assists", player.get("ast_per_game", 0)),
                 }
                 stat_type = max(stat_options, key=stat_options.get)
                 line = stat_options[stat_type]
@@ -6191,6 +6191,40 @@ def get_daily_picks():
                     message=f"Generated {len(picks)} picks from static NBA 2026",
                     sport=sport,
                 )
+
+        # NFL projection fallback. These are transparent model fantasy-point
+        # recommendations, not claimed sportsbook prop lines.
+        if sport == "nfl" and NFL_PLAYERS:
+            ranked_players = sorted(
+                NFL_PLAYERS,
+                key=lambda player: player.get("projection") or player.get("projFP") or player.get("fantasyScore") or 0,
+                reverse=True,
+            )
+            picks = []
+            for index, player in enumerate(ranked_players[:10]):
+                projection = player.get("projection") or player.get("projFP") or player.get("fantasyScore") or 0
+                if not projection:
+                    continue
+                line = round(float(projection) * .95, 1)
+                confidence = min(85, max(60, int(player.get("projectionConfidence") or 68)))
+                picks.append({
+                    "id": f"pick-model-nfl-{player.get('id', index)}",
+                    "player": player.get("name", "Unknown player"),
+                    "team": player.get("team", "—"),
+                    "position": player.get("position", "—"),
+                    "stat": "Fantasy Points",
+                    "line": line,
+                    "projection": round(float(projection), 1),
+                    "confidence": confidence,
+                    "analysis": "Transparent model recommendation from the active NFL projection feed; confirm an available sportsbook line before placing a wager.",
+                    "value": f"+{round(float(projection) - line, 1)}",
+                    "edge_percentage": round(((float(projection) - line) / line) * 100, 1) if line else 0,
+                    "sport": "NFL",
+                    "is_real_data": True,
+                    "data_source": "NFL projection fallback",
+                })
+            if picks:
+                return api_response(success=True, data={"picks": picks, "is_real_data": True, "date": date}, message=f"Generated {len(picks)} NFL model picks", sport=sport)
 
         # 3. Generic fallback (existing function)
         return fallback_picks_logic(sport, date)
