@@ -2437,7 +2437,14 @@ def change_password():
 # =============================================
 # SUBSCRIPTION ROUTES
 # =============================================
+@app.route('/api/admin/status', methods=['GET'])
+@admin_required
+def admin_status():
+    """Confirm server-authorized administrator access without changing state."""
+    return jsonify({'success': True, 'is_admin': True, 'email': g.user_email})
+
 @app.route("/api/admin/add-credits", methods=['POST'])
+@admin_required
 def admin_add_credits():
     """Manually add credits to a user"""
     data = flask_request.json
@@ -2455,6 +2462,7 @@ def admin_add_credits():
     })
 
 @app.route("/api/admin/reset-user", methods=['POST'])
+@admin_required
 def admin_reset_user():
     """Reset a user's generator data"""
     data = flask_request.json
