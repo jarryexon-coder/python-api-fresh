@@ -10,7 +10,7 @@ from functools import wraps
 from typing import Optional, Dict, Any, List, Tuple
 import jwt
 import firebase_admin
-from firebase_admin import auth
+from firebase_admin import auth, firestore
 from flask import g, request, jsonify
 
 def verify_firebase_token(token):
@@ -51,11 +51,20 @@ def admin_required(f):
     @login_required
     def decorated_function(*args, **kwargs):
         user_id = g.user_id
+        user_email = (getattr(g, 'user_email', '') or '').strip().lower()
+        configured_admins = {
+            email.strip().lower()
+            for email in os.getenv('ADMIN_EMAILS', '').split(',')
+            if email.strip()
+        }
+
+        # The allowlist is server-side only. It provides a secure bootstrap path
+        # for the first administrator and never trusts a client-supplied role.
+        if user_email in configured_admins:
+            return f(*args, **kwargs)
+
         doc = firestore.client().collection('users').document(user_id).get()
-        if not doc.exists:
-            return jsonify({'error': 'User not found'}), 403
-        user_data = doc.to_dict()
-        if user_data.get('role') != 'admin':
+        if not doc.exists or doc.to_dict().get('role') != 'admin':
             return jsonify({'error': 'Admin access required'}), 403
         return f(*args, **kwargs)
     return decorated_function
