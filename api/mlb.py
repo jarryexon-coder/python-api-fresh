@@ -180,7 +180,7 @@ def players():
                     projection_key = {
                         "hits": "hits", "runs": "runs", "rbis": "rbis", "rbi": "rbis", "home_runs": "home_runs",
                         "first_home_run": "home_runs", "strikeouts": "strikeouts", "pitcher_strikeouts": "strikeouts",
-                        "doubles": "doubles", "total_bases": "total_bases",
+                        "doubles": "doubles", "total_bases": "total_bases", "runs_scored": "runs",
                     }.get(prop_type)
                     projection = (season_cards.get(player_id, {}).get("projections", {}).get(projection_key) if projection_key else None)
                     season_card = season_cards.get(player_id, {})
