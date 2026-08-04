@@ -183,8 +183,11 @@ def players():
                         "doubles": "doubles", "total_bases": "total_bases",
                     }.get(prop_type)
                     projection = (season_cards.get(player_id, {}).get("projections", {}).get(projection_key) if projection_key else None)
+                    season_card = season_cards.get(player_id, {})
+                    provider_name = str(player.get("full_name") or player.get("name") or "")
+                    name = season_card.get("name") if provider_name.lower().startswith("player ") else provider_name
                     edge = round(((projection - line) / line) * 100, 1) if projection is not None and line not in (None, 0) else None
-                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": player.get("full_name") or player.get("name") or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else "", "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "game": game_label, "date": game.get("date"), "vendor": row.get("vendor")})
+                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": name or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else season_card.get("team", ""), "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "game": game_label, "date": game.get("date"), "vendor": row.get("vendor")})
                     if index + 1 >= game_cap:
                         break
             return jsonify({"success": True, "source": "BallDontLie MLB player props", "is_real_data": True, "data": data, "count": len(data), "message": None if data else "No live MLB player props are currently posted for this date."})
