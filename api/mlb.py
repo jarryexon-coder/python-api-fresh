@@ -87,7 +87,8 @@ def news():
         response.raise_for_status()
         data = []
         for index, item in enumerate(_rows(response.json())):
-            data.append({"id": item.get("link") or f"tank01-mlb-news-{index}", "title": item.get("title") or "MLB update", "description": item.get("description") or "Tank01 MLB news", "url": item.get("link"), "image": item.get("image"), "sport": "mlb", "player_ids": item.get("playerIDs", [])})
+            reported_at = item.get("publishedAt") or item.get("published_at") or item.get("date") or item.get("timestamp") or item.get("newsDate") or item.get("time")
+            data.append({"id": item.get("link") or f"tank01-mlb-news-{index}", "title": item.get("title") or "MLB update", "description": item.get("description") or "Tank01 MLB news", "url": item.get("link"), "image": item.get("image"), "sport": "mlb", "player_ids": item.get("playerIDs", []), "reported_at": reported_at})
         return jsonify({"success": True, "source": "Tank01 MLB Top News and Headlines", "data": data, "news": data, "count": len(data)})
     except requests.RequestException as error:
         return jsonify({"success": False, "error": f"Tank01 MLB news request failed: {error}"}), 502

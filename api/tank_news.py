@@ -43,7 +43,8 @@ def news(sport: str):
         response.raise_for_status()
         data = []
         for index, item in enumerate(_items(response.json())):
-            data.append({"id": item.get("link") or f"tank01-{sport}-news-{index}", "title": item.get("title") or "Sports update", "description": item.get("description") or f"Tank01 {sport.upper()} news", "url": item.get("link"), "image": item.get("image"), "sport": sport, "player_ids": item.get("playerIDs", [])})
+            reported_at = item.get("publishedAt") or item.get("published_at") or item.get("date") or item.get("timestamp") or item.get("newsDate") or item.get("time")
+            data.append({"id": item.get("link") or f"tank01-{sport}-news-{index}", "title": item.get("title") or "Sports update", "description": item.get("description") or f"Tank01 {sport.upper()} news", "url": item.get("link"), "image": item.get("image"), "sport": sport, "player_ids": item.get("playerIDs", []), "reported_at": reported_at})
         return jsonify({"success": True, "source": f"Tank01 {sport.upper()} Top News and Headlines", "data": data, "news": data, "count": len(data)})
     except requests.RequestException as error:
         return jsonify({"success": False, "error": f"Tank01 {sport.upper()} news request failed: {error}"}), 502
