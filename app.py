@@ -4013,6 +4013,14 @@ def get_plan_from_price_id(price_id):
         'price_1TBq6rA3tlI8MNZjabiqWjwq': 'analytics',
         'price_1TBqTrA3tlI8MNZjn2kvGXI3': 'generator',
         'price_1TBqVUA3tlI8MNZjlDK9POuj': 'generator',
+        'price_1U0mnjPFbEG5Po7btTXwjuvN': 'mlb',
+        'price_1U0moMPFbEG5Po7bZCj1Gix0': 'mlb',
+        'price_1U0mphPFbEG5Po7bKgbJiWi0': 'nfl',
+        'price_1U0mqGPFbEG5Po7bIbNn08Hr': 'nfl',
+        'price_1U0mkLPFbEG5Po7bYHZkeiaP': 'nba',
+        'price_1U0mlqPFbEG5Po7bUYuLM8rF': 'nba',
+        'price_1U0msYPFbEG5Po7bOvDGbnFx': 'ncaa',
+        'price_1U0mszPFbEG5Po7bjRzOhOcE': 'ncaa',
     }
     return price_to_plan.get(price_id, 'free')
 
@@ -4051,15 +4059,7 @@ def refresh_subscription():
             price_id = stripe_sub['items']['data'][0]['price']['id']
 
             # Map to plan ID
-            price_to_plan = {
-                'price_1TBpvaA3tlI8MNZjT4rmDzFm': 'starter',
-                'price_1TBq2UA3tlI8MNZjD3ry0Ell': 'starter',
-                'price_1TBq5hA3tlI8MNZjkExuKQJ2': 'analytics',
-                'price_1TBq6rA3tlI8MNZjabiqWjwq': 'analytics',
-                'price_1TBqTrA3tlI8MNZjn2kvGXI3': 'generator',
-                'price_1TBqVUA3tlI8MNZjlDK9POuj': 'generator',
-            }
-            plan_id = price_to_plan.get(price_id, 'free')
+            plan_id = get_plan_from_price_id(price_id)
 
             # Update user
             user.subscription_id = subscription_id
@@ -4186,7 +4186,32 @@ prices = {
     'influencer': {   # <-- ADD THIS
         'month': 'price_1TJq2RA3tlI8MNZjGBZ27YcZ',   # your influencer price ID
         'year': 'price_1TJq2RA3tlI8MNZjGBZ27YcZ'     # same for yearly (or create a yearly price)
+    },
+    # Sport-specific mobile and web packages. Stripe prices are recurring weekly
+    # or monthly products; use the same interval names the clients submit.
+    'mlb': {
+        'week': 'price_1U0mnjPFbEG5Po7btTXwjuvN',
+        'month': 'price_1U0moMPFbEG5Po7bZCj1Gix0',
+    },
+    'nfl': {
+        'week': 'price_1U0mphPFbEG5Po7bKgbJiWi0',
+        'month': 'price_1U0mqGPFbEG5Po7bIbNn08Hr',
+    },
+    'nba': {
+        'week': 'price_1U0mkLPFbEG5Po7bYHZkeiaP',
+        'month': 'price_1U0mlqPFbEG5Po7bUYuLM8rF',
+    },
+    'ncaa': {
+        'week': 'price_1U0msYPFbEG5Po7bOvDGbnFx',
+        'month': 'price_1U0mszPFbEG5Po7bjRzOhOcE',
     }
+}
+
+plan_display_values = {
+    'mlb': {'week': '19.99', 'month': '59.99'},
+    'nfl': {'week': '19.99', 'month': '59.99'},
+    'nba': {'week': '19.99', 'month': '59.99'},
+    'ncaa': {'week': '19.99', 'month': '59.99'},
 }
 
 # =============================================
@@ -4195,21 +4220,16 @@ prices = {
 @app.route('/api/subscriptions/create-checkout', methods=['POST'])
 @login_required
 def create_subscription_checkout():
+    price_id = None
     try:
         data = flask_request.json
         plan_id = data.get('planId')
         interval = data.get('interval', 'month')
 
-        # Map plan_id to your price IDs
-        price_ids = {
-            'starter': 'price_YOUR_STARTER_PRICE_ID',     # Create this in Stripe
-            'analytics': 'price_YOUR_ANALYTICS_PRICE_ID', # Create this in Stripe
-            'generator': 'price_1TN2WPA3tlI8MNZjrgD5gGqB', # Your existing price ID
-        }
-
-        price_id = price_ids.get(plan_id)
+        price_id = prices.get(plan_id, {}).get(interval)
         if not price_id:
-            return jsonify({'error': f'Invalid plan: {plan_id}'}), 400
+            return jsonify({'error': f'Invalid plan or billing interval: {plan_id} / {interval}'}), 400
+        display_value = plan_display_values.get(plan_id, {}).get(interval, '')
 
         FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://sportsanalyticsgpt.com').rstrip('/')
 
@@ -4220,7 +4240,7 @@ def create_subscription_checkout():
                 'price': price_id,
                 'quantity': 1,
             }],
-            'success_url': f"{FRONTEND_URL}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_id}&value=39.99",
+            'success_url': f"{FRONTEND_URL}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_id}&value={display_value}",
             'cancel_url': f"{FRONTEND_URL}/subscription?canceled=true",
             'client_reference_id': g.user_id,
             'customer_email': g.user_email,
@@ -4247,7 +4267,7 @@ def create_subscription_checkout():
         print(f"❌ Subscription checkout error: {e}")
         print(f"🔑 Using Stripe API key: {stripe.api_key[:20]}...")
         print(f"💰 Price ID being used: {price_id}")
-        print(f"📋 All price IDs in dict: {price_ids}")
+        print(f"📋 Available plan IDs: {list(prices.keys())}")
         print(f"🔑 Using Stripe API key: {stripe.api_key[:15]}...")
         print(f"🔑 Key mode: {'TEST' if 'sk_test' in stripe.api_key else 'LIVE'}")
         traceback.print_exc()
