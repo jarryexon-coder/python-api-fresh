@@ -21,6 +21,15 @@ CACHE_TTL_BALLDONTLIE = {
     "active_players": 3600,
 }
 
+
+def get_odds_api_key() -> Optional[str]:
+    """Read The Odds API credential from the supported Railway variable names."""
+    return (
+        os.environ.get("THE_ODDS_API_KEY")
+        or os.environ.get("ODDS_API_KEY")
+        or os.environ.get("THEODDS_API_KEY")
+    )
+
 def get_cached(key: str) -> Any:
     """Get cached data if still valid."""
     from flask import current_app
@@ -288,7 +297,7 @@ def fetch_game_scores(sport_key: str) -> Dict[str, Dict]:
     import os
     import requests
     
-    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+    ODDS_API_KEY = get_odds_api_key()
     if not ODDS_API_KEY: 
         print("⚠️ ODDS_API_KEY not set – cannot fetch scores", flush=True)
         return {}
@@ -394,7 +403,7 @@ def convert_scores_to_games(scores_map: Dict[str, Dict], sport: str) -> List[Dic
 
 def fetch_game_odds(sport: str = "nba") -> List[Dict]:
     """Fetch odds and scores from The Odds API."""
-    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+    ODDS_API_KEY = get_odds_api_key()
     if not ODDS_API_KEY:
         print("⚠️ ODDS_API_KEY not set – cannot fetch odds", flush=True)
         return []
@@ -447,7 +456,7 @@ def fetch_game_odds(sport: str = "nba") -> List[Dict]:
 
 def fetch_game_odds_by_id(game_id, sport="basketball_nba"):
     """Fetch odds for a specific game using The Odds API events endpoint."""
-    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+    ODDS_API_KEY = get_odds_api_key()
     if not ODDS_API_KEY:
         print("⚠️ ODDS_API_KEY not set – cannot fetch odds", flush=True)
         return None
@@ -680,7 +689,7 @@ def fetch_balldontlie_props(
 
 def fetch_player_props(sport: str = "nba", source: str = "theoddsapi") -> List[Dict]:
     print(f"🔍 fetch_player_props called for sport={sport}")
-    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+    ODDS_API_KEY = get_odds_api_key()
     if not ODDS_API_KEY:
         print("⚠️ ODDS_API_KEY not set")
         return []

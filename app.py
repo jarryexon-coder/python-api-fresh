@@ -8227,14 +8227,10 @@ def get_odds_games():
 @app.route("/api/odds/sports", methods=['GET'])
 def get_sports_list():
     """Get available sports from Odds API."""
-    import os
-    import requests
-
-    ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
     if not ODDS_API_KEY:
         return jsonify({
             "success": False,
-            "error": "ODDS_API_KEY not configured"
+            "error": "The Odds API is not configured"
         }), 500
 
     try:
@@ -8342,7 +8338,6 @@ def get_odds(sport=None):
                         "source": "the-odds-api",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "params_used": params,
-                        "key_used": f"{THE_ODDS_API_KEY[:8]}...",
                     }
                 )
             else:
