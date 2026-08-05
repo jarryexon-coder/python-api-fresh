@@ -3489,6 +3489,71 @@ def stripe_webhook():
     print("=" * 80)
     return jsonify({'received': True}), 200
 
+
+# ------------------------------------------------------------------------------
+# RevenueCat / App Store subscription webhook
+# ------------------------------------------------------------------------------
+# These product identifiers must match the App Store Connect products and the
+# RevenueCat offering used by the mobile app.
+REVENUECAT_PRODUCT_PLANS = {
+    "com.jerryjiya.myapp-new.mlb.weekly": "mlb",
+    "com.jerryjiya.myapp-new.mlb.monthly": "mlb",
+    "com.jerryjiya.myapp-new.nfl.weekly": "nfl",
+    "com.jerryjiya.myapp-new.nfl.monthly": "nfl",
+    "com.jerryjiya.myapp-new.nba.weekly": "nba",
+    "com.jerryjiya.myapp-new.nba.monthly": "nba",
+    "com.jerryjiya.myapp-new.ncaa.weekly": "ncaa",
+    "com.jerryjiya.myapp-new.ncaa.monthly": "ncaa",
+}
+
+
+@app.route('/api/webhooks/revenuecat', methods=['POST'])
+def revenuecat_webhook():
+    """Sync validated App Store subscription events from RevenueCat to Firestore."""
+    webhook_secret = os.getenv("REVENUECAT_WEBHOOK_AUTHORIZATION")
+    provided_secret = flask_request.headers.get("Authorization", "")
+    if not webhook_secret:
+        return jsonify({"success": False, "error": "RevenueCat webhook is not configured"}), 503
+    if not hmac.compare_digest(provided_secret, webhook_secret):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    if not db:
+        return jsonify({"success": False, "error": "Firestore is not configured"}), 503
+
+    payload = flask_request.get_json(silent=True) or {}
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else payload
+    user_id = event.get("app_user_id")
+    if not user_id or str(user_id).startswith("$RCAnonymousID"):
+        return jsonify({"success": True, "ignored": True}), 200
+
+    event_type = str(event.get("type") or "").upper()
+    product_id = str(event.get("product_id") or "")
+    plan = REVENUECAT_PRODUCT_PLANS.get(product_id)
+    if not plan:
+        return jsonify({"success": True, "ignored": True, "reason": "Unknown product"}), 200
+
+    expiration_ms = event.get("expiration_at_ms")
+    expires_at = datetime.fromtimestamp(expiration_ms / 1000, timezone.utc).isoformat() if isinstance(expiration_ms, (int, float)) else None
+    update = {
+        "subscription_provider": "revenuecat",
+        "subscription_product_id": product_id,
+        "subscription_store": event.get("store", "APP_STORE"),
+        "subscription_event_type": event_type,
+        "subscription_expires_at": expires_at,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if event_type in {"INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE", "NON_RENEWING_PURCHASE", "TEMPORARY_ENTITLEMENT_GRANT"}:
+        update.update({"plan": plan, "subscription_status": "active"})
+    elif event_type == "CANCELLATION":
+        # Cancellation stops renewal but access remains valid until expiry.
+        update.update({"plan": plan, "subscription_status": "cancels_at_period_end"})
+    elif event_type == "EXPIRATION":
+        update.update({"plan": "free", "subscription_status": "inactive"})
+    else:
+        return jsonify({"success": True, "ignored": True, "reason": f"Unhandled event {event_type}"}), 200
+
+    db.collection('users').document(str(user_id)).set(update, merge=True)
+    return jsonify({"success": True}), 200
+
 @app.route('/api/user/subscription', methods=['GET'])
 @login_required
 def get_user_subscription():
@@ -3509,6 +3574,32 @@ def get_user_subscription():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/user/delete-account', methods=['POST'])
+@login_required
+def delete_user_account():
+    """Permanently delete the authenticated user's profile and Firebase login.
+
+    Active App Store subscriptions are not cancelled here: Apple manages billing,
+    and the client directs customers to Apple's subscription-management screen.
+    """
+    user_id = getattr(g, 'user_id', None)
+    if not user_id:
+        return jsonify({'success': False, 'error': 'User not authenticated'}), 401
+    if not firebase_app or not db:
+        return jsonify({'success': False, 'error': 'Account deletion is temporarily unavailable'}), 503
+
+    try:
+        db.collection('users').document(str(user_id)).delete()
+        auth.delete_user(str(user_id))
+        return jsonify({'success': True}), 200
+    except auth.UserNotFoundError:
+        # Treat an already-deleted Firebase user as a completed deletion.
+        return jsonify({'success': True}), 200
+    except Exception as error:
+        print(f"❌ Account deletion failed for {user_id}: {error}")
+        return jsonify({'success': False, 'error': 'Unable to delete account'}), 500
 
 @app.route("/api/user/profile", methods=['GET', 'OPTIONS'])
 def get_user_profile():
