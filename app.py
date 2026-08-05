@@ -3504,6 +3504,8 @@ REVENUECAT_PRODUCT_PLANS = {
     "com.jerryjiya.myapp-new.nba.monthly": "nba",
     "com.jerryjiya.myapp-new.ncaa.weekly": "ncaa",
     "com.jerryjiya.myapp-new.ncaa.monthly": "ncaa",
+    "com.jerryjiya.myapp-new.superstats.weekly": "superstats",
+    "com.jerryjiya.myapp-new.superstats.monthly": "superstats",
 }
 
 
