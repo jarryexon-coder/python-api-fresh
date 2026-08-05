@@ -3507,6 +3507,63 @@ REVENUECAT_PRODUCT_PLANS = {
 }
 
 
+def update_revenuecat_access(user_id, plan, event_type, product_id, expires_at, store):
+    """Keep each sport package independently active for users with multiple IAPs."""
+    user_ref = db.collection('users').document(str(user_id))
+    user_doc = user_ref.get()
+    existing = user_doc.to_dict() if user_doc.exists else {}
+    valid_plans = set(REVENUECAT_PRODUCT_PLANS.values())
+    active_packages = {
+        item for item in existing.get('active_packages', [])
+        if item in valid_plans
+    }
+    canceling_packages = {
+        item for item in existing.get('canceling_packages', [])
+        if item in valid_plans
+    }
+
+    active_events = {
+        "INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE",
+        "NON_RENEWING_PURCHASE", "TEMPORARY_ENTITLEMENT_GRANT",
+    }
+    if event_type in active_events:
+        active_packages.add(plan)
+        canceling_packages.discard(plan)
+    elif event_type == "CANCELLATION":
+        # Keep access through the paid expiration date; only renewal is stopped.
+        active_packages.add(plan)
+        canceling_packages.add(plan)
+    elif event_type == "EXPIRATION":
+        active_packages.discard(plan)
+        canceling_packages.discard(plan)
+    else:
+        return None
+
+    packages = sorted(active_packages)
+    if not packages:
+        display_plan, subscription_status = "free", "inactive"
+    elif len(packages) == 1 and packages[0] in canceling_packages:
+        display_plan, subscription_status = packages[0], "cancels_at_period_end"
+    else:
+        display_plan = packages[0] if len(packages) == 1 else "multi"
+        subscription_status = "active"
+
+    update = {
+        "plan": display_plan,
+        "active_packages": packages,
+        "canceling_packages": sorted(canceling_packages),
+        "subscription_status": subscription_status,
+        "subscription_provider": "revenuecat",
+        "subscription_product_id": product_id,
+        "subscription_store": store or "APP_STORE",
+        "subscription_event_type": event_type,
+        "subscription_expires_at": expires_at,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    user_ref.set(update, merge=True)
+    return update
+
+
 @app.route('/api/webhooks/revenuecat', methods=['POST'])
 def revenuecat_webhook():
     """Sync validated App Store subscription events from RevenueCat to Firestore."""
@@ -3533,26 +3590,12 @@ def revenuecat_webhook():
 
     expiration_ms = event.get("expiration_at_ms")
     expires_at = datetime.fromtimestamp(expiration_ms / 1000, timezone.utc).isoformat() if isinstance(expiration_ms, (int, float)) else None
-    update = {
-        "subscription_provider": "revenuecat",
-        "subscription_product_id": product_id,
-        "subscription_store": event.get("store", "APP_STORE"),
-        "subscription_event_type": event_type,
-        "subscription_expires_at": expires_at,
-        "updated_at": firestore.SERVER_TIMESTAMP,
-    }
-    if event_type in {"INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE", "NON_RENEWING_PURCHASE", "TEMPORARY_ENTITLEMENT_GRANT"}:
-        update.update({"plan": plan, "subscription_status": "active"})
-    elif event_type == "CANCELLATION":
-        # Cancellation stops renewal but access remains valid until expiry.
-        update.update({"plan": plan, "subscription_status": "cancels_at_period_end"})
-    elif event_type == "EXPIRATION":
-        update.update({"plan": "free", "subscription_status": "inactive"})
-    else:
+    update = update_revenuecat_access(
+        user_id, plan, event_type, product_id, expires_at, event.get("store"),
+    )
+    if update is None:
         return jsonify({"success": True, "ignored": True, "reason": f"Unhandled event {event_type}"}), 200
-
-    db.collection('users').document(str(user_id)).set(update, merge=True)
-    return jsonify({"success": True}), 200
+    return jsonify({"success": True, "active_packages": update["active_packages"]}), 200
 
 @app.route('/api/user/subscription', methods=['GET'])
 @login_required
@@ -3660,6 +3703,7 @@ def get_user_profile():
                 'email': user_data.get('email', user_email),
                 'displayName': user_data.get('displayName', user_email.split('@')[0] if user_email else 'User'),
                 'plan': user_data.get('plan', 'free'),
+                'active_packages': user_data.get('active_packages', []),
                 'subscription_id': user_data.get('subscription_id'),
                 'subscription_status': user_data.get('subscription_status', 'inactive'),
                 'credits': user_data.get('credits', 0),
@@ -3677,6 +3721,7 @@ def get_user_profile():
                 'email': user_email,
                 'displayName': user_email.split('@')[0] if user_email else 'User',
                 'plan': 'free',
+                'active_packages': [],
                 'credits': 0,
                 'lifetimeSpent': 0,
                 'subscription_status': 'inactive',
@@ -3691,6 +3736,7 @@ def get_user_profile():
                 'email': user_email,
                 'displayName': user_data['displayName'],
                 'plan': 'free',
+                'active_packages': [],
                 'subscription_id': None,
                 'subscription_status': 'inactive',
                 'credits': 0,
@@ -10785,6 +10831,43 @@ def block_ip_endpoint():
 @app.route("/wp-login.php")
 def block_scanner_paths():
     return jsonify({"error": "Not found"}), 404
+
+
+def public_information_page(title, body):
+    """Render a small public page for App Store-required legal/support links."""
+    html = f"""<!doctype html>
+<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<title>{title} | Sports Analytics</title><style>
+body{{margin:0;background:#080d1b;color:#eef3ff;font:16px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;line-height:1.6}}
+main{{max-width:760px;margin:auto;padding:48px 24px 72px}} h1{{font-size:34px;line-height:1.15;margin:0 0 8px}} h2{{font-size:21px;margin:34px 0 8px;color:#c7d9ff}} p,li{{color:#c8d2e7}} a{{color:#83a8ff}} .eyebrow{{color:#83a8ff;font-size:12px;font-weight:800;letter-spacing:.12em}} .updated{{color:#91a0bd;font-size:14px}}
+</style></head><body><main><div class=\"eyebrow\">SPORTS ANALYTICS</div><h1>{title}</h1>{body}</main></body></html>"""
+    response = make_response(html, 200)
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    return response
+
+
+@app.route('/privacy', methods=['GET'])
+def privacy_policy_page():
+    return public_information_page('Privacy Policy', """
+<p class=\"updated\">Last updated: August 5, 2026</p>
+<p>Sports Analytics provides sports research, projections, fantasy tools, and subscription access. This policy describes how the mobile app and supporting service handle information.</p>
+<h2>Information we process</h2><p>When you create or sign in to an account, we process your Firebase account identifier and email address. We also process app profile settings, subscription-access status, and requests needed to provide the selected sports features. Apple processes payment information for App Store subscriptions; we do not receive your full payment-card details.</p>
+<h2>Why we use information</h2><p>We use this information to authenticate accounts, enable purchased package access, restore purchases, provide support, protect the service, and maintain the app. We do not sell personal information.</p>
+<h2>Service providers</h2><p>We use service providers including Firebase for account authentication and data storage, Apple and RevenueCat for subscription processing, Railway for app hosting, and sports-data providers to supply sports information. These providers process information only as needed to provide their services.</p>
+<h2>Retention and deletion</h2><p>You can permanently delete your app account from Settings → Account → Delete account. Account deletion removes your Firebase sign-in and stored app profile. If you have an active Apple subscription, manage or cancel it separately in your Apple Account subscription settings.</p>
+<h2>Contact</h2><p>For privacy questions or requests, email <a href=\"mailto:jarryexon@gmail.com\">jarryexon@gmail.com</a>.</p>
+""")
+
+
+@app.route('/support', methods=['GET'])
+def support_page():
+    return public_information_page('Support', """
+<p class=\"updated\">Sports Analytics support</p>
+<p>Need help with your account, subscription, data, or a feature in the app? Email <a href=\"mailto:jarryexon@gmail.com\">jarryexon@gmail.com</a> with the email used to sign in, your device model, and a short description of the issue. Do not send passwords, API keys, or payment-card information.</p>
+<h2>Subscription help</h2><p>Use Restore purchases in the app after reinstalling or changing devices. To change or cancel an App Store subscription, open the app’s Manage subscriptions action or use Apple Account subscription settings.</p>
+<h2>Account deletion</h2><p>To delete your account and stored profile, sign in and go to Settings → Account → Delete account. Active Apple subscriptions must be cancelled separately through Apple.</p>
+<h2>Data and projections</h2><p>Sports data, projected outcomes, and betting-related information are informational only. They are not guarantees, financial advice, or an invitation to place a wager.</p>
+""")
 
 
 # ==============================================================================
