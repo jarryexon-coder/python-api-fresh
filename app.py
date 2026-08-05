@@ -1054,6 +1054,7 @@ from api.tank_news import tank_news_bp
 from api.sleeper import sleeper_bp
 from api.nfl_rosters import nfl_rosters_bp
 from api.draft_board import draft_board_bp
+from api.fantasypros import fantasypros_bp
 app.register_blueprint(team_context_bp)
 app.register_blueprint(generator_bp)
 app.register_blueprint(mlb_bp)
@@ -1061,6 +1062,7 @@ app.register_blueprint(tank_news_bp)
 app.register_blueprint(sleeper_bp)
 app.register_blueprint(nfl_rosters_bp)
 app.register_blueprint(draft_board_bp)
+app.register_blueprint(fantasypros_bp)
 
 # Single source of truth for CORS
 CORS(

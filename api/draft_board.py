@@ -13,6 +13,8 @@ from typing import Any
 import requests
 from flask import Blueprint, jsonify, request
 
+from api.fantasypros import get_fantasypros_nfl_draft_intelligence
+
 
 draft_board_bp = Blueprint("draft_board", __name__, url_prefix="/api/draft")
 HOSTS = {
@@ -85,6 +87,10 @@ def _estimated_salary(projection: float | None, adp: float | None) -> int | None
     return None
 
 
+def _name_key(name: Any) -> str:
+    return "".join(character for character in str(name or "").lower() if character.isalnum())
+
+
 def _nfl_projection_params() -> dict[str, Any]:
     return {
         "week": os.getenv("TANK01_NFL_PROJECTION_WEEK", "1"),
@@ -125,6 +131,15 @@ def _board(sport: str, date: str | None) -> dict[str, Any]:
     depth_by_id = _depth_by_player(depth_rows)
     fantasy_positions = {"nfl": {"QB", "RB", "WR", "TE", "PK", "K", "DEF"}, "nba": {"PG", "SG", "SF", "PF", "C", "G", "F"}}[sport]
 
+    fantasypros_by_name: dict[str, dict[str, Any]] = {}
+    fantasypros_warning = None
+    if sport == "nfl":
+        try:
+            fantasypros = get_fantasypros_nfl_draft_intelligence()
+            fantasypros_by_name = {_name_key(player.get("name")): player for player in fantasypros.get("data", [])}
+        except (RuntimeError, requests.RequestException) as error:
+            fantasypros_warning = str(error)
+
     data = []
     for adp in adp_rows:
         player_id = str(adp.get("playerID") or "")
@@ -134,8 +149,10 @@ def _board(sport: str, date: str | None) -> dict[str, Any]:
         position = str(projection_row.get("pos") or profile.get("pos") or salary_row.get("pos") or "")
         if position not in fantasy_positions:
             continue
-        adp_value = _number(adp.get("overallADP"))
-        projection = _number(projection_row.get("fantasyPoints"))
+        name = profile.get("longName") or projection_row.get("longName") or adp.get("longName") or "Unknown player"
+        fantasypros_player = fantasypros_by_name.get(_name_key(name), {})
+        adp_value = _number(fantasypros_player.get("adp")) or _number(adp.get("overallADP"))
+        projection = _number(fantasypros_player.get("projectedPoints")) or _number(projection_row.get("fantasyPoints"))
         if projection is None and isinstance(projection_row.get("fantasyPointsDefault"), dict):
             projection = _number(projection_row["fantasyPointsDefault"].get("halfPPR") or projection_row["fantasyPointsDefault"].get("PPR") or projection_row["fantasyPointsDefault"].get("standard"))
         salary = _number(salary_row.get("salary"))
@@ -144,15 +161,26 @@ def _board(sport: str, date: str | None) -> dict[str, Any]:
         value = round((projection / salary) * 1000, 2) if projection is not None and salary else round(100 / adp_value, 2) if adp_value else None
         data.append({
             "playerId": f"tank-{sport}-{player_id}", "tankPlayerId": player_id,
-            "name": profile.get("longName") or projection_row.get("longName") or adp.get("longName") or "Unknown player",
+            "name": name,
             "team": profile.get("team") or projection_row.get("team") or salary_row.get("team") or "FA", "position": position,
             "projectedPoints": projection, "adp": adp_value, "positionAdp": adp.get("posADP"), "salary": int(salary) if salary else None,
             "salarySource": "Tank01 DFS" if not estimated else "Draft estimate (no current DFS slate)", "valueScore": value,
-            "depthPosition": depth_by_id.get(player_id), "expertRank": int(adp_value) if adp_value else 999,
-            "projectionSource": "Tank01 fantasy projections" if projection is not None else "ADP ranking (projection not posted)",
+            "depthPosition": depth_by_id.get(player_id),
+            "expertRank": int(fantasypros_player.get("consensusRank") or adp_value or 999),
+            "projectionSource": "FantasyPros consensus via Apify" if fantasypros_player.get("projectedPoints") is not None else "Tank01 fantasy projections" if projection is not None else "ADP ranking (projection not posted)",
+            "fantasyPros": fantasypros_player or None,
         })
     data.sort(key=lambda player: (player["projectedPoints"] is None, -(player["projectedPoints"] or 0), player["adp"] or 999))
-    return {"success": True, "source": "Tank01", "sport": sport, "date": today, "adp_date": adp_payload.get("adpDate") if isinstance(adp_payload, dict) else None, "data": data, "count": len(data)}
+    return {
+        "success": True,
+        "source": "FantasyPros + Tank01" if fantasypros_by_name else "Tank01",
+        "sport": sport,
+        "date": today,
+        "adp_date": adp_payload.get("adpDate") if isinstance(adp_payload, dict) else None,
+        "data": data,
+        "count": len(data),
+        "warning": fantasypros_warning,
+    }
 
 
 @draft_board_bp.get("/board")
