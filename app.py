@@ -3496,16 +3496,16 @@ def stripe_webhook():
 # These product identifiers must match the App Store Connect products and the
 # RevenueCat offering used by the mobile app.
 REVENUECAT_PRODUCT_PLANS = {
-    "com.jerryjiya.myapp-new.mlb.weekly": "mlb",
-    "com.jerryjiya.myapp-new.mlb.monthly": "mlb",
-    "com.jerryjiya.myapp-new.nfl.weekly": "nfl",
-    "com.jerryjiya.myapp-new.nfl.monthly": "nfl",
-    "com.jerryjiya.myapp-new.nba.weekly": "nba",
-    "com.jerryjiya.myapp-new.nba.monthly": "nba",
-    "com.jerryjiya.myapp-new.ncaa.weekly": "ncaa",
-    "com.jerryjiya.myapp-new.ncaa.monthly": "ncaa",
-    "com.jerryjiya.myapp-new.superstats.weekly": "superstats",
-    "com.jerryjiya.myapp-new.superstats.monthly": "superstats",
+    "com.jerryjiya.myapp_new.mlb.weekly": "mlb",
+    "com.jerryjiya.myapp_new.mlb.monthly": "mlb",
+    "com.jerryjiya.myapp_new.nfl.weekly": "nfl",
+    "com.jerryjiya.myapp_new.nfl.monthly": "nfl",
+    "com.jerryjiya.myapp_new.nba.weekly": "nba",
+    "com.jerryjiya.myapp_new.nba.monthly": "nba",
+    "com.jerryjiya.myapp_new.ncaa.weekly": "ncaa",
+    "com.jerryjiya.myapp_new.ncaa.monthly": "ncaa",
+    "com.jerryjiya.myapp_new.superstats.weekly": "superstats",
+    "com.jerryjiya.myapp_new.superstats.monthly": "superstats",
 }
 
 
