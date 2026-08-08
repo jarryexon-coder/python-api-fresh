@@ -1080,6 +1080,89 @@ CORS(
     expose_headers=['Content-Type', 'Authorization']
 )
 
+# ------------------------------------------------------------------------------
+# Mobile package access enforcement
+# ------------------------------------------------------------------------------
+# The mobile app always sends a Firebase bearer token with data requests.  Keep
+# package verification at the API boundary as well, so a copied endpoint URL
+# cannot bypass the native paywall.
+PACKAGE_NAMES = {'mlb', 'nfl', 'nba', 'ncaa', 'superstats'}
+SUPERSTATS_PATHS = (
+    '/api/fantasyhub/', '/api/draft/', '/api/parlay', '/api/predictions',
+    '/api/advanced-analytics', '/api/analytics', '/api/picks',
+    '/api/tank01/news', '/api/tank/news', '/api/generator/',
+    '/api/sleeper/', '/api/prizepicks/',
+)
+
+
+def mobile_package_for_request():
+    """Return the plan required by a protected mobile data request."""
+    path = flask_request.path.rstrip('/')
+    if any(path.startswith(prefix.rstrip('/')) for prefix in SUPERSTATS_PATHS):
+        return 'superstats'
+    if path.startswith('/api/mlb/'):
+        return 'mlb'
+    if path.startswith('/api/nfl/') or path.startswith('/api/insights/nfl/'):
+        return 'nfl'
+    if path.startswith('/api/nba/') or path.startswith('/api/insights/nba/'):
+        return 'nba'
+    if path.startswith('/api/ncaa/') or path.startswith('/api/ncaab/') or path.startswith('/api/ncaaf/') or path.startswith('/api/insights/ncaa'):
+        return 'ncaa'
+    sport = str(flask_request.args.get('sport', '')).lower()
+    return {'mlb': 'mlb', 'nfl': 'nfl', 'nba': 'nba', 'ncaaf': 'ncaa', 'ncaab': 'ncaa'}.get(sport)
+
+
+@app.before_request
+def require_mobile_package_access():
+    """Fail closed for premium data endpoints while preserving CORS preflight."""
+    if flask_request.method == 'OPTIONS':
+        return None
+    required_plan = mobile_package_for_request()
+    if not required_plan:
+        return None
+
+    token = flask_request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    if not token:
+        return jsonify({'success': False, 'error': 'Sign in is required for this premium data.'}), 401
+    verified = verify_firebase_token(token)
+    if not verified.get('valid'):
+        return jsonify({'success': False, 'error': 'Your sign-in session is invalid. Please sign in again.'}), 401
+    payload = verified['payload']
+    user_id = payload.get('uid')
+    email = str(payload.get('email') or '').strip().lower()
+    if not user_id:
+        return jsonify({'success': False, 'error': 'Your sign-in session is missing an account ID.'}), 401
+
+    admins = {item.strip().lower() for item in os.getenv('ADMIN_EMAILS', '').split(',') if item.strip()}
+    user_data = {}
+    try:
+        if db:
+            doc = db.collection('users').document(str(user_id)).get()
+            user_data = doc.to_dict() if doc.exists else {}
+    except Exception as exc:
+        print(f'Package access lookup failed: {exc}')
+        return jsonify({'success': False, 'error': 'Package access is temporarily unavailable. Please try again.'}), 503
+
+    if email in admins or user_data.get('role') == 'admin':
+        g.user_id, g.user_email = user_id, email
+        return None
+    active_packages = {
+        str(item).strip().lower()
+        for item in user_data.get('active_packages', [])
+        if str(item).strip().lower() in PACKAGE_NAMES
+    }
+    # SuperStats is explicitly sold as the all-sports projection layer. It can
+    # fetch its underlying sport data without granting the individual sport-tab
+    # UI access, which remains controlled by the mobile route gate.
+    if required_plan not in active_packages and 'superstats' not in active_packages:
+        return jsonify({
+            'success': False,
+            'error': f'{required_plan.upper()} Analytics access is required for this data.',
+            'required_package': required_plan,
+        }), 403
+    g.user_id, g.user_email = user_id, email
+    return None
+
 # ============================================
 # GLOBAL OPTIONS HANDLER - Catches all preflight requests
 # ============================================
