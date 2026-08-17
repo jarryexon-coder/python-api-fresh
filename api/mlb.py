@@ -50,10 +50,11 @@ def _bdl_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     return response.json()
 
 
-def _cached_rows(key: str, path: str, params: dict[str, Any], ttl: int = 600) -> list[dict[str, Any]]:
+def _cached_rows(key: str, path: str, params: dict[str, Any], ttl: int = 60) -> list[dict[str, Any]]:
     """Fetch every cursor page once, then reuse it for a short period."""
+    force = request.args.get("force", "").lower() in {"1", "true", "yes"}
     cached = _cache.get(key)
-    if cached and time.time() - cached[0] < ttl:
+    if not force and cached and time.time() - cached[0] < ttl:
         return cached[1]
     rows: list[dict[str, Any]] = []
     cursor: Any = None
@@ -139,7 +140,7 @@ def _player_card(row: dict[str, Any], index: int) -> dict[str, Any]:
 
 
 def _season_rows(season: int) -> list[dict[str, Any]]:
-    return _cached_rows(f"player-season-{season}", "/mlb/v1/season_stats", {"season": season}, ttl=600)
+    return _cached_rows(f"player-season-{season}", "/mlb/v1/season_stats", {"season": season}, ttl=60)
 
 
 @mlb_bp.get("/players")
