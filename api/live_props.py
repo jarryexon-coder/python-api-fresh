@@ -78,9 +78,18 @@ def _rows(sport: str) -> dict[str, Any]:
                 for outcome in market.get("outcomes", []):
                     if not isinstance(outcome, dict):
                         continue
-                    player = str(outcome.get("description") or "").strip()
+                    outcome_name = str(outcome.get("name") or "").strip()
+                    # Odds API normally uses ``description`` for the player and
+                    # ``name`` for Over/Under.  Some bookmakers omit the former,
+                    # so accept a non-side outcome name as the player instead.
+                    player = str(
+                        outcome.get("description")
+                        or outcome.get("player")
+                        or outcome.get("participant")
+                        or (outcome_name if outcome_name.lower() not in {"over", "under"} else "")
+                    ).strip()
                     line = _number(outcome.get("point"))
-                    side = str(outcome.get("name") or "").lower()
+                    side = outcome_name.lower()
                     if not player or line is None or side not in {"over", "under"}:
                         continue
                     pair = paired.setdefault((player, line), {"over": None, "under": None})
