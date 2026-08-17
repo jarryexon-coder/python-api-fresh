@@ -171,7 +171,24 @@ def players():
                 home = game.get("home_team") if isinstance(game.get("home_team"), dict) else {}
                 game_label = f"{away.get('abbreviation', 'Away')} @ {home.get('abbreviation', 'Home')}"
                 game_cap = per_game_limit + (1 if game_number < extra_slots else 0)
-                for index, row in enumerate(_rows(payload)):
+                # BallDontLie groups the response by prop type.  Taking the
+                # first N records made a board of only home-run props despite
+                # Hits, Runs, RBIs, and Total Bases being available. Interleave
+                # the live markets so every posted type is represented.
+                by_market: dict[str, list[dict[str, Any]]] = {}
+                for row in _rows(payload):
+                    by_market.setdefault(str(row.get("prop_type") or "unknown"), []).append(row)
+                rows: list[dict[str, Any]] = []
+                while by_market and len(rows) < game_cap:
+                    for prop_type in list(by_market):
+                        bucket = by_market[prop_type]
+                        if bucket:
+                            rows.append(bucket.pop(0))
+                        if not bucket:
+                            del by_market[prop_type]
+                        if len(rows) >= game_cap:
+                            break
+                for index, row in enumerate(rows):
                     player = row.get("player") if isinstance(row.get("player"), dict) else {}
                     player_id = str(row.get("player_id") or player.get("id") or "")
                     player = player or active_players.get(player_id, {})
@@ -189,9 +206,12 @@ def players():
                     provider_name = str(player.get("full_name") or player.get("name") or "")
                     name = season_card.get("name") if provider_name.lower().startswith("player ") else provider_name
                     edge = round(((projection - line) / line) * 100, 1) if projection is not None and line not in (None, 0) else None
-                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": name or f"Player {player_id or 'unknown'}", "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else season_card.get("team", ""), "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "game": game_label, "date": game.get("date"), "vendor": row.get("vendor")})
-                    if index + 1 >= game_cap:
-                        break
+                    # Do not create placeholder player names. A name provider
+                    # outage should be visible as an omitted card, not a fake
+                    # player that can be mistaken for a real prop.
+                    if not name:
+                        continue
+                    data.append({"id": str(row.get("id") or f"{game_id}-{index}"), "name": name, "team": (player.get("team") or {}).get("abbreviation", "") if isinstance(player.get("team"), dict) else season_card.get("team", ""), "market": prop_type.replace("_", " "), "line": line, "projection": projection, "edge": edge, "odds": odds, "game_id": game_id, "game": game_label, "date": game.get("date"), "provider_updated_at": row.get("updated_at"), "vendor": row.get("vendor")})
             return jsonify({"success": True, "source": "BallDontLie MLB player props", "is_real_data": True, "data": data, "count": len(data), "message": None if data else "No live MLB player props are currently posted for this date."})
 
         payload = _bdl_get("/mlb/v1/season_stats", {"season": _season(), "per_page": limit, "sort_by": "batting_hr", "sort_order": "desc"})
