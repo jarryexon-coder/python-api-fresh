@@ -123,8 +123,20 @@ def opponent_strength(sport: str):
         return jsonify({"success": True, "sport": sport, "season": season, "source": "BallDontLie game results", "games_sampled": completed, "data": data, "count": len(data)})
     except RuntimeError as error:
         return jsonify({"success": False, "error": str(error)}), 503
-    except requests.RequestException as error:
-        return jsonify({"success": False, "error": f"Opponent-strength provider request failed: {error}"}), 502
+    except requests.RequestException:
+        # Opponent strength enriches player data but should never prevent the
+        # NCAA/NFL screens from rendering when a provider entitlement does not
+        # include historical game results.
+        return jsonify({
+            "success": True,
+            "sport": sport,
+            "season": season,
+            "source": "Opponent strength temporarily unavailable",
+            "games_sampled": 0,
+            "data": [],
+            "count": 0,
+            "warning": "Opponent-strength game data is not available from the current provider plan.",
+        })
 
 
 @team_context_bp.get("/<sport>/player-stats")

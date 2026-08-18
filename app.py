@@ -5074,7 +5074,24 @@ def get_fantasy_players():
 
         # ----- For other sports, use their respective databases -----
         elif sport == "nfl":
-            data_source = nfl_players_data
+            # NFL roster data is provider-backed (with a checked-in fallback), not
+            # generated/mock player data.  ``nfl_players_data`` was never defined
+            # in this module and caused every generic NFL player request to 500.
+            from api.nfl_rosters import active_roster
+
+            roster, source = active_roster()
+            players = roster[: min(len(roster), limit)]
+            return jsonify(
+                {
+                    "success": True,
+                    "players": players,
+                    "count": len(players),
+                    "sport": sport,
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                    "is_real_data": source == "BallDontLie NFL active players",
+                    "data_source": source,
+                }
+            )
 
         elif sport == "mlb":
             data_source = MLB_PLAYERS
