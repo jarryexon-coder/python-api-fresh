@@ -1056,6 +1056,7 @@ from api.nfl_rosters import nfl_rosters_bp
 from api.draft_board import draft_board_bp
 from api.fantasypros import fantasypros_bp
 from api.live_props import live_props_bp
+from api.prediction_ledger import prediction_ledger_bp
 app.register_blueprint(team_context_bp)
 app.register_blueprint(generator_bp)
 app.register_blueprint(mlb_bp)
@@ -1065,6 +1066,7 @@ app.register_blueprint(nfl_rosters_bp)
 app.register_blueprint(draft_board_bp)
 app.register_blueprint(fantasypros_bp)
 app.register_blueprint(live_props_bp)
+app.register_blueprint(prediction_ledger_bp)
 
 # Single source of truth for CORS
 CORS(
@@ -1093,7 +1095,7 @@ SUPERSTATS_PATHS = (
     '/api/fantasyhub/', '/api/draft/', '/api/parlay', '/api/predictions',
     '/api/advanced-analytics', '/api/analytics', '/api/picks',
     '/api/tank01/news', '/api/tank/news', '/api/generator/',
-    '/api/sleeper/', '/api/prizepicks/',
+    '/api/sleeper/', '/api/prizepicks/', '/api/prediction-ledger/',
 )
 
 
