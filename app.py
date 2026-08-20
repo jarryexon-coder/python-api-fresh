@@ -1102,6 +1102,10 @@ SUPERSTATS_PATHS = (
 def mobile_package_for_request():
     """Return the plan required by a protected mobile data request."""
     path = flask_request.path.rstrip('/')
+    # The nightly importer authenticates with its own server-to-server secret;
+    # it cannot carry a Firebase customer token.
+    if path == '/api/prediction-ledger/import-results':
+        return None
     if any(path.startswith(prefix.rstrip('/')) for prefix in SUPERSTATS_PATHS):
         return 'superstats'
     if path.startswith('/api/mlb/'):
