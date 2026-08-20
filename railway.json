@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "gunicorn --workers 4 --bind 0.0.0.0:$PORT app:app",
+    "startCommand": "if [ \"$PREDICTION_IMPORTER_MODE\" = \"true\" ]; then python scripts/run_prediction_import.py; else gunicorn --workers 4 --bind 0.0.0.0:$PORT app:app; fi",
     "healthcheckPath": "/api/health",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
