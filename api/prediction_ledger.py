@@ -494,6 +494,71 @@ def _backtest_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _mean(items: list[dict[str, Any]], field: str) -> float | None:
+    values = [_number(item.get(field)) for item in items]
+    usable = [value for value in values if value is not None]
+    return round(sum(usable) / len(usable), 3) if usable else None
+
+
+def _diagnostic_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    gaps = [
+        float(record["projection"]) - float(record["line"])
+        for record in items
+        if _number(record.get("projection")) is not None and _number(record.get("line")) is not None
+    ]
+    return {
+        **_backtest_metrics(items),
+        "average_expected_value": _mean(items, "expected_value"),
+        "average_selected_probability": _mean(items, "model_probability"),
+        "average_selected_odds": _mean(items, "odds"),
+        "average_projection_minus_line": round(sum(gaps) / len(gaps), 3) if gaps else None,
+    }
+
+
+def _mlb_backtest_diagnostics(model_version: str) -> dict[str, Any]:
+    """Read-only analysis of selection behavior; it cannot tune any model."""
+    all_records = _mlb_backtest_records(model_version)
+    candidates = [record for record in all_records if record.get("candidate") is True]
+    by_side: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_ev_band: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_gap_band: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_odds_band: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in candidates:
+        by_side[str(record.get("side") or "Unknown")].append(record)
+        ev = _number(record.get("expected_value"))
+        ev_label = "Unknown" if ev is None else "5–7.49%" if ev < 0.075 else "7.5–9.99%" if ev < 0.10 else "10%+"
+        by_ev_band[ev_label].append(record)
+        projection, line = _number(record.get("projection")), _number(record.get("line"))
+        gap = projection - line if projection is not None and line is not None else None
+        gap_label = "Unknown" if gap is None else "≤ -0.25" if gap <= -0.25 else "-0.25 to -0.10" if gap <= -0.10 else "-0.10 to 0.10" if gap <= 0.10 else "0.10 to 0.25" if gap <= 0.25 else "> 0.25"
+        by_gap_band[gap_label].append(record)
+        odds = _number(record.get("odds"))
+        odds_label = "Unknown" if odds is None else "≤ -200" if odds <= -200 else "-199 to -151" if odds <= -151 else "-150 to -111" if odds <= -111 else "-110 to +100" if odds <= 100 else "+101 or longer"
+        by_odds_band[odds_label].append(record)
+    side_counts = {side: len(rows) for side, rows in by_side.items()}
+    warnings: list[str] = []
+    if candidates and max(side_counts.values(), default=0) / len(candidates) >= 0.80:
+        warnings.append("Selection is concentrated on one side; investigate projection-versus-market calibration before changing thresholds.")
+    if _backtest_metrics(candidates).get("roi_percent") is not None and _backtest_metrics(candidates)["roi_percent"] <= 0:
+        warnings.append("Candidate ROI is non-positive; the model should remain research-only.")
+    return {
+        "success": True,
+        "isolated": True,
+        "eligible_for_live_calibration": False,
+        "model_version": model_version,
+        "all_evaluated_props": len(all_records),
+        "candidate_props": len(candidates),
+        "non_candidate_props": len(all_records) - len(candidates),
+        "overall_candidates": _diagnostic_summary(candidates),
+        "by_side": {name: _diagnostic_summary(rows) for name, rows in sorted(by_side.items())},
+        "by_expected_value_band": {name: _diagnostic_summary(rows) for name, rows in by_ev_band.items()},
+        "by_projection_minus_line_band": {name: _diagnostic_summary(rows) for name, rows in by_gap_band.items()},
+        "by_selected_odds_band": {name: _diagnostic_summary(rows) for name, rows in by_odds_band.items()},
+        "warnings": warnings,
+        "message": "Diagnostic report only. It does not modify thresholds, calibration, or live predictions.",
+    }
+
+
 def _mlb_backtest_evaluation(model_version: str = "mlb-last10-pregame-v1") -> dict[str, Any]:
     all_records = _mlb_backtest_records(model_version)
     candidate_only = model_version.startswith(("mlb-probability-ev-v2", "mlb-empirical-probability-ev-v2", "mlb-market-relative-ev-v2", "mlb-projection-relative-ev-v2"))
@@ -682,6 +747,17 @@ def historical_mlb_backtest_evaluation():
     if model not in versions:
         return jsonify({"error": "model must be v1, v2, v2.1, v2.2, v2.3, or v2.4"}), 400
     return jsonify({**_mlb_backtest_evaluation(versions[model]), "model": model})
+
+
+@prediction_ledger_bp.get("/backtest/mlb/diagnostics")
+def historical_mlb_backtest_diagnostics():
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    model = str(request.args.get("model") or "v2.4").lower()
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2", "v2.3": "mlb-market-relative-ev-v2.3", "v2.4": "mlb-projection-relative-ev-v2.4"}
+    if model not in versions:
+        return jsonify({"error": "model must be v1, v2, v2.1, v2.2, v2.3, or v2.4"}), 400
+    return jsonify({**_mlb_backtest_diagnostics(versions[model]), "model": model})
 
 
 @prediction_ledger_bp.post("/backtest/mlb/promotion")
