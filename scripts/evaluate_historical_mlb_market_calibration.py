@@ -16,6 +16,7 @@ from pathlib import Path
 PRIOR_STRENGTH = 40.0
 MIN_TRAINING_SAMPLES = 400
 MIN_HOLDOUT_SAMPLES = 100
+MIN_BRIER_IMPROVEMENT = 0.003
 
 
 def probability_band(probability: float) -> str:
@@ -103,8 +104,8 @@ def main() -> int:
             "raw_market_brier": raw_brier,
             "calibrated_market_brier": calibrated_brier,
             "brier_improvement": improvement,
-            "eligible_for_future_manual_review": bool(train_count >= MIN_TRAINING_SAMPLES and holdout_count >= MIN_HOLDOUT_SAMPLES and improvement is not None and improvement > 0),
-            "reason": "Requires a lower chronological-holdout Brier score and minimum sample sizes; it is not a bet-selection signal.",
+            "eligible_for_future_manual_review": bool(train_count >= MIN_TRAINING_SAMPLES and holdout_count >= MIN_HOLDOUT_SAMPLES and improvement is not None and improvement >= MIN_BRIER_IMPROVEMENT),
+            "reason": "Requires at least a 0.003 lower chronological-holdout Brier score and minimum sample sizes; it is not a bet-selection signal.",
         }
 
     print(json.dumps({
@@ -113,7 +114,7 @@ def main() -> int:
         "training_end": args.training_end,
         "training_dates": sorted({row["date"] for row in training}),
         "holdout_dates": sorted({row["date"] for row in holdout}),
-        "minimums": {"training_samples": MIN_TRAINING_SAMPLES, "holdout_samples": MIN_HOLDOUT_SAMPLES},
+        "minimums": {"training_samples": MIN_TRAINING_SAMPLES, "holdout_samples": MIN_HOLDOUT_SAMPLES, "brier_improvement": MIN_BRIER_IMPROVEMENT},
         "markets": results,
         "message": "Chronological calibration evaluation only. It does not make wagers, generate picks, or change any live app output.",
     }, indent=2, sort_keys=True))
