@@ -50,8 +50,10 @@ def main() -> int:
 
     dates = sorted({str(row.get("game_date") or "") for row in usable if row.get("game_date")})
     calibration: dict[str, list[dict]] = defaultdict(list)
+    by_market: dict[str, list[dict]] = defaultdict(list)
     for row in usable:
         calibration[probability_band(float(row["fair_probability_over"]))].append(row)
+        by_market[str(row.get("market") or "Other")].append(row)
 
     def metrics(items: list[dict]) -> dict:
         total = len(items)
@@ -79,6 +81,7 @@ def main() -> int:
         "settled_two_sided_records": len(usable),
         "average_book_count": round(sum(books) / len(books), 2) if books else None,
         "overall": metrics(usable),
+        "by_market": {market: metrics(items) for market, items in sorted(by_market.items())},
         "calibration_by_fair_probability_band": {band: metrics(items) for band, items in sorted(calibration.items())},
         "message": "Data-quality report only. Blind-side ROI is shown to audit the market baseline, not as a recommendation or a live model.",
     }
