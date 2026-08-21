@@ -864,6 +864,41 @@ def historical_mlb_backtest_diagnostics():
     return jsonify({**_mlb_backtest_diagnostics(versions[model]), "model": model})
 
 
+@prediction_ledger_bp.get("/backtest/mlb/audit")
+def historical_mlb_backtest_audit():
+    """Expose a small, immutable sample for model/data-quality review."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    model = str(request.args.get("model") or "v2.6").lower()
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2", "v2.3": "mlb-market-relative-ev-v2.3", "v2.4": "mlb-projection-relative-ev-v2.4", "v2.5": "mlb-directional-projection-ev-v2.5", "v2.6": "mlb-calibrated-directional-ev-v2.6"}
+    if model not in versions:
+        return jsonify({"error": "model must be v1, v2, v2.1, v2.2, v2.3, v2.4, v2.5, or v2.6"}), 400
+    try:
+        limit = min(50, max(1, int(request.args.get("limit") or 20)))
+    except ValueError:
+        limit = 20
+    records = _mlb_backtest_records(versions[model])
+    candidates = [record for record in records if record.get("candidate") is True]
+
+    def implied_probability(price: Any) -> float | None:
+        value = _number(price)
+        if value is None or value == 0:
+            return None
+        return round((100 / (value + 100) if value > 0 else -value / (-value + 100)) * 100, 2)
+
+    samples = []
+    for record in sorted(candidates, key=lambda item: (str(item.get("game_date") or ""), str(item.get("player") or "")))[:limit]:
+        samples.append({
+            "date": record.get("game_date"), "game": record.get("game"), "player": record.get("player"), "market": record.get("market"),
+            "line": record.get("line"), "projection": record.get("projection"), "actual": record.get("actual_value"), "side": record.get("side"),
+            "outcome": record.get("outcome"), "selected_odds": record.get("odds"), "over_odds": record.get("over_odds"), "under_odds": record.get("under_odds"),
+            "selected_implied_probability": implied_probability(record.get("odds")), "over_implied_probability": implied_probability(record.get("over_odds")), "under_implied_probability": implied_probability(record.get("under_odds")),
+            "stored_fair_over_probability": record.get("fair_probability_over"), "model_probability": record.get("model_probability"),
+            "projection_probability_over": record.get("projection_probability_over"), "projection_market_signal": record.get("projection_market_signal"), "expected_value": record.get("expected_value"),
+        })
+    return jsonify({"success": True, "isolated": True, "model": model, "candidate_records": len(candidates), "all_records": len(records), "sample_count": len(samples), "samples": samples, "message": "Audit report only. It does not modify historical records, calibration, or live predictions."})
+
+
 @prediction_ledger_bp.post("/backtest/mlb/promotion")
 def promote_historical_mlb_model():
     """Record a reviewed backtest decision; it never switches live logic itself."""

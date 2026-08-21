@@ -1110,6 +1110,7 @@ def mobile_package_for_request():
         '/api/prediction-ledger/backtest/mlb/summary',
         '/api/prediction-ledger/backtest/mlb/evaluation',
         '/api/prediction-ledger/backtest/mlb/diagnostics',
+        '/api/prediction-ledger/backtest/mlb/audit',
         '/api/prediction-ledger/backtest/mlb/promotion',
         '/api/prediction-ledger/backtest/mlb/v2.2/calibrate',
         '/api/prediction-ledger/backtest/mlb/v2.3/calibrate',
