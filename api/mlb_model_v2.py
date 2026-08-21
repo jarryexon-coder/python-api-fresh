@@ -53,6 +53,7 @@ def evaluate_prop(
     over_odds: Any,
     under_odds: Any,
     sample_games: Any = None,
+    model_version: str = "mlb-probability-ev-v2",
 ) -> dict[str, Any] | None:
     """Return a transparent shadow-model assessment for one MLB count prop.
 
@@ -87,7 +88,7 @@ def evaluate_prop(
         reasons.append("Expected value or probability does not clear the conservative shadow-model threshold.")
     reasons.append("Confirmed lineup, opposing pitcher, park, weather, and bullpen context are not yet modeled.")
     return {
-        "model_version": "mlb-probability-ev-v2",
+        "model_version": model_version,
         "model_status": "shadow_not_promoted",
         "projection": round(projection, 3),
         "season_rate": round(baseline, 3),
