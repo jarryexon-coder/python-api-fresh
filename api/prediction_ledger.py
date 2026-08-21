@@ -25,7 +25,7 @@ VALID_SPORTS = {"mlb", "nfl", "nba"}
 MIN_CALIBRATION_SAMPLE = 30
 _memory_ledger: dict[str, dict[str, Any]] = {}
 _memory_backtests: dict[str, dict[str, Any]] = {}
-_mlb_game_dates_cache: dict[int, dict[str, str]] = {}
+_mlb_recent_game_dates_cache: dict[str, dict[str, str]] = {}
 MLB_BACKTEST_MARKETS = {
     "batter_hits": ("Hits", "hits"),
     "batter_runs_scored": ("Runs Scored", "runs"),
@@ -225,15 +225,17 @@ def _mlb_game_stats(game_id: Any) -> dict[str, dict[str, Any]]:
     return values
 
 
-def _mlb_season_game_dates(season: int) -> dict[str, str]:
-    """Map BDL game IDs to dates so backtest projections cannot leak future data."""
-    cached = _mlb_game_dates_cache.get(season)
+def _mlb_recent_game_dates(before_date: str) -> dict[str, str]:
+    """Map only the prior 21 days of game IDs, avoiding a slow season-wide scan."""
+    cached = _mlb_recent_game_dates_cache.get(before_date)
     if cached is not None:
         return cached
     result: dict[str, str] = {}
+    target = datetime.fromisoformat(before_date).date()
+    dates = [(target - timedelta(days=offset)).isoformat() for offset in range(1, 22)]
     cursor: Any = None
-    for _ in range(35):
-        params: dict[str, Any] = {"seasons[]": season, "per_page": 100}
+    for _ in range(5):
+        params: dict[str, Any] = {"dates[]": dates, "per_page": 100}
         if cursor is not None:
             params["cursor"] = cursor
         payload = _bdl_mlb("games", params)
@@ -244,7 +246,7 @@ def _mlb_season_game_dates(season: int) -> dict[str, str]:
         cursor = payload.get("meta", {}).get("next_cursor") if isinstance(payload.get("meta"), dict) else None
         if not cursor or not rows:
             break
-    _mlb_game_dates_cache[season] = result
+    _mlb_recent_game_dates_cache[before_date] = result
     return result
 
 
@@ -265,7 +267,7 @@ def _mlb_historical_projection(player_name: str, market_key: str, before_date: s
     season = int(before_date[:4])
     history = _bdl_mlb("stats", {"player_ids[]": resolved_id, "seasons[]": season, "per_page": 100})
     _, field = MLB_BACKTEST_MARKETS[market_key]
-    game_dates = _mlb_season_game_dates(season)
+    game_dates = _mlb_recent_game_dates(before_date)
     previous: list[tuple[str, float]] = []
     for row in history.get("data", []):
         if not isinstance(row, dict):
