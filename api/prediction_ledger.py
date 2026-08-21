@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from math import sqrt
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -34,6 +35,10 @@ MLB_BACKTEST_MARKETS = {
     "batter_total_bases": ("Total Bases", "total_bases"),
     "pitcher_strikeouts": ("Strikeouts", "p_k"),
 }
+MIN_BACKTEST_PROMOTION_SAMPLE = 500
+MIN_BACKTEST_HOLDOUT_SAMPLE = 150
+MIN_BACKTEST_SIDE_SAMPLE = 75
+MIN_BACKTEST_ODDS_COVERAGE = 0.90
 
 
 def _number(value: Any) -> float | None:
@@ -312,6 +317,98 @@ def _backtest_store(record: dict[str, Any]) -> None:
         _memory_backtests[record["id"]] = record
 
 
+def _mlb_backtest_records() -> list[dict[str, Any]]:
+    store = _store()
+    if store:
+        records = [snapshot.to_dict() for snapshot in store.collection("prediction_backtest_ledger").where("sport", "==", "mlb").limit(1500).stream()]
+    else:
+        records = list(_memory_backtests.values())
+    return [record for record in records if record.get("isolation") == "historical_backtest" and record.get("outcome") in {"won", "lost", "push"}]
+
+
+def _american_profit(odds: Any, outcome: str) -> float | None:
+    price = _number(odds)
+    if price is None or price == 0:
+        return None
+    if outcome == "push":
+        return 0.0
+    if outcome == "lost":
+        return -1.0
+    return round(price / 100.0 if price > 0 else 100.0 / abs(price), 4)
+
+
+def _wilson_lower_bound(wins: int, decided: int) -> float | None:
+    if not decided:
+        return None
+    z = 1.96
+    proportion = wins / decided
+    denominator = 1 + z * z / decided
+    centre = proportion + z * z / (2 * decided)
+    margin = z * sqrt((proportion * (1 - proportion) + z * z / (4 * decided)) / decided)
+    return round((centre - margin) / denominator * 100, 1)
+
+
+def _backtest_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+    wins = sum(item.get("outcome") == "won" for item in items)
+    losses = sum(item.get("outcome") == "lost" for item in items)
+    pushes = sum(item.get("outcome") == "push" for item in items)
+    decided = wins + losses
+    profits = [_american_profit(item.get("odds"), str(item.get("outcome"))) for item in items]
+    priced = [profit for profit in profits if profit is not None]
+    odds_coverage = round(len(priced) / len(items), 3) if items else 0.0
+    units = round(sum(priced), 3) if priced else None
+    roi = round(sum(priced) / len(priced) * 100, 2) if priced else None
+    return {
+        "samples": len(items), "wins": wins, "losses": losses, "pushes": pushes,
+        "hit_rate": round(wins / decided * 100, 1) if decided else None,
+        "wilson_lower_hit_rate": _wilson_lower_bound(wins, decided),
+        "odds_coverage": odds_coverage, "profit_units": units, "roi_percent": roi,
+    }
+
+
+def _mlb_backtest_evaluation() -> dict[str, Any]:
+    records = _mlb_backtest_records()
+    ordered_dates = sorted({str(record.get("game_date") or "") for record in records if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(record.get("game_date") or ""))})
+    holdout_dates = set(ordered_dates[-max(1, round(len(ordered_dates) * 0.2)):]) if ordered_dates else set()
+    holdout = [record for record in records if record.get("game_date") in holdout_dates]
+    training = [record for record in records if record.get("game_date") not in holdout_dates]
+    by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_market[str(record.get("market") or "Other")].append(record)
+    overall = _backtest_metrics(records)
+    side_metrics = {side: _backtest_metrics([record for record in records if record.get("side") == side]) for side in ("Over", "Under")}
+    holdout_metrics = _backtest_metrics(holdout)
+    reasons: list[str] = []
+    if overall["samples"] < MIN_BACKTEST_PROMOTION_SAMPLE:
+        reasons.append(f"Needs at least {MIN_BACKTEST_PROMOTION_SAMPLE} total settled samples.")
+    if holdout_metrics["samples"] < MIN_BACKTEST_HOLDOUT_SAMPLE:
+        reasons.append(f"Needs at least {MIN_BACKTEST_HOLDOUT_SAMPLE} chronological holdout samples.")
+    for side, metrics in side_metrics.items():
+        if metrics["samples"] < MIN_BACKTEST_SIDE_SAMPLE:
+            reasons.append(f"Needs at least {MIN_BACKTEST_SIDE_SAMPLE} {side.lower()} samples.")
+    if overall["odds_coverage"] < MIN_BACKTEST_ODDS_COVERAGE:
+        reasons.append("Needs odds on at least 90% of settled predictions.")
+    if overall["roi_percent"] is None or overall["roi_percent"] <= 0:
+        reasons.append("Full-sample ROI must be positive after listed odds.")
+    if holdout_metrics["roi_percent"] is None or holdout_metrics["roi_percent"] <= 0:
+        reasons.append("Chronological holdout ROI must be positive after listed odds.")
+    model_versions = sorted({str(record.get("model_version") or "unknown") for record in records})
+    return {
+        "success": True, "isolated": True, "eligible_for_live_calibration": False,
+        "model_versions": model_versions, "overall": overall,
+        "training": _backtest_metrics(training), "holdout": {**holdout_metrics, "dates": sorted(holdout_dates)},
+        "by_side": side_metrics,
+        "by_market": {market: _backtest_metrics(items) for market, items in by_market.items()},
+        "promotion_gate": {
+            "eligible_for_manual_review": not reasons,
+            "automatic_live_promotion": False,
+            "reasons": reasons,
+            "requirements": {"total_samples": MIN_BACKTEST_PROMOTION_SAMPLE, "holdout_samples": MIN_BACKTEST_HOLDOUT_SAMPLE, "per_side_samples": MIN_BACKTEST_SIDE_SAMPLE, "odds_coverage": MIN_BACKTEST_ODDS_COVERAGE},
+        },
+        "message": "Evaluation uses a chronological holdout and listed odds. It cannot change live predictions automatically.",
+    }
+
+
 @prediction_ledger_bp.post("/backtest/mlb")
 def historical_mlb_backtest():
     """Import an isolated, point-in-time MLB backtest sample.
@@ -413,6 +510,32 @@ def historical_mlb_backtest_summary():
         return {"samples": len(items), "wins": wins, "losses": losses, "pushes": pushes, "hit_rate": round(wins / decided * 100, 1) if decided else None}
 
     return jsonify({"success": True, "isolated": True, "eligible_for_live_calibration": False, "overall": result(records), "markets": {market: result(items) for market, items in grouped.items()}, "message": "Historical backtest summary only. It is not live-model calibration."})
+
+
+@prediction_ledger_bp.get("/backtest/mlb/evaluation")
+def historical_mlb_backtest_evaluation():
+    """Evaluate the isolated model with odds-aware, chronological safeguards."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    return jsonify(_mlb_backtest_evaluation())
+
+
+@prediction_ledger_bp.post("/backtest/mlb/promotion")
+def promote_historical_mlb_model():
+    """Record a reviewed backtest decision; it never switches live logic itself."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    evaluation = _mlb_backtest_evaluation()
+    if not evaluation["promotion_gate"]["eligible_for_manual_review"]:
+        return jsonify({"success": False, "error": "Promotion gate is not met.", "evaluation": evaluation}), 409
+    payload = request.get_json(silent=True) or {}
+    if payload.get("approve") is not True:
+        return jsonify({"success": True, "approved": False, "evaluation": evaluation, "message": "Gate is eligible. Re-submit with JSON {\"approve\": true} after manual review."})
+    record = {"sport": "mlb", "model_versions": evaluation["model_versions"], "status": "approved_for_manual_live_integration", "approved_at": _now(), "evaluation": evaluation}
+    store = _store()
+    if store:
+        store.collection("prediction_model_promotions").document("mlb").set(record)
+    return jsonify({"success": True, "approved": True, "automatic_live_promotion": False, "message": "Decision recorded. Live integration remains a separate reviewed deployment."})
 
 
 def _normalise(item: Any) -> dict[str, Any] | None:
