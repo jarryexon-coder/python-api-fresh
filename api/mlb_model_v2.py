@@ -19,6 +19,9 @@ MIN_V25_DIRECTIONAL_SIGNAL = 0.025
 MIN_V25_CANDIDATE_EV = 0.05
 MIN_V26_DIRECTIONAL_SIGNAL = 0.025
 MIN_V26_CANDIDATE_EV = 0.05
+V27_MARKET_WEIGHT = 0.75
+MIN_V27_DIRECTIONAL_SIGNAL = 0.08
+MIN_V27_CANDIDATE_EV = 0.05
 
 
 def number(value: Any) -> float | None:
@@ -425,4 +428,70 @@ def evaluate_calibrated_directional_prop(
         "edge_percent": round(ev * 100, 2),
         "candidate": candidate,
         "reasons": reasons + ["Probability is calibrated from a frozen pregame historical window and constrained to the matching side. This is a shadow model."],
+    }
+
+
+def evaluate_continuous_market_anchored_prop(
+    *,
+    season_rate: Any,
+    line: Any,
+    over_odds: Any,
+    under_odds: Any,
+    calibrated_over_probability: Any,
+    sample_games: Any = None,
+) -> dict[str, Any] | None:
+    """V2.7: continuously calibrated player signal, conservatively anchored to market."""
+    assessment = evaluate_prop(
+        season_rate=season_rate,
+        line=line,
+        over_odds=over_odds,
+        under_odds=under_odds,
+        sample_games=sample_games,
+        model_version="mlb-continuous-market-anchored-ev-v2.7",
+    )
+    fair_over = fair_over_probability(over_odds, under_odds)
+    calibrated_over = number(calibrated_over_probability)
+    if assessment is None or fair_over is None or calibrated_over is None or not 0 < calibrated_over < 1:
+        return None
+    raw_over = poisson_over_probability(float(assessment["projection"]), float(line))
+    raw_signal = calibrated_over - fair_over
+    # Most of the probability comes from the contemporaneous de-vigged market.
+    # The frozen player model may move it only 25% of the way toward its view.
+    probability_over = max(0.02, min(0.98, fair_over * V27_MARKET_WEIGHT + calibrated_over * (1 - V27_MARKET_WEIGHT)))
+    probability_under = 1 - probability_over
+    if raw_signal >= MIN_V27_DIRECTIONAL_SIGNAL:
+        side, probability, selected_odds = "Over", probability_over, over_odds
+    elif raw_signal <= -MIN_V27_DIRECTIONAL_SIGNAL:
+        side, probability, selected_odds = "Under", probability_under, under_odds
+    else:
+        side = "Over" if raw_signal >= 0 else "Under"
+        probability = probability_over if side == "Over" else probability_under
+        selected_odds = over_odds if side == "Over" else under_odds
+    ev = expected_value(probability, selected_odds)
+    if ev is None:
+        return None
+    direction_is_clear = abs(raw_signal) >= MIN_V27_DIRECTIONAL_SIGNAL
+    candidate = bool(direction_is_clear and ev >= MIN_V27_CANDIDATE_EV)
+    reasons: list[str] = []
+    if not direction_is_clear:
+        reasons.append("Continuously calibrated player signal is within eight points of the de-vigged market; no bet.")
+    if ev < MIN_V27_CANDIDATE_EV:
+        reasons.append("The market-anchored probability does not clear the 5% expected-value threshold.")
+    return {
+        **assessment,
+        "model_version": "mlb-continuous-market-anchored-ev-v2.7",
+        "fair_probability_over": round(fair_over * 100, 1),
+        "raw_projection_probability_over": round(raw_over * 100, 1),
+        "projection_probability_over": round(calibrated_over * 100, 1),
+        "raw_projection_market_signal": round(raw_signal * 100, 2),
+        "market_anchor_weight": round(V27_MARKET_WEIGHT * 100, 1),
+        "probability_over": round(probability_over * 100, 1),
+        "probability_under": round(probability_under * 100, 1),
+        "selected_side": side,
+        "selected_probability": round(probability * 100, 1),
+        "selected_odds": number(selected_odds),
+        "expected_value": round(ev, 4),
+        "edge_percent": round(ev * 100, 2),
+        "candidate": candidate,
+        "reasons": reasons + ["Continuous calibration is frozen before the test period and the final probability is 75% market anchored. This is a shadow model."],
     }
