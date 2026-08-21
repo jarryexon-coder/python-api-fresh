@@ -585,6 +585,58 @@ def snapshot_mlb_pregame_context():
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_context", "taken_at": taken_at, "events_checked": len(events), "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored timestamped MLB pregame context. No prediction or live-model change was made."})
 
 
+@prediction_ledger_bp.post("/snapshots/mlb/grade-market-consensus")
+def grade_mlb_market_consensus():
+    """Attach verified final results to forward MLB consensus observations."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat())
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    store = _store()
+    if store:
+        rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots").where("record_type", "==", "pregame_market_consensus").stream()]
+    else:
+        rows = list(_memory_backtests.values())
+    rows = [row for row in rows if row.get("consensus_method") == "median_devig_per_book_v2" and row.get("game_date") == date and not row.get("settled_at")]
+    game_cache: dict[str, tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]] = {}
+    checked = settled = pending = skipped = 0
+    errors: list[str] = []
+    for row in rows:
+        checked += 1
+        game_label = str(row.get("game") or "")
+        if game_label not in game_cache:
+            teams = [team.strip() for team in game_label.split("@")]
+            if len(teams) != 2:
+                game_cache[game_label] = (None, {})
+            else:
+                try:
+                    game = _mlb_game_for_event(date, {"away_team": teams[0], "home_team": teams[1]})
+                    stats = _mlb_game_stats(game.get("id")) if game and "final" in str(game.get("status") or "").lower() else {}
+                    game_cache[game_label] = (game, stats)
+                except (requests.RequestException, RuntimeError) as error:
+                    errors.append(f"{game_label}: {error}")
+                    game_cache[game_label] = (None, {})
+        game, stats = game_cache[game_label]
+        if not game or not stats:
+            pending += 1
+            continue
+        market_key = str(row.get("market_key") or "")
+        actual = stats.get(_name_key(row.get("player")), {}).get(MLB_BACKTEST_MARKETS.get(market_key, ("", ""))[1])
+        line = _number(row.get("line"))
+        if actual is None or line is None:
+            skipped += 1
+            continue
+        outcome = "push" if actual == line else "over" if actual > line else "under"
+        update = {"actual_value": actual, "outcome": outcome, "settled_at": _now(), "result_source": "BallDontLie MLB final game stats"}
+        if store:
+            store.collection("prediction_market_snapshots").document(str(row.get("id"))).set(update, merge=True)
+        else:
+            _memory_backtests[str(row.get("id"))] = {**row, **update}
+        settled += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "date": date, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached verified final results to forward consensus observations. No live prediction change was made."})
+
+
 @prediction_ledger_bp.post("/snapshots/mlb/historical-market-consensus")
 def snapshot_historical_mlb_market_consensus():
     """Backfill verified, point-in-time historical consensus records for research.
