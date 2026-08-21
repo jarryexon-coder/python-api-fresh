@@ -15,6 +15,8 @@ from typing import Any
 import requests
 from flask import Blueprint, jsonify, request
 
+from api.mlb_model_v2 import evaluate_prop as evaluate_mlb_v2
+
 
 live_props_bp = Blueprint("live_props", __name__, url_prefix="/api")
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -98,7 +100,7 @@ def _mlb_projections() -> dict[str, dict[str, float]]:
             "batter_rbis": per_game("batting_rbi"), "batter_home_runs": per_game("batting_hr"),
             "batter_total_bases": per_game("batting_tb"), "pitcher_strikeouts": per_game("pitching_k"),
         }
-        result[_name_key(name)] = {metric: value for metric, value in values.items() if value is not None}
+        result[_name_key(name)] = {**{metric: value for metric, value in values.items() if value is not None}, "_sample_games": games}
     _projection_cache["mlb"] = (time.time(), result)
     return result
 
@@ -157,7 +159,7 @@ def _projections(sport: str) -> tuple[dict[str, dict[str, float]], str | None]:
     return {}, None
 
 
-def _rows(sport: str) -> dict[str, Any]:
+def _rows(sport: str, model: str = "default") -> dict[str, Any]:
     key = _key()
     if not key:
         raise RuntimeError("THE_ODDS_API_KEY is not configured in Railway Variables.")
@@ -231,6 +233,15 @@ def _rows(sport: str) -> dict[str, Any]:
                         continue
                     projection = projections.get(_name_key(player), {}).get(market_key)
                     edge = round(((projection - line) / line) * 100, 1) if projection is not None and line else None
+                    v2 = evaluate_mlb_v2(
+                        season_rate=projection,
+                        line=line,
+                        over_odds=prices["over"],
+                        under_odds=prices["under"],
+                        sample_games=projections.get(_name_key(player), {}).get("_sample_games"),
+                    ) if sport == "mlb" and projection is not None else None
+                    displayed_projection = v2["projection"] if model == "mlb-v2" and v2 else projection
+                    displayed_edge = v2["edge_percent"] if model == "mlb-v2" and v2 else edge
                     result.append({
                         "id": f"{event_id}:{bookmaker.get('key', 'book')}:{market_key}:{player}:{line}",
                         "player": player,
@@ -238,10 +249,10 @@ def _rows(sport: str) -> dict[str, Any]:
                         "market": _market_label(market_key),
                         "market_key": market_key,
                         "line": line,
-                        "projection": projection,
-                        "projection_available": projection is not None,
-                        "projection_source": projection_source if projection is not None else "No matching current projection available",
-                        "edge": edge,
+                        "projection": displayed_projection,
+                        "projection_available": displayed_projection is not None,
+                        "projection_source": ("MLB probability/EV model v2 (shadow)" if model == "mlb-v2" and v2 else projection_source if projection is not None else "No matching current projection available"),
+                        "edge": displayed_edge,
                         "over_odds": prices["over"],
                         "under_odds": prices["under"],
                         "odds": prices["over"],
@@ -251,6 +262,8 @@ def _rows(sport: str) -> dict[str, Any]:
                         "bookmaker": bookmaker_name,
                         "provider_updated_at": bookmaker.get("last_update") or event.get("commence_time"),
                         "is_real_data": True,
+                        "model_v2": v2,
+                        "model_version": v2["model_version"] if model == "mlb-v2" and v2 else "mlb-season-rate-v1" if sport == "mlb" else None,
                     })
             # One sportsbook per event keeps the request inexpensive and avoids
             # displaying duplicate versions of the same current line.
@@ -261,7 +274,7 @@ def _rows(sport: str) -> dict[str, Any]:
         "props": result,
         "count": len(result),
         "sport": sport,
-        "source": f"The Odds API live player props + {projection_source}" if projection_source else "The Odds API live player props",
+        "source": "The Odds API live player props + MLB model v2 shadow evaluation" if sport == "mlb" and model == "mlb-v2" else f"The Odds API live player props + {projection_source}" if projection_source else "The Odds API live player props",
         "is_real_data": True,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "cache_ttl_seconds": _CACHE_SECONDS,
@@ -273,14 +286,18 @@ def live_props():
     sport = request.args.get("sport", "nba").lower()
     if sport not in SPORT_KEYS:
         return jsonify({"success": False, "error": "sport must be nba, nfl, or mlb"}), 400
+    model = request.args.get("model", "default").lower()
+    if model not in {"default", "mlb-v2"} or (model == "mlb-v2" and sport != "mlb"):
+        return jsonify({"success": False, "error": "model must be default, or mlb-v2 for MLB."}), 400
     force = request.args.get("force", "").lower() in {"1", "true", "yes"}
-    cached = _cache.get(sport)
+    cache_key = f"{sport}:{model}"
+    cached = _cache.get(cache_key)
     if not force and cached and time.time() - cached[0] < _CACHE_SECONDS:
         response = {**cached[1], "cached": True}
         return jsonify(response)
     try:
-        response = _rows(sport)
-        _cache[sport] = (time.time(), response)
+        response = _rows(sport, model)
+        _cache[cache_key] = (time.time(), response)
         return jsonify({**response, "cached": False})
     except RuntimeError as error:
         return jsonify({"success": False, "error": str(error), "data": [], "props": []}), 503
