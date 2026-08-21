@@ -595,6 +595,11 @@ def historical_mlb_backtest():
         except (requests.RequestException, RuntimeError) as error:
             errors.append(f"{event_id}: {error}")
             continue
+        # V2.3 needs a genuine two-sided price.  Historical feeds occasionally
+        # expose only one side at a bookmaker, so scan later books until the
+        # first complete pair for each player/line instead of treating the
+        # first bookmaker as authoritative.
+        v23_complete_pairs: set[tuple[str, str, float]] = set()
         for bookmaker in historical.get("bookmakers", []) if isinstance(historical, dict) else []:
             if not isinstance(bookmaker, dict):
                 continue
@@ -611,12 +616,20 @@ def historical_mlb_backtest():
                     if player and line is not None and side in {"over", "under"}:
                         pairs.setdefault((player, line), {"over": None, "under": None})[side] = _number(outcome.get("price"))
                 for (player, line), prices in pairs.items():
+                    pair_identity = (key, _name_key(player), line)
+                    if model == "v2.3":
+                        if prices.get("over") is None or prices.get("under") is None:
+                            continue
+                        if pair_identity in v23_complete_pairs:
+                            continue
                     actual_row = actuals.get(_name_key(player), {})
                     projection, sample_games = _mlb_historical_projection(player, key, date, actual_row.get("_player_id"))
                     actual = actual_row.get(MLB_BACKTEST_MARKETS[key][1])
                     if projection is None or actual is None:
                         skipped += 1
                         continue
+                    if model == "v2.3":
+                        v23_complete_pairs.add(pair_identity)
                     v2_version = "mlb-probability-ev-v2.1" if model == "v2.1" else "mlb-probability-ev-v2"
                     calibrated_probability = _v22_over_probability(v22_profile, key, line, projection) if v22_profile else None
                     relative_residual = _v23_residual(v23_profile, key, line, projection) if v23_profile else None
@@ -631,7 +644,8 @@ def historical_mlb_backtest():
                     outcome = "push" if actual == line else "won" if (side == "Over" and actual > line) or (side == "Under" and actual < line) else "lost"
                     _backtest_store({"id": record_id, "isolation": "historical_backtest", "eligible_for_live_calibration": False, "sport": "mlb", "event_id": event_id, "game": f"{event.get('away_team')} @ {event.get('home_team')}", "player": player, "market": MLB_BACKTEST_MARKETS[key][0], "market_key": key, "line": line, "projection": stored_projection, "side": side, "odds": prices.get(side.lower()), "over_odds": prices.get("over"), "under_odds": prices.get("under"), "actual_value": actual, "outcome": outcome, "snapshot": snapshot, "game_date": date, "model_version": model_version, "model_probability": model_output.get("selected_probability") if model_output else None, "expected_value": model_output.get("expected_value") if model_output else None, "candidate": model_output.get("candidate") if model_output else None, "line_source": "The Odds API historical event snapshot", "result_source": "BallDontLie MLB final game stats", "created_at": _now()})
                     imported += 1
-            break  # one bookmaker avoids duplicate line versions
+            if model != "v2.3":
+                break  # one bookmaker avoids duplicate line versions
     return jsonify({"success": True, "preview": False, "isolated": True, "eligible_for_live_calibration": False, "date": date, "snapshot": snapshot, "events": preview, "imported": imported, "skipped": skipped, "errors": errors[:10], "message": "Backtest records are isolated from live calibration. Review their performance before promoting a validated model version."})
 
 
