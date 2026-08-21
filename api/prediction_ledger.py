@@ -358,6 +358,30 @@ def historical_mlb_backtest():
     return jsonify({"success": True, "preview": False, "isolated": True, "eligible_for_live_calibration": False, "date": date, "snapshot": snapshot, "events": preview, "imported": imported, "skipped": skipped, "errors": errors[:10], "message": "Backtest records are isolated from live calibration. Review their performance before promoting a validated model version."})
 
 
+@prediction_ledger_bp.get("/backtest/mlb/summary")
+def historical_mlb_backtest_summary():
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    store = _store()
+    if store:
+        records = [snapshot.to_dict() for snapshot in store.collection("prediction_backtest_ledger").where("sport", "==", "mlb").limit(1500).stream()]
+    else:
+        records = list(_memory_backtests.values())
+    records = [record for record in records if record.get("isolation") == "historical_backtest" and record.get("outcome") in {"won", "lost", "push"}]
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        grouped[str(record.get("market") or "Other")].append(record)
+
+    def result(items: list[dict[str, Any]]) -> dict[str, Any]:
+        wins = sum(item.get("outcome") == "won" for item in items)
+        losses = sum(item.get("outcome") == "lost" for item in items)
+        pushes = sum(item.get("outcome") == "push" for item in items)
+        decided = wins + losses
+        return {"samples": len(items), "wins": wins, "losses": losses, "pushes": pushes, "hit_rate": round(wins / decided * 100, 1) if decided else None}
+
+    return jsonify({"success": True, "isolated": True, "eligible_for_live_calibration": False, "overall": result(records), "markets": {market: result(items) for market, items in grouped.items()}, "message": "Historical backtest summary only. It is not live-model calibration."})
+
+
 def _normalise(item: Any) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
