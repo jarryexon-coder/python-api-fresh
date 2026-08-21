@@ -25,13 +25,14 @@ VALID_SPORTS = {"mlb", "nfl", "nba"}
 MIN_CALIBRATION_SAMPLE = 30
 _memory_ledger: dict[str, dict[str, Any]] = {}
 _memory_backtests: dict[str, dict[str, Any]] = {}
+_mlb_game_dates_cache: dict[int, dict[str, str]] = {}
 MLB_BACKTEST_MARKETS = {
-    "batter_hits": ("Hits", "batting_h"),
-    "batter_runs_scored": ("Runs Scored", "batting_r"),
-    "batter_rbis": ("RBIs", "batting_rbi"),
-    "batter_home_runs": ("Home Runs", "batting_hr"),
-    "batter_total_bases": ("Total Bases", "batting_tb"),
-    "pitcher_strikeouts": ("Strikeouts", "pitching_k"),
+    "batter_hits": ("Hits", "hits"),
+    "batter_runs_scored": ("Runs Scored", "runs"),
+    "batter_rbis": ("RBIs", "rbi"),
+    "batter_home_runs": ("Home Runs", "hr"),
+    "batter_total_bases": ("Total Bases", "total_bases"),
+    "pitcher_strikeouts": ("Strikeouts", "p_k"),
 }
 
 
@@ -224,6 +225,29 @@ def _mlb_game_stats(game_id: Any) -> dict[str, dict[str, float]]:
     return values
 
 
+def _mlb_season_game_dates(season: int) -> dict[str, str]:
+    """Map BDL game IDs to dates so backtest projections cannot leak future data."""
+    cached = _mlb_game_dates_cache.get(season)
+    if cached is not None:
+        return cached
+    result: dict[str, str] = {}
+    cursor: Any = None
+    for _ in range(35):
+        params: dict[str, Any] = {"seasons[]": season, "per_page": 100}
+        if cursor is not None:
+            params["cursor"] = cursor
+        payload = _bdl_mlb("games", params)
+        rows = payload.get("data", [])
+        for game in rows if isinstance(rows, list) else []:
+            if isinstance(game, dict) and game.get("id") and _iso_date(game.get("date")):
+                result[str(game["id"])] = _iso_date(game.get("date"))
+        cursor = payload.get("meta", {}).get("next_cursor") if isinstance(payload.get("meta"), dict) else None
+        if not cursor or not rows:
+            break
+    _mlb_game_dates_cache[season] = result
+    return result
+
+
 def _mlb_historical_projection(player_name: str, market_key: str, before_date: str) -> float | None:
     """Last-ten-game average using only BDL game rows dated before the event."""
     search = _bdl_mlb("players", {"search": player_name, "per_page": 10})
@@ -238,12 +262,13 @@ def _mlb_historical_projection(player_name: str, market_key: str, before_date: s
     season = int(before_date[:4])
     history = _bdl_mlb("stats", {"player_ids[]": exact["id"], "seasons[]": season, "per_page": 100})
     _, field = MLB_BACKTEST_MARKETS[market_key]
+    game_dates = _mlb_season_game_dates(season)
     previous: list[tuple[str, float]] = []
     for row in history.get("data", []):
         if not isinstance(row, dict):
             continue
         game = row.get("game") if isinstance(row.get("game"), dict) else {}
-        played_on = _iso_date(game.get("date") or row.get("date"))
+        played_on = _iso_date(game.get("date") or row.get("date")) or game_dates.get(str(row.get("game_id") or ""), "")
         value = _number(row.get(field))
         # A missing game date would allow future results into a historical model.
         if played_on and played_on < before_date and value is not None:
