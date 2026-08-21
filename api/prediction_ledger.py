@@ -474,7 +474,7 @@ def calibrate_mlb_v26():
     for record in sorted(raw_source, key=lambda item: str(item.get("snapshot") or "")):
         identity = (
             str(record.get("event_id") or ""),
-            _normalise_name(record.get("player")),
+            _name_key(record.get("player")),
             str(record.get("market_key") or "batter_hits"),
             str(record.get("line") or ""),
             str(record.get("game_date") or ""),
