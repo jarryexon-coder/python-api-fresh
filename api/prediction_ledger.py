@@ -212,7 +212,7 @@ def _mlb_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
-def _mlb_game_stats(game_id: Any) -> dict[str, dict[str, float]]:
+def _mlb_game_stats(game_id: Any) -> dict[str, dict[str, Any]]:
     payload = _bdl_mlb("stats", {"game_ids[]": game_id, "per_page": 100})
     values: dict[str, dict[str, float]] = {}
     for row in payload.get("data", []):
@@ -221,7 +221,7 @@ def _mlb_game_stats(game_id: Any) -> dict[str, dict[str, float]]:
         player = row.get("player") if isinstance(row.get("player"), dict) else {}
         name = player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")]))
         if name:
-            values[_name_key(name)] = {field: _number(row.get(field)) or 0 for _, field in MLB_BACKTEST_MARKETS.values()}
+            values[_name_key(name)] = {"_player_id": player.get("id"), **{field: _number(row.get(field)) or 0 for _, field in MLB_BACKTEST_MARKETS.values()}}
     return values
 
 
@@ -248,19 +248,22 @@ def _mlb_season_game_dates(season: int) -> dict[str, str]:
     return result
 
 
-def _mlb_historical_projection(player_name: str, market_key: str, before_date: str) -> float | None:
+def _mlb_historical_projection(player_name: str, market_key: str, before_date: str, player_id: Any = None) -> float | None:
     """Last-ten-game average using only BDL game rows dated before the event."""
-    search = _bdl_mlb("players", {"search": player_name, "per_page": 10})
-    players = search.get("data", [])
-    if not isinstance(players, list) or not players:
-        return None
-    def display_player_name(player: Any) -> str:
-        return str(player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")])) or "") if isinstance(player, dict) else ""
-    exact = next((player for player in players if _name_key(display_player_name(player)) == _name_key(player_name)), players[0])
-    if not isinstance(exact, dict) or not exact.get("id"):
-        return None
+    resolved_id = player_id
+    if not resolved_id:
+        search = _bdl_mlb("players", {"search": player_name, "per_page": 10})
+        players = search.get("data", [])
+        if not isinstance(players, list) or not players:
+            return None
+        def display_player_name(player: Any) -> str:
+            return str(player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")])) or "") if isinstance(player, dict) else ""
+        exact = next((player for player in players if _name_key(display_player_name(player)) == _name_key(player_name)), players[0])
+        if not isinstance(exact, dict) or not exact.get("id"):
+            return None
+        resolved_id = exact["id"]
     season = int(before_date[:4])
-    history = _bdl_mlb("stats", {"player_ids[]": exact["id"], "seasons[]": season, "per_page": 100})
+    history = _bdl_mlb("stats", {"player_ids[]": resolved_id, "seasons[]": season, "per_page": 100})
     _, field = MLB_BACKTEST_MARKETS[market_key]
     game_dates = _mlb_season_game_dates(season)
     previous: list[tuple[str, float]] = []
@@ -369,8 +372,9 @@ def historical_mlb_backtest():
                     if player and line is not None and side in {"over", "under"}:
                         pairs.setdefault((player, line), {"over": None, "under": None})[side] = _number(outcome.get("price"))
                 for (player, line), prices in pairs.items():
-                    projection = _mlb_historical_projection(player, key, date)
-                    actual = actuals.get(_name_key(player), {}).get(MLB_BACKTEST_MARKETS[key][1])
+                    actual_row = actuals.get(_name_key(player), {})
+                    projection = _mlb_historical_projection(player, key, date, actual_row.get("_player_id"))
+                    actual = actual_row.get(MLB_BACKTEST_MARKETS[key][1])
                     if projection is None or actual is None:
                         skipped += 1
                         continue
