@@ -20,6 +20,8 @@ from firebase_admin import firestore
 from flask import Blueprint, g, jsonify, request
 import requests
 
+from api.mlb_model_v2 import evaluate_prop as evaluate_mlb_v2
+
 
 prediction_ledger_bp = Blueprint("prediction_ledger", __name__, url_prefix="/api/prediction-ledger")
 VALID_SPORTS = {"mlb", "nfl", "nba"}
@@ -317,13 +319,13 @@ def _backtest_store(record: dict[str, Any]) -> None:
         _memory_backtests[record["id"]] = record
 
 
-def _mlb_backtest_records() -> list[dict[str, Any]]:
+def _mlb_backtest_records(model_version: str | None = None) -> list[dict[str, Any]]:
     store = _store()
     if store:
         records = [snapshot.to_dict() for snapshot in store.collection("prediction_backtest_ledger").where("sport", "==", "mlb").limit(1500).stream()]
     else:
         records = list(_memory_backtests.values())
-    return [record for record in records if record.get("isolation") == "historical_backtest" and record.get("outcome") in {"won", "lost", "push"}]
+    return [record for record in records if record.get("isolation") == "historical_backtest" and record.get("outcome") in {"won", "lost", "push"} and (model_version is None or record.get("model_version") == model_version)]
 
 
 def _american_profit(odds: Any, outcome: str) -> float | None:
@@ -366,8 +368,10 @@ def _backtest_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _mlb_backtest_evaluation() -> dict[str, Any]:
-    records = _mlb_backtest_records()
+def _mlb_backtest_evaluation(model_version: str = "mlb-last10-pregame-v1") -> dict[str, Any]:
+    all_records = _mlb_backtest_records(model_version)
+    candidate_only = model_version == "mlb-probability-ev-v2"
+    records = [record for record in all_records if record.get("candidate") is True] if candidate_only else all_records
     ordered_dates = sorted({str(record.get("game_date") or "") for record in records if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(record.get("game_date") or ""))})
     holdout_dates = set(ordered_dates[-max(1, round(len(ordered_dates) * 0.2)):]) if ordered_dates else set()
     holdout = [record for record in records if record.get("game_date") in holdout_dates]
@@ -395,7 +399,8 @@ def _mlb_backtest_evaluation() -> dict[str, Any]:
     model_versions = sorted({str(record.get("model_version") or "unknown") for record in records})
     return {
         "success": True, "isolated": True, "eligible_for_live_calibration": False,
-        "model_versions": model_versions, "overall": overall,
+        "model_versions": model_versions, "evaluated_model_version": model_version,
+        "evaluated_candidates_only": candidate_only, "all_evaluated_props": len(all_records), "candidate_props": len(records), "overall": overall,
         "training": _backtest_metrics(training), "holdout": {**holdout_metrics, "dates": sorted(holdout_dates)},
         "by_side": side_metrics,
         "by_market": {market: _backtest_metrics(items) for market, items in by_market.items()},
@@ -422,12 +427,13 @@ def historical_mlb_backtest():
     snapshot = str(request.args.get("snapshot") or f"{date}T15:00:00Z")
     requested_markets = [value.strip() for value in str(request.args.get("markets") or "batter_hits").split(",") if value.strip()]
     markets = [market for market in requested_markets if market in MLB_BACKTEST_MARKETS]
+    model = str(request.args.get("model") or "v1").lower()
     try:
         max_events = max(1, min(int(request.args.get("max_events", 1)), 3))
     except ValueError:
         max_events = 1
     commit = str(request.args.get("commit") or "false").lower() == "true"
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not markets:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not markets or model not in {"v1", "v2"}:
         return jsonify({"error": "Provide date=YYYY-MM-DD and one or more supported MLB markets."}), 400
     if not snapshot.startswith(f"{date}T"):
         return jsonify({"error": "snapshot must be a pregame UTC timestamp on the same date as date (for example, 2026-08-14T13:00:00Z)."}), 400
@@ -439,7 +445,7 @@ def historical_mlb_backtest():
         return jsonify({"error": f"Historical event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
     preview = [{"event_id": event.get("id"), "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time")} for event in events]
     if not commit:
-        return jsonify({"success": True, "preview": True, "date": date, "snapshot": snapshot, "events": preview, "markets": markets, "estimated_historical_prop_credits": len(events) * len(markets) * 10, "message": "Review the event list and cost estimate, then rerun with commit=true to create isolated backtest records."})
+        return jsonify({"success": True, "preview": True, "model": model, "date": date, "snapshot": snapshot, "events": preview, "markets": markets, "estimated_historical_prop_credits": len(events) * len(markets) * 10, "message": "Review the event list and cost estimate, then rerun with commit=true to create isolated backtest records."})
 
     imported = skipped = 0
     errors: list[str] = []
@@ -479,10 +485,16 @@ def historical_mlb_backtest():
                     if projection is None or actual is None:
                         skipped += 1
                         continue
-                    side = "Over" if projection >= line else "Under"
-                    record_id = hashlib.sha256(f"mlb-backtest|{event_id}|{player}|{key}|{line}|{snapshot}".encode()).hexdigest()[:32]
+                    model_output = evaluate_mlb_v2(season_rate=projection, line=line, over_odds=prices.get("over"), under_odds=prices.get("under")) if model == "v2" else None
+                    if model == "v2" and not model_output:
+                        skipped += 1
+                        continue
+                    side = str(model_output["selected_side"]) if model_output else "Over" if projection >= line else "Under"
+                    model_version = str(model_output["model_version"]) if model_output else "mlb-last10-pregame-v1"
+                    stored_projection = float(model_output["projection"]) if model_output else projection
+                    record_id = hashlib.sha256(f"mlb-backtest|{model_version}|{event_id}|{player}|{key}|{line}|{snapshot}".encode()).hexdigest()[:32]
                     outcome = "push" if actual == line else "won" if (side == "Over" and actual > line) or (side == "Under" and actual < line) else "lost"
-                    _backtest_store({"id": record_id, "isolation": "historical_backtest", "eligible_for_live_calibration": False, "sport": "mlb", "event_id": event_id, "game": f"{event.get('away_team')} @ {event.get('home_team')}", "player": player, "market": MLB_BACKTEST_MARKETS[key][0], "market_key": key, "line": line, "projection": projection, "side": side, "odds": prices.get(side.lower()), "actual_value": actual, "outcome": outcome, "snapshot": snapshot, "game_date": date, "model_version": "mlb-last10-pregame-v1", "line_source": "The Odds API historical event snapshot", "result_source": "BallDontLie MLB final game stats", "created_at": _now()})
+                    _backtest_store({"id": record_id, "isolation": "historical_backtest", "eligible_for_live_calibration": False, "sport": "mlb", "event_id": event_id, "game": f"{event.get('away_team')} @ {event.get('home_team')}", "player": player, "market": MLB_BACKTEST_MARKETS[key][0], "market_key": key, "line": line, "projection": stored_projection, "side": side, "odds": prices.get(side.lower()), "over_odds": prices.get("over"), "under_odds": prices.get("under"), "actual_value": actual, "outcome": outcome, "snapshot": snapshot, "game_date": date, "model_version": model_version, "model_probability": model_output.get("selected_probability") if model_output else None, "expected_value": model_output.get("expected_value") if model_output else None, "candidate": model_output.get("candidate") if model_output else None, "line_source": "The Odds API historical event snapshot", "result_source": "BallDontLie MLB final game stats", "created_at": _now()})
                     imported += 1
             break  # one bookmaker avoids duplicate line versions
     return jsonify({"success": True, "preview": False, "isolated": True, "eligible_for_live_calibration": False, "date": date, "snapshot": snapshot, "events": preview, "imported": imported, "skipped": skipped, "errors": errors[:10], "message": "Backtest records are isolated from live calibration. Review their performance before promoting a validated model version."})
@@ -492,12 +504,11 @@ def historical_mlb_backtest():
 def historical_mlb_backtest_summary():
     if not _import_authorized():
         return jsonify({"error": "A valid import key or administrator session is required."}), 403
-    store = _store()
-    if store:
-        records = [snapshot.to_dict() for snapshot in store.collection("prediction_backtest_ledger").where("sport", "==", "mlb").limit(1500).stream()]
-    else:
-        records = list(_memory_backtests.values())
-    records = [record for record in records if record.get("isolation") == "historical_backtest" and record.get("outcome") in {"won", "lost", "push"}]
+    model = str(request.args.get("model") or "v1").lower()
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2"}
+    if model not in versions:
+        return jsonify({"error": "model must be v1 or v2"}), 400
+    records = _mlb_backtest_records(versions[model])
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         grouped[str(record.get("market") or "Other")].append(record)
@@ -509,7 +520,7 @@ def historical_mlb_backtest_summary():
         decided = wins + losses
         return {"samples": len(items), "wins": wins, "losses": losses, "pushes": pushes, "hit_rate": round(wins / decided * 100, 1) if decided else None}
 
-    return jsonify({"success": True, "isolated": True, "eligible_for_live_calibration": False, "overall": result(records), "markets": {market: result(items) for market, items in grouped.items()}, "message": "Historical backtest summary only. It is not live-model calibration."})
+    return jsonify({"success": True, "isolated": True, "model": model, "eligible_for_live_calibration": False, "overall": result(records), "markets": {market: result(items) for market, items in grouped.items()}, "message": "Historical backtest summary only. It is not live-model calibration."})
 
 
 @prediction_ledger_bp.get("/backtest/mlb/evaluation")
@@ -517,7 +528,11 @@ def historical_mlb_backtest_evaluation():
     """Evaluate the isolated model with odds-aware, chronological safeguards."""
     if not _import_authorized():
         return jsonify({"error": "A valid import key or administrator session is required."}), 403
-    return jsonify(_mlb_backtest_evaluation())
+    model = str(request.args.get("model") or "v1").lower()
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2"}
+    if model not in versions:
+        return jsonify({"error": "model must be v1 or v2"}), 400
+    return jsonify({**_mlb_backtest_evaluation(versions[model]), "model": model})
 
 
 @prediction_ledger_bp.post("/backtest/mlb/promotion")
@@ -525,16 +540,20 @@ def promote_historical_mlb_model():
     """Record a reviewed backtest decision; it never switches live logic itself."""
     if not _import_authorized():
         return jsonify({"error": "A valid import key or administrator session is required."}), 403
-    evaluation = _mlb_backtest_evaluation()
+    model = str(request.args.get("model") or "v1").lower()
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2"}
+    if model not in versions:
+        return jsonify({"error": "model must be v1 or v2"}), 400
+    evaluation = _mlb_backtest_evaluation(versions[model])
     if not evaluation["promotion_gate"]["eligible_for_manual_review"]:
         return jsonify({"success": False, "error": "Promotion gate is not met.", "evaluation": evaluation}), 409
     payload = request.get_json(silent=True) or {}
     if payload.get("approve") is not True:
         return jsonify({"success": True, "approved": False, "evaluation": evaluation, "message": "Gate is eligible. Re-submit with JSON {\"approve\": true} after manual review."})
-    record = {"sport": "mlb", "model_versions": evaluation["model_versions"], "status": "approved_for_manual_live_integration", "approved_at": _now(), "evaluation": evaluation}
+    record = {"sport": "mlb", "model": model, "model_versions": evaluation["model_versions"], "status": "approved_for_manual_live_integration", "approved_at": _now(), "evaluation": evaluation}
     store = _store()
     if store:
-        store.collection("prediction_model_promotions").document("mlb").set(record)
+        store.collection("prediction_model_promotions").document(f"mlb-{model}").set(record)
     return jsonify({"success": True, "approved": True, "automatic_live_promotion": False, "message": "Decision recorded. Live integration remains a separate reviewed deployment."})
 
 

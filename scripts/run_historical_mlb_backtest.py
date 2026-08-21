@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("--date", required=True, help="Completed game date (YYYY-MM-DD).")
     parser.add_argument("--snapshot", help="Pregame historical odds snapshot in ISO-8601 UTC.")
     parser.add_argument("--markets", default="batter_hits", help="Comma-separated The Odds API market keys.")
+    parser.add_argument("--model", choices=("v1", "v2"), default="v1", help="Historical model version to import.")
     parser.add_argument("--max-events", type=int, default=1, choices=range(1, 4), metavar="1..3")
     parser.add_argument("--preview", action="store_true", help="List events and estimated credits without writing records.")
     args = parser.parse_args()
@@ -46,6 +47,7 @@ def main() -> int:
         "date": args.date,
         "snapshot": args.snapshot or f"{args.date}T15:00:00Z",
         "markets": args.markets,
+        "model": args.model,
         "max_events": str(args.max_events),
         "commit": "false" if args.preview else "true",
     }
