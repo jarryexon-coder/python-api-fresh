@@ -543,8 +543,8 @@ def calibrate_mlb_v27():
         identity = (str(record.get("event_id") or ""), _name_key(record.get("player")), str(record.get("market_key") or "batter_hits"), str(record.get("line") or ""), str(record.get("game_date") or ""))
         deduplicated.setdefault(identity, record)
     source = list(deduplicated.values())
-    if len(source) < 250:
-        return jsonify({"error": "At least 250 settled V1 records are required before calibration.", "records": len(source)}), 409
+    if len(source) < 200:
+        return jsonify({"error": "At least 200 settled V1 records are required before calibration.", "records": len(source)}), 409
     observations: list[tuple[float, int]] = []
     for record in source:
         raw_probability = poisson_over_probability(float(record["projection"]), float(record["line"]))
