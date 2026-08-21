@@ -13,6 +13,8 @@ SHRINK_TO_MARKET = 0.30
 MIN_CANDIDATE_EV = 0.04  # 4 cents expected profit per 1 unit risked.
 MIN_CANDIDATE_PROBABILITY = 0.54
 MIN_V23_CANDIDATE_EV = 0.06
+MIN_V24_CANDIDATE_EV = 0.05
+MAX_V24_MARKET_ADJUSTMENT = 0.08
 
 
 def number(value: Any) -> float | None:
@@ -222,4 +224,66 @@ def evaluate_market_relative_prop(
         "edge_percent": round(ev * 100, 2),
         "candidate": candidate,
         "reasons": (["No side clears the 6% de-vigged expected-value threshold; no bet."] if not candidate else []) + ["Probability uses today’s de-vigged market plus a frozen, capped historical residual. This is a shadow model."],
+    }
+
+
+def evaluate_projection_relative_prop(
+    *,
+    season_rate: Any,
+    line: Any,
+    over_odds: Any,
+    under_odds: Any,
+    sample_games: Any = None,
+) -> dict[str, Any] | None:
+    """V2.4: compare a player's pregame projection with today's fair market.
+
+    Unlike V2.2/V2.3, there is no global historical preference for one side.
+    The only directional input is the individual player's point-in-time
+    projection.  Its influence is capped and weighted by available games;
+    insufficient disagreement with the market returns a transparent no-bet.
+    """
+    assessment = evaluate_prop(
+        season_rate=season_rate,
+        line=line,
+        over_odds=over_odds,
+        under_odds=under_odds,
+        sample_games=sample_games,
+        model_version="mlb-projection-relative-ev-v2.4",
+    )
+    fair_over = fair_over_probability(over_odds, under_odds)
+    if assessment is None or fair_over is None:
+        return None
+    model_over = poisson_over_probability(float(assessment["projection"]), float(line))
+    games = max(0, int(assessment["sample_games"]))
+    # The player-specific signal receives no more than a 60% weight and is
+    # capped at eight percentage points from the fair market probability.
+    signal_weight = min(0.60, max(0.20, games / 30))
+    raw_difference = model_over - fair_over
+    adjustment = max(-MAX_V24_MARKET_ADJUSTMENT, min(MAX_V24_MARKET_ADJUSTMENT, raw_difference * signal_weight))
+    probability_over = max(0.02, min(0.98, fair_over + adjustment))
+    probability_under = 1 - probability_over
+    choices = [
+        ("Over", probability_over, over_odds, expected_value(probability_over, over_odds)),
+        ("Under", probability_under, under_odds, expected_value(probability_under, under_odds)),
+    ]
+    choices = [choice for choice in choices if choice[3] is not None]
+    if not choices:
+        return None
+    side, probability, selected_odds, ev = max(choices, key=lambda choice: choice[3])
+    candidate = bool(ev >= MIN_V24_CANDIDATE_EV)
+    return {
+        **assessment,
+        "model_version": "mlb-projection-relative-ev-v2.4",
+        "fair_probability_over": round(fair_over * 100, 1),
+        "projection_probability_over": round(model_over * 100, 1),
+        "market_relative_adjustment": round(adjustment * 100, 2),
+        "probability_over": round(probability_over * 100, 1),
+        "probability_under": round(probability_under * 100, 1),
+        "selected_side": side,
+        "selected_probability": round(probability * 100, 1),
+        "selected_odds": number(selected_odds),
+        "expected_value": round(ev, 4),
+        "edge_percent": round(ev * 100, 2),
+        "candidate": candidate,
+        "reasons": (["No side clears the 5% player-specific expected-value threshold; no bet."] if not candidate else []) + ["Probability combines this player’s pregame projection with today’s de-vigged market. This is a shadow model."],
     }
