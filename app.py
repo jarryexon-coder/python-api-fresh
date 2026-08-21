@@ -1116,6 +1116,7 @@ def mobile_package_for_request():
         '/api/prediction-ledger/backtest/mlb/v2.3/calibrate',
         '/api/prediction-ledger/backtest/mlb/v2.6/calibrate',
         '/api/prediction-ledger/backtest/mlb/v2.7/calibrate',
+        '/api/prediction-ledger/snapshots/mlb/market-consensus',
     }:
         return None
     if any(path.startswith(prefix.rstrip('/')) for prefix in SUPERSTATS_PATHS):
