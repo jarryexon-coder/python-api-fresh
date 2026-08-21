@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from urllib.parse import urlencode
 
 
@@ -29,6 +30,12 @@ def main() -> int:
     if not secret:
         print(json.dumps({"success": False, "error": "PREDICTION_IMPORT_SECRET is not configured."}))
         return 2
+
+    # Executing a file from scripts/ does not automatically put the repository
+    # root on Python's import path.
+    repository_root = str(Path(__file__).resolve().parents[1])
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
 
     # Importing app initializes the production Firestore client, exactly as
     # Railway does for the API service.  Delay it until after --help parsing.
