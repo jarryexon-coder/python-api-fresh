@@ -330,6 +330,34 @@ def _current_mlb_props(event_id: str, markets: list[str]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _multi_book_prop_consensus(odds: dict[str, Any], markets: list[str]) -> tuple[dict[tuple[str, str, float], list[dict[str, Any]]], int]:
+    """Return complete over/under price pairs grouped across bookmakers."""
+    consensus: dict[tuple[str, str, float], list[dict[str, Any]]] = defaultdict(list)
+    for bookmaker in odds.get("bookmakers", []) if isinstance(odds, dict) else []:
+        if not isinstance(bookmaker, dict):
+            continue
+        book_name = str(bookmaker.get("title") or bookmaker.get("key") or "Sportsbook")
+        for market in bookmaker.get("markets", []):
+            if not isinstance(market, dict):
+                continue
+            market_key = str(market.get("key") or "")
+            if market_key not in markets:
+                continue
+            paired: dict[tuple[str, float], dict[str, float | None]] = {}
+            for outcome in market.get("outcomes", []):
+                if not isinstance(outcome, dict):
+                    continue
+                side = str(outcome.get("name") or "").lower()
+                player = str(outcome.get("description") or outcome.get("player") or "").strip()
+                line = _number(outcome.get("point"))
+                if player and line is not None and side in {"over", "under"}:
+                    paired.setdefault((player, line), {"over": None, "under": None})[side] = _number(outcome.get("price"))
+            for (player, line), prices in paired.items():
+                if prices.get("over") is not None and prices.get("under") is not None:
+                    consensus[(market_key, player, line)].append({"bookmaker": book_name, "over": prices["over"], "under": prices["under"]})
+    return consensus, sum(1 for books in consensus.values() if len(books) < 2)
+
+
 def _backtest_store(record: dict[str, Any]) -> None:
     store = _store()
     if store:
@@ -373,29 +401,8 @@ def snapshot_mlb_market_consensus():
         except requests.RequestException as error:
             errors.append(f"{event_id}: {error.response.status_code if error.response else 'request error'}")
             continue
-        consensus: dict[tuple[str, str, float], list[dict[str, Any]]] = defaultdict(list)
-        for bookmaker in odds.get("bookmakers", []) if isinstance(odds, dict) else []:
-            if not isinstance(bookmaker, dict):
-                continue
-            book_name = str(bookmaker.get("title") or bookmaker.get("key") or "Sportsbook")
-            for market in bookmaker.get("markets", []):
-                if not isinstance(market, dict):
-                    continue
-                market_key = str(market.get("key") or "")
-                if market_key not in markets:
-                    continue
-                paired: dict[tuple[str, float], dict[str, float | None]] = {}
-                for outcome in market.get("outcomes", []):
-                    if not isinstance(outcome, dict):
-                        continue
-                    side = str(outcome.get("name") or "").lower()
-                    player = str(outcome.get("description") or outcome.get("player") or "").strip()
-                    line = _number(outcome.get("point"))
-                    if player and line is not None and side in {"over", "under"}:
-                        paired.setdefault((player, line), {"over": None, "under": None})[side] = _number(outcome.get("price"))
-                for (player, line), prices in paired.items():
-                    if prices.get("over") is not None and prices.get("under") is not None:
-                        consensus[(market_key, player, line)].append({"bookmaker": book_name, "over": prices["over"], "under": prices["under"]})
+        consensus, incomplete_pairs = _multi_book_prop_consensus(odds, markets)
+        skipped += incomplete_pairs
         for (market_key, player, line), books in consensus.items():
             # A two-book minimum avoids treating a solitary/possibly stale book
             # as a market consensus.  Preserve the raw book count for audits.
@@ -423,6 +430,82 @@ def snapshot_mlb_market_consensus():
                 _memory_backtests[record["id"]] = record
             stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book pregame market observations. No prediction or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/mlb/historical-market-consensus")
+def snapshot_historical_mlb_market_consensus():
+    """Backfill verified, point-in-time historical consensus records for research.
+
+    These records are permanently marked historical and cannot be treated as
+    forward snapshots or used to alter live predictions automatically.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or "")
+    snapshot = str(request.args.get("snapshot") or f"{date}T13:00:00Z")
+    requested = [value.strip() for value in str(request.args.get("markets") or "batter_hits").split(",") if value.strip()]
+    markets = [market for market in requested if market in MLB_BACKTEST_MARKETS]
+    try:
+        max_events = min(3, max(1, int(request.args.get("max_events") or 3)))
+    except ValueError:
+        max_events = 3
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not snapshot.startswith(f"{date}T") or not markets:
+        return jsonify({"error": "Provide a completed date=YYYY-MM-DD, a same-day pregame snapshot, and supported MLB markets."}), 400
+    if date >= datetime.now(timezone.utc).date().isoformat():
+        return jsonify({"error": "Historical consensus imports require a completed past date."}), 400
+    try:
+        events = _historical_events(snapshot)[:max_events]
+    except requests.RequestException as error:
+        return jsonify({"error": f"Historical event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
+
+    stored = skipped = 0
+    errors: list[str] = []
+    store = _store()
+    for event in events:
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            continue
+        try:
+            game = _mlb_game_for_event(date, event)
+            if not game or "final" not in str(game.get("status") or "").lower():
+                skipped += 1
+                continue
+            actuals = _mlb_game_stats(game.get("id"))
+            odds = _historical_mlb_props(event_id, snapshot, markets)
+        except (requests.RequestException, RuntimeError) as error:
+            errors.append(f"{event_id}: {error}")
+            continue
+        consensus, incomplete_pairs = _multi_book_prop_consensus(odds, markets)
+        skipped += incomplete_pairs
+        for (market_key, player, line), books in consensus.items():
+            if len(books) < 2:
+                continue
+            actual = actuals.get(_name_key(player), {}).get(MLB_BACKTEST_MARKETS[market_key][1])
+            if actual is None:
+                skipped += 1
+                continue
+            over = float(median([float(book["over"]) for book in books]))
+            under = float(median([float(book["under"]) for book in books]))
+            fair_over = _fair_over_probability(over, under)
+            if fair_over is None:
+                skipped += 1
+                continue
+            record = {
+                "id": hashlib.sha256(f"mlb-historical-market-consensus|{snapshot}|{event_id}|{market_key}|{player}|{line}".encode()).hexdigest()[:32],
+                "sport": "mlb", "record_type": "historical_pregame_market_consensus", "isolation": "historical_backtest",
+                "eligible_for_live_calibration": False, "taken_at": snapshot, "snapshot": snapshot, "event_id": event_id,
+                "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time"),
+                "game_date": date, "player": player, "market_key": market_key, "market": MLB_BACKTEST_MARKETS[market_key][0],
+                "line": line, "over_odds": over, "under_odds": under, "fair_probability_over": round(fair_over * 100, 2),
+                "book_count": len(books), "bookmakers": [book["bookmaker"] for book in books], "actual_value": actual,
+                "source": "The Odds API historical multi-book player-prop snapshot; BallDontLie MLB final game stats",
+            }
+            if store:
+                store.collection("prediction_market_snapshots").document(record["id"]).set(record, merge=True)
+            else:
+                _memory_backtests[record["id"]] = record
+            stored += 1
+    return jsonify({"success": True, "isolated": True, "eligible_for_live_calibration": False, "record_type": "historical_pregame_market_consensus", "date": date, "snapshot": snapshot, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored verified historical multi-book consensus observations. These are research-only and do not change live predictions."})
 
 
 def _bucket(value: float, step: float) -> str:
