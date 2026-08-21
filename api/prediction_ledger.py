@@ -332,6 +332,8 @@ def historical_mlb_backtest():
     commit = str(request.args.get("commit") or "false").lower() == "true"
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not markets:
         return jsonify({"error": "Provide date=YYYY-MM-DD and one or more supported MLB markets."}), 400
+    if not snapshot.startswith(f"{date}T"):
+        return jsonify({"error": "snapshot must be a pregame UTC timestamp on the same date as date (for example, 2026-08-14T13:00:00Z)."}), 400
     if date >= datetime.now(timezone.utc).date().isoformat():
         return jsonify({"error": "Historical backtests require a completed past date."}), 400
     try:
