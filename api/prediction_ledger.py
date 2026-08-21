@@ -24,6 +24,15 @@ prediction_ledger_bp = Blueprint("prediction_ledger", __name__, url_prefix="/api
 VALID_SPORTS = {"mlb", "nfl", "nba"}
 MIN_CALIBRATION_SAMPLE = 30
 _memory_ledger: dict[str, dict[str, Any]] = {}
+_memory_backtests: dict[str, dict[str, Any]] = {}
+MLB_BACKTEST_MARKETS = {
+    "batter_hits": ("Hits", "batting_h"),
+    "batter_runs_scored": ("Runs Scored", "batting_r"),
+    "batter_rbis": ("RBIs", "batting_rbi"),
+    "batter_home_runs": ("Home Runs", "batting_hr"),
+    "batter_total_bases": ("Total Bases", "batting_tb"),
+    "pitcher_strikeouts": ("Strikeouts", "pitching_k"),
+}
 
 
 def _number(value: Any) -> float | None:
@@ -31,6 +40,10 @@ def _number(value: Any) -> float | None:
         return float(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _odds_key() -> str | None:
+    return os.getenv("THE_ODDS_API_KEY") or os.getenv("ODDS_API_KEY") or os.getenv("THEODDS_API_KEY")
 
 
 def _store():
@@ -163,6 +176,186 @@ def _tank_box_score(sport: str, row: dict[str, Any]) -> dict[str, dict[str, floa
             "total bases": _number(batting.get("TB", batting.get("totalBases"))) or 0, "strikeouts": _number(pitching.get("K", pitching.get("strikeouts"))) or 0,
         }
     return result
+
+
+def _bdl_mlb(path: str, params: dict[str, Any]) -> dict[str, Any]:
+    key = os.getenv("BALLDONTLIE_API_KEY")
+    if not key:
+        raise RuntimeError("BALLDONTLIE_API_KEY is not configured")
+    response = requests.get(f"https://api.balldontlie.io/mlb/v1/{path.lstrip('/')}", headers={"Authorization": key}, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _iso_date(value: Any) -> str:
+    return str(value or "")[:10]
+
+
+def _mlb_team_name(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("display_name") or value.get("full_name") or " ".join(filter(None, [value.get("location"), value.get("name")])) or value.get("name") or "")
+
+
+def _mlb_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    payload = _bdl_mlb("games", {"dates[]": date, "per_page": 100})
+    away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+    for game in payload.get("data", []):
+        if not isinstance(game, dict):
+            continue
+        away = _name_key(_mlb_team_name(game.get("away_team") or game.get("visitor_team")))
+        home = _name_key(_mlb_team_name(game.get("home_team")))
+        if away == away_key and home == home_key:
+            return game
+    return None
+
+
+def _mlb_game_stats(game_id: Any) -> dict[str, dict[str, float]]:
+    payload = _bdl_mlb("stats", {"game_ids[]": game_id, "per_page": 100})
+    values: dict[str, dict[str, float]] = {}
+    for row in payload.get("data", []):
+        if not isinstance(row, dict):
+            continue
+        player = row.get("player") if isinstance(row.get("player"), dict) else {}
+        name = player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")]))
+        if name:
+            values[_name_key(name)] = {field: _number(row.get(field)) or 0 for _, field in MLB_BACKTEST_MARKETS.values()}
+    return values
+
+
+def _mlb_historical_projection(player_name: str, market_key: str, before_date: str) -> float | None:
+    """Last-ten-game average using only BDL game rows dated before the event."""
+    search = _bdl_mlb("players", {"search": player_name, "per_page": 10})
+    players = search.get("data", [])
+    if not isinstance(players, list) or not players:
+        return None
+    def display_player_name(player: Any) -> str:
+        return str(player.get("full_name") or " ".join(filter(None, [player.get("first_name"), player.get("last_name")])) or "") if isinstance(player, dict) else ""
+    exact = next((player for player in players if _name_key(display_player_name(player)) == _name_key(player_name)), players[0])
+    if not isinstance(exact, dict) or not exact.get("id"):
+        return None
+    season = int(before_date[:4])
+    history = _bdl_mlb("stats", {"player_ids[]": exact["id"], "seasons[]": season, "per_page": 100})
+    _, field = MLB_BACKTEST_MARKETS[market_key]
+    previous: list[tuple[str, float]] = []
+    for row in history.get("data", []):
+        if not isinstance(row, dict):
+            continue
+        game = row.get("game") if isinstance(row.get("game"), dict) else {}
+        played_on = _iso_date(game.get("date") or row.get("date"))
+        value = _number(row.get(field))
+        # A missing game date would allow future results into a historical model.
+        if played_on and played_on < before_date and value is not None:
+            previous.append((played_on, value))
+    recent = [value for _, value in sorted(previous, reverse=True)[:10]]
+    return round(sum(recent) / len(recent), 3) if len(recent) >= 5 else None
+
+
+def _historical_events(snapshot: str) -> list[dict[str, Any]]:
+    key = _odds_key()
+    if not key:
+        raise RuntimeError("THE_ODDS_API_KEY is not configured")
+    response = requests.get("https://api.the-odds-api.com/v4/historical/sports/baseball_mlb/events", params={"apiKey": key, "date": snapshot}, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", payload) if isinstance(payload, dict) else []
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+
+
+def _historical_mlb_props(event_id: str, snapshot: str, markets: list[str]) -> dict[str, Any]:
+    response = requests.get(
+        f"https://api.the-odds-api.com/v4/historical/sports/baseball_mlb/events/{event_id}/odds",
+        params={"apiKey": _odds_key(), "date": snapshot, "regions": "us", "markets": ",".join(markets), "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _backtest_store(record: dict[str, Any]) -> None:
+    store = _store()
+    if store:
+        store.collection("prediction_backtest_ledger").document(record["id"]).set(record, merge=True)
+    else:
+        _memory_backtests[record["id"]] = record
+
+
+@prediction_ledger_bp.post("/backtest/mlb")
+def historical_mlb_backtest():
+    """Import an isolated, point-in-time MLB backtest sample.
+
+    This endpoint is deliberately manual and preview-first because historical
+    player props are billed per event/market by the odds provider.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or "")
+    snapshot = str(request.args.get("snapshot") or f"{date}T15:00:00Z")
+    requested_markets = [value.strip() for value in str(request.args.get("markets") or "batter_hits").split(",") if value.strip()]
+    markets = [market for market in requested_markets if market in MLB_BACKTEST_MARKETS]
+    try:
+        max_events = max(1, min(int(request.args.get("max_events", 1)), 3))
+    except ValueError:
+        max_events = 1
+    commit = str(request.args.get("commit") or "false").lower() == "true"
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not markets:
+        return jsonify({"error": "Provide date=YYYY-MM-DD and one or more supported MLB markets."}), 400
+    if date >= datetime.now(timezone.utc).date().isoformat():
+        return jsonify({"error": "Historical backtests require a completed past date."}), 400
+    try:
+        events = _historical_events(snapshot)[:max_events]
+    except requests.RequestException as error:
+        return jsonify({"error": f"Historical event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
+    preview = [{"event_id": event.get("id"), "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time")} for event in events]
+    if not commit:
+        return jsonify({"success": True, "preview": True, "date": date, "snapshot": snapshot, "events": preview, "markets": markets, "estimated_historical_prop_credits": len(events) * len(markets) * 10, "message": "Review the event list and cost estimate, then rerun with commit=true to create isolated backtest records."})
+
+    imported = skipped = 0
+    errors: list[str] = []
+    for event in events:
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            continue
+        try:
+            game = _mlb_game_for_event(date, event)
+            if not game or "final" not in str(game.get("status") or "").lower():
+                skipped += 1
+                continue
+            actuals = _mlb_game_stats(game.get("id"))
+            historical = _historical_mlb_props(event_id, snapshot, markets)
+        except (requests.RequestException, RuntimeError) as error:
+            errors.append(f"{event_id}: {error}")
+            continue
+        for bookmaker in historical.get("bookmakers", []) if isinstance(historical, dict) else []:
+            if not isinstance(bookmaker, dict):
+                continue
+            for market in bookmaker.get("markets", []):
+                key = str(market.get("key") or "")
+                if key not in markets or not isinstance(market, dict):
+                    continue
+                pairs: dict[tuple[str, float], dict[str, float | None]] = {}
+                for outcome in market.get("outcomes", []):
+                    if not isinstance(outcome, dict):
+                        continue
+                    player, line = str(outcome.get("description") or "").strip(), _number(outcome.get("point"))
+                    side = str(outcome.get("name") or "").lower()
+                    if player and line is not None and side in {"over", "under"}:
+                        pairs.setdefault((player, line), {"over": None, "under": None})[side] = _number(outcome.get("price"))
+                for (player, line), prices in pairs.items():
+                    projection = _mlb_historical_projection(player, key, date)
+                    actual = actuals.get(_name_key(player), {}).get(MLB_BACKTEST_MARKETS[key][1])
+                    if projection is None or actual is None:
+                        skipped += 1
+                        continue
+                    side = "Over" if projection >= line else "Under"
+                    record_id = hashlib.sha256(f"mlb-backtest|{event_id}|{player}|{key}|{line}|{snapshot}".encode()).hexdigest()[:32]
+                    outcome = "push" if actual == line else "won" if (side == "Over" and actual > line) or (side == "Under" and actual < line) else "lost"
+                    _backtest_store({"id": record_id, "isolation": "historical_backtest", "eligible_for_live_calibration": False, "sport": "mlb", "event_id": event_id, "game": f"{event.get('away_team')} @ {event.get('home_team')}", "player": player, "market": MLB_BACKTEST_MARKETS[key][0], "market_key": key, "line": line, "projection": projection, "side": side, "odds": prices.get(side.lower()), "actual_value": actual, "outcome": outcome, "snapshot": snapshot, "game_date": date, "model_version": "mlb-last10-pregame-v1", "line_source": "The Odds API historical event snapshot", "result_source": "BallDontLie MLB final game stats", "created_at": _now()})
+                    imported += 1
+            break  # one bookmaker avoids duplicate line versions
+    return jsonify({"success": True, "preview": False, "isolated": True, "eligible_for_live_calibration": False, "date": date, "snapshot": snapshot, "events": preview, "imported": imported, "skipped": skipped, "errors": errors[:10], "message": "Backtest records are isolated from live calibration. Review their performance before promoting a validated model version."})
 
 
 def _normalise(item: Any) -> dict[str, Any] | None:
