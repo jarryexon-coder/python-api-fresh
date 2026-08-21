@@ -104,3 +104,49 @@ def evaluate_prop(
         "eligible_for_live_recommendation": False,
         "reasons": reasons,
     }
+
+
+def evaluate_calibrated_prop(
+    *,
+    season_rate: Any,
+    line: Any,
+    over_odds: Any,
+    under_odds: Any,
+    calibrated_over_probability: Any,
+    sample_games: Any = None,
+) -> dict[str, Any] | None:
+    """Score a prop using a probability calibrated from prior settled data."""
+    assessment = evaluate_prop(
+        season_rate=season_rate,
+        line=line,
+        over_odds=over_odds,
+        under_odds=under_odds,
+        sample_games=sample_games,
+        model_version="mlb-empirical-probability-ev-v2.2",
+    )
+    probability_over = number(calibrated_over_probability)
+    if assessment is None or probability_over is None or not 0 < probability_over < 1:
+        return None
+    probability_under = 1 - probability_over
+    choices = [
+        ("Over", probability_over, over_odds, expected_value(probability_over, over_odds)),
+        ("Under", probability_under, under_odds, expected_value(probability_under, under_odds)),
+    ]
+    choices = [choice for choice in choices if choice[3] is not None]
+    if not choices:
+        return None
+    side, probability, selected_odds, ev = max(choices, key=lambda choice: choice[3])
+    candidate = bool(ev >= MIN_CANDIDATE_EV and probability >= MIN_CANDIDATE_PROBABILITY)
+    return {
+        **assessment,
+        "model_version": "mlb-empirical-probability-ev-v2.2",
+        "probability_over": round(probability_over * 100, 1),
+        "probability_under": round(probability_under * 100, 1),
+        "selected_side": side,
+        "selected_probability": round(probability * 100, 1),
+        "selected_odds": number(selected_odds),
+        "expected_value": round(ev, 4),
+        "edge_percent": round(ev * 100, 2),
+        "candidate": candidate,
+        "reasons": (["Expected value or probability does not clear the conservative shadow-model threshold."] if not candidate else []) + ["Probability is calibrated from a frozen historical training window; lineup and pitcher context are not yet modeled."],
+    }
