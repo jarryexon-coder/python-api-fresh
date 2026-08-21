@@ -20,7 +20,7 @@ from firebase_admin import firestore
 from flask import Blueprint, g, jsonify, request
 import requests
 
-from api.mlb_model_v2 import american_to_decimal, evaluate_calibrated_prop, evaluate_directional_projection_prop, evaluate_market_relative_prop, evaluate_projection_relative_prop, evaluate_prop as evaluate_mlb_v2
+from api.mlb_model_v2 import american_to_decimal, evaluate_calibrated_prop, evaluate_directional_projection_prop, evaluate_market_relative_prop, evaluate_projection_relative_prop, evaluate_prop as evaluate_mlb_v2, poisson_over_probability
 
 
 prediction_ledger_bp = Blueprint("prediction_ledger", __name__, url_prefix="/api/prediction-ledger")
@@ -512,7 +512,23 @@ def _diagnostic_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
         "average_selected_probability": _mean(items, "model_probability"),
         "average_selected_odds": _mean(items, "odds"),
         "average_projection_minus_line": round(sum(gaps) / len(gaps), 3) if gaps else None,
+        "average_projection_market_signal": _mean_derived_signal(items),
     }
+
+
+def _projection_market_signal(record: dict[str, Any]) -> float | None:
+    """Recover the player-vs-fair-market signal from the immutable ledger."""
+    projection, line = _number(record.get("projection")), _number(record.get("line"))
+    fair_over = _fair_over_probability(record.get("over_odds"), record.get("under_odds"))
+    if projection is None or line is None or fair_over is None:
+        return None
+    return poisson_over_probability(projection, line) - fair_over
+
+
+def _mean_derived_signal(items: list[dict[str, Any]]) -> float | None:
+    signals = [_projection_market_signal(item) for item in items]
+    usable = [signal for signal in signals if signal is not None]
+    return round(sum(usable) / len(usable) * 100, 3) if usable else None
 
 
 def _mlb_backtest_diagnostics(model_version: str) -> dict[str, Any]:
@@ -523,6 +539,7 @@ def _mlb_backtest_diagnostics(model_version: str) -> dict[str, Any]:
     by_ev_band: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_gap_band: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_odds_band: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_projection_market_signal: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in candidates:
         by_side[str(record.get("side") or "Unknown")].append(record)
         ev = _number(record.get("expected_value"))
@@ -535,6 +552,9 @@ def _mlb_backtest_diagnostics(model_version: str) -> dict[str, Any]:
         odds = _number(record.get("odds"))
         odds_label = "Unknown" if odds is None else "≤ -200" if odds <= -200 else "-199 to -151" if odds <= -151 else "-150 to -111" if odds <= -111 else "-110 to +100" if odds <= 100 else "+101 or longer"
         by_odds_band[odds_label].append(record)
+        signal = _projection_market_signal(record)
+        signal_label = "Unavailable" if signal is None else "Over signal 5%+" if signal >= 0.05 else "Over signal 2.5–4.99%" if signal >= 0.025 else "Under signal 5%+" if signal <= -0.05 else "Under signal 2.5–4.99%" if signal <= -0.025 else "Neutral (<2.5%)"
+        by_projection_market_signal[signal_label].append(record)
     side_counts = {side: len(rows) for side, rows in by_side.items()}
     warnings: list[str] = []
     if candidates and max(side_counts.values(), default=0) / len(candidates) >= 0.80:
@@ -554,6 +574,8 @@ def _mlb_backtest_diagnostics(model_version: str) -> dict[str, Any]:
         "by_expected_value_band": {name: _diagnostic_summary(rows) for name, rows in by_ev_band.items()},
         "by_projection_minus_line_band": {name: _diagnostic_summary(rows) for name, rows in by_gap_band.items()},
         "by_selected_odds_band": {name: _diagnostic_summary(rows) for name, rows in by_odds_band.items()},
+        "by_projection_market_signal": {name: _diagnostic_summary(rows) for name, rows in by_projection_market_signal.items()},
+        "projection_market_signal_coverage": round(sum(_projection_market_signal(record) is not None for record in candidates) / len(candidates), 3) if candidates else 0.0,
         "warnings": warnings,
         "message": "Diagnostic report only. It does not modify thresholds, calibration, or live predictions.",
     }
