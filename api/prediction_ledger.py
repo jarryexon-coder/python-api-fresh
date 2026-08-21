@@ -330,6 +330,61 @@ def _current_mlb_props(event_id: str, markets: list[str]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _mlb_stats_api(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = requests.get(f"https://statsapi.mlb.com/api/v1/{path.lstrip('/')}", params=params or {}, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mlb_schedule(date: str) -> list[dict[str, Any]]:
+    payload = _mlb_stats_api("schedule", {"sportId": 1, "date": date, "hydrate": "probablePitcher,venue"})
+    dates = payload.get("dates", []) if isinstance(payload.get("dates"), list) else []
+    games: list[dict[str, Any]] = []
+    for day in dates:
+        if isinstance(day, dict):
+            games.extend(item for item in day.get("games", []) if isinstance(item, dict))
+    return games
+
+
+def _mlb_lineup(game_pk: Any) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    """Return announced batting orders where MLB has published them.
+
+    A pregame roster is not represented as a confirmed lineup unless it has a
+    positive batting order. This avoids treating a placeholder roster as fact.
+    """
+    payload = _mlb_stats_api(f"game/{game_pk}/boxscore")
+    teams = payload.get("teams", {}) if isinstance(payload.get("teams"), dict) else {}
+    lineups: dict[str, list[dict[str, Any]]] = {"away": [], "home": []}
+    for side in ("away", "home"):
+        team = teams.get(side, {}) if isinstance(teams.get(side), dict) else {}
+        players = team.get("players", {}) if isinstance(team.get("players"), dict) else {}
+        for player in players.values():
+            if not isinstance(player, dict):
+                continue
+            order = _number(player.get("battingOrder"))
+            person = player.get("person", {}) if isinstance(player.get("person"), dict) else {}
+            if order and order > 0 and person.get("fullName"):
+                lineups[side].append({"player_id": person.get("id"), "name": person.get("fullName"), "batting_order": int(order)})
+        lineups[side].sort(key=lambda player: player["batting_order"])
+    return lineups, "announced" if any(lineups.values()) else "unavailable"
+
+
+def _mlb_pitcher_context(probable: Any) -> dict[str, Any] | None:
+    if not isinstance(probable, dict) or not probable.get("id"):
+        return None
+    context = {"player_id": probable.get("id"), "name": probable.get("fullName")}
+    try:
+        person = _mlb_stats_api(f"people/{probable['id']}")
+        details = person.get("people", [{}])
+        details = details[0] if isinstance(details, list) and details and isinstance(details[0], dict) else {}
+        hand = details.get("pitchHand", {}) if isinstance(details.get("pitchHand"), dict) else {}
+        context["throws"] = hand.get("code")
+    except requests.RequestException:
+        context["throws"] = None
+    return context
+
+
 def _multi_book_prop_consensus(odds: dict[str, Any], markets: list[str]) -> tuple[dict[tuple[str, str, float], list[dict[str, Any]]], int]:
     """Return complete over/under price pairs grouped across bookmakers."""
     consensus: dict[tuple[str, str, float], list[dict[str, Any]]] = defaultdict(list)
@@ -453,6 +508,81 @@ def snapshot_mlb_market_consensus():
                 _memory_backtests[record["id"]] = record
             stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book pregame market observations. No prediction or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/mlb/pregame-context")
+def snapshot_mlb_pregame_context():
+    """Store timestamped MLB lineup, pitcher, venue, and weather context.
+
+    This is a forward-looking observation pipeline. It deliberately records
+    unavailable lineups as unavailable rather than inferring a starting order.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    requested_date = str(request.args.get("date") or "")
+    if requested_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", requested_date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    try:
+        max_events = min(15, max(1, int(request.args.get("max_events") or 15)))
+    except ValueError:
+        max_events = 15
+    try:
+        events = _current_mlb_events()
+    except requests.RequestException as error:
+        return jsonify({"error": f"Current MLB event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
+    if requested_date:
+        events = [event for event in events if str(event.get("commence_time") or "")[:10] == requested_date]
+    events = events[:max_events]
+    taken_at = _now()
+    schedules: dict[str, list[dict[str, Any]]] = {}
+    stored = skipped = 0
+    errors: list[str] = []
+    store = _store()
+    for event in events:
+        event_id = str(event.get("id") or "")
+        date = str(event.get("commence_time") or "")[:10]
+        if not event_id or not date:
+            skipped += 1
+            continue
+        try:
+            if date not in schedules:
+                schedules[date] = _mlb_schedule(date)
+        except requests.RequestException as error:
+            errors.append(f"{event_id}: schedule {error.response.status_code if error.response else 'request error'}")
+            continue
+        away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+        game = next((item for item in schedules[date] if _name_key(((item.get("teams") or {}).get("away") or {}).get("team", {}).get("name")) == away_key and _name_key(((item.get("teams") or {}).get("home") or {}).get("team", {}).get("name")) == home_key), None)
+        if not game:
+            skipped += 1
+            continue
+        game_pk = game.get("gamePk")
+        teams = game.get("teams", {}) if isinstance(game.get("teams"), dict) else {}
+        away = teams.get("away", {}) if isinstance(teams.get("away"), dict) else {}
+        home = teams.get("home", {}) if isinstance(teams.get("home"), dict) else {}
+        try:
+            lineups, lineup_status = _mlb_lineup(game_pk)
+        except requests.RequestException as error:
+            lineups, lineup_status = {"away": [], "home": []}, "unavailable"
+            errors.append(f"{event_id}: lineup {error.response.status_code if error.response else 'request error'}")
+        venue = game.get("venue", {}) if isinstance(game.get("venue"), dict) else {}
+        weather = game.get("weather", {}) if isinstance(game.get("weather"), dict) else {}
+        record = {
+            "id": hashlib.sha256(f"mlb-pregame-context|{taken_at}|{event_id}".encode()).hexdigest()[:32],
+            "sport": "mlb", "record_type": "pregame_context", "taken_at": taken_at, "event_id": event_id,
+            "game_pk": game_pk, "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": date,
+            "commence_time": event.get("commence_time"), "status": ((game.get("status") or {}).get("abstractGameState")),
+            "venue": {"id": venue.get("id"), "name": venue.get("name")}, "weather": weather,
+            "away_probable_pitcher": _mlb_pitcher_context(away.get("probablePitcher")),
+            "home_probable_pitcher": _mlb_pitcher_context(home.get("probablePitcher")),
+            "lineup_status": lineup_status, "lineups": lineups,
+            "source": "MLB Stats API pregame schedule and boxscore snapshot",
+        }
+        if store:
+            store.collection("prediction_pregame_context_snapshots").document(record["id"]).set(record)
+        else:
+            _memory_backtests[record["id"]] = record
+        stored += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_context", "taken_at": taken_at, "events_checked": len(events), "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored timestamped MLB pregame context. No prediction or live-model change was made."})
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/historical-market-consensus")
