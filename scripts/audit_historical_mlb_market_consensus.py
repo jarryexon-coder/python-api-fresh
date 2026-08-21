@@ -27,6 +27,7 @@ def main() -> int:
     with flask_app.app_context():
         store = firestore.client()
         rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots").where("record_type", "==", "historical_pregame_market_consensus").stream()]
+    rows = [row for row in rows if row.get("consensus_method") == "median_devig_per_book_v2"]
 
     outliers = []
     for row in rows:

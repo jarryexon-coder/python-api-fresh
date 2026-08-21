@@ -33,6 +33,7 @@ def main() -> int:
     with flask_app.app_context():
         store = firestore.client()
         rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots").where("record_type", "==", "historical_pregame_market_consensus").stream()]
+    rows = [row for row in rows if row.get("consensus_method") == "median_devig_per_book_v2"]
 
     usable = []
     for row in rows:
@@ -72,6 +73,7 @@ def main() -> int:
         "success": True,
         "isolated": True,
         "record_type": "historical_pregame_market_consensus",
+        "consensus_method": "median_devig_per_book_v2",
         "date_range": {"first": dates[0] if dates else None, "last": dates[-1] if dates else None, "days": len(dates)},
         "records_found": len(rows),
         "settled_two_sided_records": len(usable),

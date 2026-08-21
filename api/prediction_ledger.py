@@ -358,6 +358,29 @@ def _multi_book_prop_consensus(odds: dict[str, Any], markets: list[str]) -> tupl
     return consensus, sum(1 for books in consensus.values() if len(books) < 2)
 
 
+def _representative_market_consensus(books: list[dict[str, Any]]) -> tuple[float, float, float, str] | None:
+    """De-vig each book before finding a consensus; never median American odds.
+
+    American odds are not linear around even money: a raw median can turn
+    valid -130 and +128 prices into an impossible -1.  We instead take the
+    median no-vig probability, then retain the complete price pair from the
+    actual book closest to that probability for transparent payout auditing.
+    """
+    normalized: list[tuple[float, dict[str, Any]]] = []
+    for book in books:
+        fair_over = _fair_over_probability(book.get("over"), book.get("under"))
+        if fair_over is not None:
+            normalized.append((fair_over, book))
+    if len(normalized) < 2:
+        return None
+    consensus_probability = float(median([fair for fair, _ in normalized]))
+    _, reference = min(normalized, key=lambda item: abs(item[0] - consensus_probability))
+    over, under = _number(reference.get("over")), _number(reference.get("under"))
+    if over is None or under is None:
+        return None
+    return over, under, consensus_probability, str(reference.get("bookmaker") or "Sportsbook")
+
+
 def _backtest_store(record: dict[str, Any]) -> None:
     store = _store()
     if store:
@@ -409,12 +432,11 @@ def snapshot_mlb_market_consensus():
             if len(books) < 2:
                 skipped += 1
                 continue
-            over = float(median([float(book["over"]) for book in books]))
-            under = float(median([float(book["under"]) for book in books]))
-            fair_over = _fair_over_probability(over, under)
-            if fair_over is None:
+            representative = _representative_market_consensus(books)
+            if representative is None:
                 skipped += 1
                 continue
+            over, under, fair_over, reference_bookmaker = representative
             record = {
                 "id": hashlib.sha256(f"mlb-market-snapshot|{taken_at}|{event_id}|{market_key}|{player}|{line}".encode()).hexdigest()[:32],
                 "sport": "mlb", "record_type": "pregame_market_consensus", "taken_at": taken_at,
@@ -422,7 +444,8 @@ def snapshot_mlb_market_consensus():
                 "game_date": str(event.get("commence_time") or "")[:10], "player": player, "market_key": market_key,
                 "market": MLB_BACKTEST_MARKETS[market_key][0], "line": line, "over_odds": over, "under_odds": under,
                 "fair_probability_over": round(fair_over * 100, 2), "book_count": len(books),
-                "bookmakers": [book["bookmaker"] for book in books], "source": "The Odds API current multi-book player-prop snapshot",
+                "bookmakers": [book["bookmaker"] for book in books], "reference_bookmaker": reference_bookmaker,
+                "consensus_method": "median_devig_per_book_v2", "source": "The Odds API current multi-book player-prop snapshot",
             }
             if store:
                 store.collection("prediction_market_snapshots").document(record["id"]).set(record)
@@ -484,12 +507,11 @@ def snapshot_historical_mlb_market_consensus():
             if actual is None:
                 skipped += 1
                 continue
-            over = float(median([float(book["over"]) for book in books]))
-            under = float(median([float(book["under"]) for book in books]))
-            fair_over = _fair_over_probability(over, under)
-            if fair_over is None:
+            representative = _representative_market_consensus(books)
+            if representative is None:
                 skipped += 1
                 continue
+            over, under, fair_over, reference_bookmaker = representative
             record = {
                 "id": hashlib.sha256(f"mlb-historical-market-consensus|{snapshot}|{event_id}|{market_key}|{player}|{line}".encode()).hexdigest()[:32],
                 "sport": "mlb", "record_type": "historical_pregame_market_consensus", "isolation": "historical_backtest",
@@ -497,7 +519,8 @@ def snapshot_historical_mlb_market_consensus():
                 "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time"),
                 "game_date": date, "player": player, "market_key": market_key, "market": MLB_BACKTEST_MARKETS[market_key][0],
                 "line": line, "over_odds": over, "under_odds": under, "fair_probability_over": round(fair_over * 100, 2),
-                "book_count": len(books), "bookmakers": [book["bookmaker"] for book in books], "actual_value": actual,
+                "book_count": len(books), "bookmakers": [book["bookmaker"] for book in books], "reference_bookmaker": reference_bookmaker,
+                "consensus_method": "median_devig_per_book_v2", "actual_value": actual,
                 "source": "The Odds API historical multi-book player-prop snapshot; BallDontLie MLB final game stats",
             }
             if store:
