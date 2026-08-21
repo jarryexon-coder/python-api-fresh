@@ -20,7 +20,7 @@ from firebase_admin import firestore
 from flask import Blueprint, g, jsonify, request
 import requests
 
-from api.mlb_model_v2 import evaluate_calibrated_prop, evaluate_prop as evaluate_mlb_v2
+from api.mlb_model_v2 import american_to_decimal, evaluate_calibrated_prop, evaluate_market_relative_prop, evaluate_prop as evaluate_mlb_v2
 
 
 prediction_ledger_bp = Blueprint("prediction_ledger", __name__, url_prefix="/api/prediction-ledger")
@@ -337,12 +337,37 @@ def _load_v22_profile() -> dict[str, Any] | None:
     return _memory_calibrations.get("mlb-v2.2")
 
 
+def _load_profile(profile_id: str) -> dict[str, Any] | None:
+    store = _store()
+    if store:
+        snapshot = store.collection("prediction_model_calibrations").document(profile_id).get()
+        return snapshot.to_dict() if snapshot.exists else None
+    return _memory_calibrations.get(profile_id)
+
+
 def _v22_over_probability(profile: dict[str, Any], market_key: str, line: float, projection: float) -> float | None:
     groups = profile.get("groups") if isinstance(profile.get("groups"), dict) else {}
     for key in (_calibration_key(market_key, line, projection), _calibration_key(market_key, line), market_key, "global"):
         group = groups.get(key)
         if isinstance(group, dict) and _number(group.get("probability_over")) is not None:
             return float(group["probability_over"])
+    return None
+
+
+def _fair_over_probability(over_odds: Any, under_odds: Any) -> float | None:
+    over, under = american_to_decimal(over_odds), american_to_decimal(under_odds)
+    if over is None or under is None:
+        return None
+    over_implied, under_implied = 1 / over, 1 / under
+    return over_implied / (over_implied + under_implied)
+
+
+def _v23_residual(profile: dict[str, Any], market_key: str, line: float, projection: float) -> float | None:
+    groups = profile.get("groups") if isinstance(profile.get("groups"), dict) else {}
+    for key in (_calibration_key(market_key, line, projection), _calibration_key(market_key, line), market_key, "global"):
+        group = groups.get(key)
+        if isinstance(group, dict) and _number(group.get("market_relative_over_residual")) is not None:
+            return float(group["market_relative_over_residual"])
     return None
 
 
@@ -379,6 +404,45 @@ def calibrate_mlb_v22():
     else:
         _memory_calibrations["mlb-v2.2"] = profile
     return jsonify({"success": True, "model": "v2.2", "training_end": training_end, "training_samples": len(source), "groups": len(groups), "message": "Frozen profile created. Only import V2.2 backtests dated after training_end."})
+
+
+@prediction_ledger_bp.post("/backtest/mlb/v2.3/calibrate")
+def calibrate_mlb_v23():
+    """Freeze V2.3 market-relative residuals from pre-cutoff V1 outcomes."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    training_end = str(request.args.get("training_end") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", training_end):
+        return jsonify({"error": "Provide training_end=YYYY-MM-DD for the frozen V2.3 training window."}), 400
+    source = [record for record in _mlb_backtest_records("mlb-last10-pregame-v1") if str(record.get("game_date") or "") <= training_end and _number(record.get("projection")) is not None and _number(record.get("line")) is not None and _fair_over_probability(record.get("over_odds"), record.get("under_odds")) is not None]
+    if len(source) < 100:
+        return jsonify({"error": "At least 100 settled, two-sided V1 records are required before calibration.", "records": len(source)}), 409
+    grouped: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for record in source:
+        projection, line = float(record["projection"]), float(record["line"])
+        market = str(record.get("market_key") or "batter_hits")
+        outcome_over = int(float(record.get("actual_value") or 0) > line)
+        fair_over = _fair_over_probability(record.get("over_odds"), record.get("under_odds"))
+        if fair_over is None:
+            continue
+        for key in ("global", market, _calibration_key(market, line), _calibration_key(market, line, projection)):
+            grouped[key].append((outcome_over, fair_over))
+    groups: dict[str, dict[str, Any]] = {}
+    for key, observations in grouped.items():
+        samples = len(observations)
+        wins = sum(outcome for outcome, _ in observations)
+        fair_sum = sum(fair for _, fair in observations)
+        # Shrink any apparent deviation from the historical fair market toward
+        # zero.  A 30-observation prior prevents thin bins from dominating.
+        residual = (wins - fair_sum) / (samples + 30)
+        groups[key] = {"samples": samples, "over_wins": wins, "fair_over_sum": round(fair_sum, 5), "market_relative_over_residual": round(residual, 5)}
+    profile = {"id": "mlb-v2.3", "model_version": "mlb-market-relative-ev-v2.3", "training_end": training_end, "training_samples": len(source), "source_model_version": "mlb-last10-pregame-v1", "groups": groups, "created_at": _now(), "frozen": True}
+    store = _store()
+    if store:
+        store.collection("prediction_model_calibrations").document("mlb-v2.3").set(profile)
+    else:
+        _memory_calibrations["mlb-v2.3"] = profile
+    return jsonify({"success": True, "model": "v2.3", "training_end": training_end, "training_samples": len(source), "groups": len(groups), "message": "Frozen market-relative profile created. Only import V2.3 backtests dated after training_end."})
 
 
 def _mlb_backtest_records(model_version: str | None = None) -> list[dict[str, Any]]:
@@ -432,7 +496,7 @@ def _backtest_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _mlb_backtest_evaluation(model_version: str = "mlb-last10-pregame-v1") -> dict[str, Any]:
     all_records = _mlb_backtest_records(model_version)
-    candidate_only = model_version.startswith("mlb-probability-ev-v2") or model_version == "mlb-empirical-probability-ev-v2.2"
+    candidate_only = model_version.startswith(("mlb-probability-ev-v2", "mlb-empirical-probability-ev-v2", "mlb-market-relative-ev-v2"))
     records = [record for record in all_records if record.get("candidate") is True] if candidate_only else all_records
     ordered_dates = sorted({str(record.get("game_date") or "") for record in records if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(record.get("game_date") or ""))})
     holdout_dates = set(ordered_dates[-max(1, round(len(ordered_dates) * 0.2)):]) if ordered_dates else set()
@@ -495,15 +559,18 @@ def historical_mlb_backtest():
     except ValueError:
         max_events = 1
     commit = str(request.args.get("commit") or "false").lower() == "true"
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not markets or model not in {"v1", "v2", "v2.1", "v2.2"}:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not markets or model not in {"v1", "v2", "v2.1", "v2.2", "v2.3"}:
         return jsonify({"error": "Provide date=YYYY-MM-DD and one or more supported MLB markets."}), 400
     if not snapshot.startswith(f"{date}T"):
         return jsonify({"error": "snapshot must be a pregame UTC timestamp on the same date as date (for example, 2026-08-14T13:00:00Z)."}), 400
     if date >= datetime.now(timezone.utc).date().isoformat():
         return jsonify({"error": "Historical backtests require a completed past date."}), 400
     v22_profile = _load_v22_profile() if model == "v2.2" else None
+    v23_profile = _load_profile("mlb-v2.3") if model == "v2.3" else None
     if model == "v2.2" and (not v22_profile or str(v22_profile.get("training_end") or "") >= date):
         return jsonify({"error": "V2.2 requires a frozen profile with training_end before the imported game date."}), 409
+    if model == "v2.3" and (not v23_profile or str(v23_profile.get("training_end") or "") >= date):
+        return jsonify({"error": "V2.3 requires a frozen profile with training_end before the imported game date."}), 409
     try:
         events = _historical_events(snapshot)[:max_events]
     except requests.RequestException as error:
@@ -552,8 +619,9 @@ def historical_mlb_backtest():
                         continue
                     v2_version = "mlb-probability-ev-v2.1" if model == "v2.1" else "mlb-probability-ev-v2"
                     calibrated_probability = _v22_over_probability(v22_profile, key, line, projection) if v22_profile else None
-                    model_output = evaluate_calibrated_prop(season_rate=projection, line=line, over_odds=prices.get("over"), under_odds=prices.get("under"), sample_games=sample_games, calibrated_over_probability=calibrated_probability) if model == "v2.2" else evaluate_mlb_v2(season_rate=projection, line=line, over_odds=prices.get("over"), under_odds=prices.get("under"), sample_games=sample_games if model == "v2.1" else None, model_version=v2_version) if model in {"v2", "v2.1"} else None
-                    if model in {"v2", "v2.1", "v2.2"} and not model_output:
+                    relative_residual = _v23_residual(v23_profile, key, line, projection) if v23_profile else None
+                    model_output = evaluate_market_relative_prop(season_rate=projection, line=line, over_odds=prices.get("over"), under_odds=prices.get("under"), sample_games=sample_games, historical_residual=relative_residual) if model == "v2.3" else evaluate_calibrated_prop(season_rate=projection, line=line, over_odds=prices.get("over"), under_odds=prices.get("under"), sample_games=sample_games, calibrated_over_probability=calibrated_probability) if model == "v2.2" else evaluate_mlb_v2(season_rate=projection, line=line, over_odds=prices.get("over"), under_odds=prices.get("under"), sample_games=sample_games if model == "v2.1" else None, model_version=v2_version) if model in {"v2", "v2.1"} else None
+                    if model in {"v2", "v2.1", "v2.2", "v2.3"} and not model_output:
                         skipped += 1
                         continue
                     side = str(model_output["selected_side"]) if model_output else "Over" if projection >= line else "Under"
@@ -572,9 +640,9 @@ def historical_mlb_backtest_summary():
     if not _import_authorized():
         return jsonify({"error": "A valid import key or administrator session is required."}), 403
     model = str(request.args.get("model") or "v1").lower()
-    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2"}
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2", "v2.3": "mlb-market-relative-ev-v2.3"}
     if model not in versions:
-        return jsonify({"error": "model must be v1, v2, v2.1, or v2.2"}), 400
+        return jsonify({"error": "model must be v1, v2, v2.1, v2.2, or v2.3"}), 400
     records = _mlb_backtest_records(versions[model])
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -596,9 +664,9 @@ def historical_mlb_backtest_evaluation():
     if not _import_authorized():
         return jsonify({"error": "A valid import key or administrator session is required."}), 403
     model = str(request.args.get("model") or "v1").lower()
-    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2"}
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2", "v2.3": "mlb-market-relative-ev-v2.3"}
     if model not in versions:
-        return jsonify({"error": "model must be v1, v2, v2.1, or v2.2"}), 400
+        return jsonify({"error": "model must be v1, v2, v2.1, v2.2, or v2.3"}), 400
     return jsonify({**_mlb_backtest_evaluation(versions[model]), "model": model})
 
 
@@ -608,9 +676,9 @@ def promote_historical_mlb_model():
     if not _import_authorized():
         return jsonify({"error": "A valid import key or administrator session is required."}), 403
     model = str(request.args.get("model") or "v1").lower()
-    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2"}
+    versions = {"v1": "mlb-last10-pregame-v1", "v2": "mlb-probability-ev-v2", "v2.1": "mlb-probability-ev-v2.1", "v2.2": "mlb-empirical-probability-ev-v2.2", "v2.3": "mlb-market-relative-ev-v2.3"}
     if model not in versions:
-        return jsonify({"error": "model must be v1, v2, v2.1, or v2.2"}), 400
+        return jsonify({"error": "model must be v1, v2, v2.1, v2.2, or v2.3"}), 400
     evaluation = _mlb_backtest_evaluation(versions[model])
     if not evaluation["promotion_gate"]["eligible_for_manual_review"]:
         return jsonify({"success": False, "error": "Promotion gate is not met.", "evaluation": evaluation}), 409

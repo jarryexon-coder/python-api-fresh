@@ -12,6 +12,7 @@ from typing import Any
 SHRINK_TO_MARKET = 0.30
 MIN_CANDIDATE_EV = 0.04  # 4 cents expected profit per 1 unit risked.
 MIN_CANDIDATE_PROBABILITY = 0.54
+MIN_V23_CANDIDATE_EV = 0.06
 
 
 def number(value: Any) -> float | None:
@@ -44,6 +45,18 @@ def expected_value(probability: float, odds: Any) -> float | None:
     if decimal is None:
         return None
     return probability * (decimal - 1) - (1 - probability)
+
+
+def fair_over_probability(over_odds: Any, under_odds: Any) -> float | None:
+    """Return the no-vig probability implied by a two-sided market."""
+    over = american_to_decimal(over_odds)
+    under = american_to_decimal(under_odds)
+    if over is None or under is None:
+        return None
+    over_implied = 1 / over
+    under_implied = 1 / under
+    total = over_implied + under_implied
+    return over_implied / total if total else None
 
 
 def evaluate_prop(
@@ -149,4 +162,64 @@ def evaluate_calibrated_prop(
         "edge_percent": round(ev * 100, 2),
         "candidate": candidate,
         "reasons": (["Expected value or probability does not clear the conservative shadow-model threshold."] if not candidate else []) + ["Probability is calibrated from a frozen historical training window; lineup and pitcher context are not yet modeled."],
+    }
+
+
+def evaluate_market_relative_prop(
+    *,
+    season_rate: Any,
+    line: Any,
+    over_odds: Any,
+    under_odds: Any,
+    historical_residual: Any,
+    sample_games: Any = None,
+) -> dict[str, Any] | None:
+    """V2.3: apply a frozen historical residual to today's de-vigged market.
+
+    The market supplies the base probability for the actual pair of prices.
+    Historical data can only make a small, transparent adjustment around that
+    base.  This prevents a one-sided historical hit rate from becoming an
+    unconditional preference for every Over or Under.
+    """
+    assessment = evaluate_prop(
+        season_rate=season_rate,
+        line=line,
+        over_odds=over_odds,
+        under_odds=under_odds,
+        sample_games=sample_games,
+        model_version="mlb-market-relative-ev-v2.3",
+    )
+    fair_over = fair_over_probability(over_odds, under_odds)
+    residual = number(historical_residual)
+    if assessment is None or fair_over is None or residual is None:
+        return None
+    # Historical residuals are already shrunk during calibration.  Cap their
+    # influence to avoid turning thin grouping buckets into large claims.
+    adjustment = max(-0.08, min(0.08, residual))
+    probability_over = max(0.02, min(0.98, fair_over + adjustment))
+    probability_under = 1 - probability_over
+    choices = [
+        ("Over", probability_over, over_odds, expected_value(probability_over, over_odds)),
+        ("Under", probability_under, under_odds, expected_value(probability_under, under_odds)),
+    ]
+    choices = [choice for choice in choices if choice[3] is not None]
+    if not choices:
+        return None
+    # Exactly one side may be selected, and neither side is required to pass.
+    side, probability, selected_odds, ev = max(choices, key=lambda choice: choice[3])
+    candidate = bool(ev >= MIN_V23_CANDIDATE_EV)
+    return {
+        **assessment,
+        "model_version": "mlb-market-relative-ev-v2.3",
+        "fair_probability_over": round(fair_over * 100, 1),
+        "market_relative_adjustment": round(adjustment * 100, 2),
+        "probability_over": round(probability_over * 100, 1),
+        "probability_under": round(probability_under * 100, 1),
+        "selected_side": side,
+        "selected_probability": round(probability * 100, 1),
+        "selected_odds": number(selected_odds),
+        "expected_value": round(ev, 4),
+        "edge_percent": round(ev * 100, 2),
+        "candidate": candidate,
+        "reasons": (["No side clears the 6% de-vigged expected-value threshold; no bet."] if not candidate else []) + ["Probability uses today’s de-vigged market plus a frozen, capped historical residual. This is a shadow model."],
     }
