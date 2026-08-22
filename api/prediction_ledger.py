@@ -378,26 +378,53 @@ def _nfl_team_name(value: Any) -> str:
 def _nfl_final_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any] | None:
     """Return a provider-confirmed NFL final only; never infer a score."""
     key = os.getenv("BALLDONTLIE_API_KEY")
-    if not key:
-        return None
-    response = requests.get(
-        "https://api.balldontlie.io/nfl/v1/games", headers={"Authorization": key, "Accept": "application/json"},
-        params={"dates[]": date, "per_page": 100}, timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    games = payload.get("data", []) if isinstance(payload, dict) else []
     away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
-    for game in games if isinstance(games, list) else []:
-        if not isinstance(game, dict):
-            continue
-        away = _name_key(_nfl_team_name(game.get("visitor_team") or game.get("away_team")))
-        home = _name_key(_nfl_team_name(game.get("home_team")))
-        home_score = _number(game.get("home_score", game.get("home_team_score")))
-        away_score = _number(game.get("visitor_score", game.get("away_score", game.get("visitor_team_score"))))
-        status = str(game.get("status") or "").lower()
-        if away == away_key and home == home_key and away_score is not None and home_score is not None and "final" in status:
-            return {"home_score": home_score, "away_score": away_score, "status": game.get("status"), "game_id": game.get("id")}
+    if key:
+        try:
+            response = requests.get(
+                "https://api.balldontlie.io/nfl/v1/games", headers={"Authorization": key, "Accept": "application/json"},
+                params={"dates[]": date, "per_page": 100}, timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            games = payload.get("data", []) if isinstance(payload, dict) else []
+            for game in games if isinstance(games, list) else []:
+                if not isinstance(game, dict):
+                    continue
+                away = _name_key(_nfl_team_name(game.get("visitor_team") or game.get("away_team")))
+                home = _name_key(_nfl_team_name(game.get("home_team")))
+                home_score = _number(game.get("home_score", game.get("home_team_score")))
+                away_score = _number(game.get("visitor_score", game.get("away_score", game.get("visitor_team_score"))))
+                status = str(game.get("status") or "").lower()
+                if away == away_key and home == home_key and away_score is not None and home_score is not None and "final" in status:
+                    return {"home_score": home_score, "away_score": away_score, "status": game.get("status"), "game_id": game.get("id"), "provider": "BallDontLie"}
+        except requests.RequestException:
+            # Preseason coverage can be missing from a provider plan. ESPN's
+            # completed public scoreboard is used only as a final-score
+            # verification fallback, never for odds or player projections.
+            pass
+    try:
+        response = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+            params={"dates": date.replace("-", ""), "limit": 100}, timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        for game in events if isinstance(events, list) else []:
+            if not isinstance(game, dict) or not bool(((game.get("status") or {}).get("type") or {}).get("completed")):
+                continue
+            competition = (game.get("competitions") or [{}])[0]
+            competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
+            teams = {str(item.get("homeAway") or "").lower(): item for item in competitors if isinstance(item, dict)}
+            away, home = teams.get("away", {}), teams.get("home", {})
+            away_name = _name_key(((away.get("team") or {}).get("displayName")))
+            home_name = _name_key(((home.get("team") or {}).get("displayName")))
+            away_score, home_score = _number(away.get("score")), _number(home.get("score"))
+            if away_name == away_key and home_name == home_key and away_score is not None and home_score is not None:
+                return {"home_score": home_score, "away_score": away_score, "status": ((game.get("status") or {}).get("type") or {}).get("name"), "game_id": game.get("id"), "provider": "ESPN public completed scoreboard"}
+    except requests.RequestException:
+        return None
     return None
 
 
@@ -770,7 +797,7 @@ def snapshot_historical_nfl_preseason_markets():
             "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": date, "commence_time": event.get("commence_time"),
             "markets": ["h2h", "spreads", "totals"], "book_count": len(books), "bookmakers": books,
             "final_score": final, "settled_at": _now() if final else None,
-            "result_source": "BallDontLie NFL final game result" if final else None,
+            "result_source": str(final.get("provider") or "verified NFL final-score provider") if final else None,
             "source": "The Odds API historical multi-book NFL preseason featured-market snapshot",
         }
         if store:
