@@ -346,6 +346,60 @@ def _current_nfl_preseason_odds() -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
 
 
+def _historical_nfl_preseason_events(snapshot: str) -> list[dict[str, Any]]:
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl_preseason/events",
+        params={"apiKey": _odds_key(), "date": snapshot}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", payload) if isinstance(payload, dict) else []
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def _historical_nfl_preseason_odds(event_id: str, snapshot: str) -> dict[str, Any]:
+    response = requests.get(
+        f"https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl_preseason/events/{event_id}/odds",
+        params={"apiKey": _odds_key(), "date": snapshot, "regions": "us", "markets": ",".join(sorted(NFL_PRESEASON_GAME_MARKETS)), "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _nfl_team_name(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("full_name") or value.get("display_name") or value.get("name") or value.get("abbreviation") or "")
+
+
+def _nfl_final_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a provider-confirmed NFL final only; never infer a score."""
+    key = os.getenv("BALLDONTLIE_API_KEY")
+    if not key:
+        return None
+    response = requests.get(
+        "https://api.balldontlie.io/nfl/v1/games", headers={"Authorization": key, "Accept": "application/json"},
+        params={"dates[]": date, "per_page": 100}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    games = payload.get("data", []) if isinstance(payload, dict) else []
+    away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+    for game in games if isinstance(games, list) else []:
+        if not isinstance(game, dict):
+            continue
+        away = _name_key(_nfl_team_name(game.get("visitor_team") or game.get("away_team")))
+        home = _name_key(_nfl_team_name(game.get("home_team")))
+        home_score = _number(game.get("home_score", game.get("home_team_score")))
+        away_score = _number(game.get("visitor_score", game.get("away_score", game.get("visitor_team_score"))))
+        status = str(game.get("status") or "").lower()
+        if away == away_key and home == home_key and away_score is not None and home_score is not None and "final" in status:
+            return {"home_score": home_score, "away_score": away_score, "status": game.get("status"), "game_id": game.get("id")}
+    return None
+
+
 def _nfl_projection_snapshot_rows() -> list[dict[str, Any]]:
     """Fetch the configured Tank01 weekly projection feed for forward auditing.
 
@@ -650,6 +704,71 @@ def snapshot_nfl_preseason():
             _memory_backtests[record["id"]] = record
         projection_stored += 1
     return jsonify({"success": True, "isolated": True, "season_phase": "preseason", "eligible_for_live_calibration": False, "taken_at": taken_at, "events_checked": len(events), "market_snapshots": market_stored, "player_projection_snapshots": projection_stored, "skipped": skipped, "message": "Stored NFL preseason featured game markets and Tank01 player projections separately. No live picks or regular-season model changed."})
+
+
+@prediction_ledger_bp.post("/snapshots/nfl/preseason/historical-markets")
+def snapshot_historical_nfl_preseason_markets():
+    """Backfill point-in-time preseason featured markets, preview first.
+
+    This is intentionally a team-market research dataset.  It is not a
+    player-prop model, cannot alter live output, and never treats an
+    unverified score as settled.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or "")
+    snapshot = str(request.args.get("snapshot") or f"{date}T13:00:00Z")
+    try:
+        max_events = min(3, max(1, int(request.args.get("max_events") or 3)))
+    except ValueError:
+        max_events = 3
+    commit = str(request.args.get("commit") or "").lower() == "true"
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not snapshot.startswith(f"{date}T"):
+        return jsonify({"error": "Provide date=YYYY-MM-DD and a same-day pregame snapshot."}), 400
+    if date >= datetime.now(timezone.utc).date().isoformat():
+        return jsonify({"error": "Historical preseason imports require a completed past date."}), 400
+    try:
+        events = _historical_nfl_preseason_events(snapshot)[:max_events]
+    except requests.RequestException as error:
+        return jsonify({"error": f"Historical NFL preseason event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
+    preview = [{"event_id": item.get("id"), "game": f"{item.get('away_team')} @ {item.get('home_team')}", "commence_time": item.get("commence_time")} for item in events]
+    if not commit:
+        return jsonify({"success": True, "preview": True, "isolated": True, "date": date, "snapshot": snapshot, "events": preview, "estimated_historical_credits": len(events) * 30, "message": "Review the historical preseason games and cost estimate, then rerun with commit=true. This imports featured game markets only."})
+    store = _store()
+    stored = final_scores_verified = skipped = 0
+    errors: list[str] = []
+    for event in events:
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            skipped += 1
+            continue
+        try:
+            odds = _historical_nfl_preseason_odds(event_id, snapshot)
+            books = _compact_preseason_books(odds)
+            final = _nfl_final_game_for_event(date, event)
+        except requests.RequestException as error:
+            errors.append(f"{event_id}: {error.response.status_code if error.response else 'request error'}")
+            continue
+        if not books:
+            skipped += 1
+            continue
+        record = {
+            "id": hashlib.sha256(f"nfl-preseason-historical-market|{snapshot}|{event_id}".encode()).hexdigest()[:32],
+            "sport": "nfl", "season_phase": "preseason", "record_type": "historical_pregame_game_market_snapshot", "isolation": "nfl_preseason_historical_research",
+            "eligible_for_live_calibration": False, "snapshot": snapshot, "taken_at": snapshot, "event_id": event_id,
+            "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": date, "commence_time": event.get("commence_time"),
+            "markets": ["h2h", "spreads", "totals"], "book_count": len(books), "bookmakers": books,
+            "final_score": final, "settled_at": _now() if final else None,
+            "result_source": "BallDontLie NFL final game result" if final else None,
+            "source": "The Odds API historical multi-book NFL preseason featured-market snapshot",
+        }
+        if store:
+            store.collection("prediction_nfl_preseason_snapshots").document(record["id"]).set(record, merge=True)
+        else:
+            _memory_backtests[record["id"]] = record
+        stored += 1
+        final_scores_verified += int(final is not None)
+    return jsonify({"success": True, "preview": False, "isolated": True, "date": date, "snapshot": snapshot, "events_checked": len(events), "stored": stored, "final_scores_verified": final_scores_verified, "skipped": skipped, "errors": errors[:10], "message": "Stored historical NFL preseason featured markets. Only provider-confirmed final scores were attached; no live model changed."})
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/pregame-context")
