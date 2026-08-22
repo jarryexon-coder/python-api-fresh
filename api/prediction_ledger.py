@@ -39,6 +39,7 @@ MLB_BACKTEST_MARKETS = {
     "batter_total_bases": ("Total Bases", "total_bases"),
     "pitcher_strikeouts": ("Strikeouts", "p_k"),
 }
+NFL_PRESEASON_GAME_MARKETS = {"h2h", "spreads", "totals"}
 MIN_BACKTEST_PROMOTION_SAMPLE = 500
 MIN_BACKTEST_HOLDOUT_SAMPLE = 150
 MIN_BACKTEST_SIDE_SAMPLE = 75
@@ -330,6 +331,80 @@ def _current_mlb_props(event_id: str, markets: list[str]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _current_nfl_preseason_odds() -> list[dict[str, Any]]:
+    """Load only featured preseason game markets, never pretend props exist."""
+    key = _odds_key()
+    if not key:
+        raise RuntimeError("THE_ODDS_API_KEY is not configured")
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/sports/americanfootball_nfl_preseason/odds",
+        params={"apiKey": key, "regions": "us", "markets": ",".join(sorted(NFL_PRESEASON_GAME_MARKETS)), "oddsFormat": "american"},
+        timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def _nfl_projection_snapshot_rows() -> list[dict[str, Any]]:
+    """Fetch the configured Tank01 weekly projection feed for forward auditing.
+
+    The rows are preserved as observations only.  A preseason projection is
+    not blended into a regular-season model or converted to a betting pick.
+    """
+    key = os.getenv("RAPIDAPI_KEY_TANK01") or os.getenv("RAPIDAPI_KEY")
+    if not key:
+        raise RuntimeError("RAPIDAPI_KEY_TANK01 is not configured")
+    host = "tank01-nfl-live-in-game-real-time-statistics-nfl.p.rapidapi.com"
+    params = {
+        "week": os.getenv("TANK01_NFL_PROJECTION_WEEK", "1"), "archiveSeason": os.getenv("TANK01_NFL_PROJECTION_SEASON", str(datetime.now().year)), "itemFormat": "list",
+        "twoPointConversions": 2, "passYards": ".04", "passAttempts": "-.5", "passTD": 4, "passCompletions": 1, "passInterceptions": -2,
+        "pointsPerReception": 1, "carries": ".2", "rushYards": ".1", "rushTD": 6, "fumbles": -2, "receivingYards": ".1", "receivingTD": 6,
+        "targets": ".1", "fgMade": 3, "fgMissed": -1, "xpMade": 1, "xpMissed": -1,
+    }
+    response = requests.get(f"https://{host}/getNFLProjections", headers={"X-RapidAPI-Key": key, "X-RapidAPI-Host": host, "Accept": "application/json"}, params=params, timeout=45)
+    response.raise_for_status()
+    payload = response.json()
+    body = payload.get("body", payload) if isinstance(payload, dict) else {}
+    raw = body.get("playerProjections", body) if isinstance(body, dict) else []
+    rows = list(raw.values()) if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("longName"):
+            continue
+        passing = row.get("Passing") if isinstance(row.get("Passing"), dict) else {}
+        rushing = row.get("Rushing") if isinstance(row.get("Rushing"), dict) else {}
+        receiving = row.get("Receiving") if isinstance(row.get("Receiving"), dict) else {}
+        result.append({
+            "player": row.get("longName"), "player_key": _name_key(row.get("longName")),
+            "team": row.get("team") or row.get("teamAbv") or row.get("teamAbbreviation"), "position": row.get("pos") or row.get("position"),
+            "passing_yards": _number(passing.get("passYds")), "passing_touchdowns": _number(passing.get("passTD")),
+            "rushing_yards": _number(rushing.get("rushYds")), "receiving_yards": _number(receiving.get("recYds")), "receptions": _number(receiving.get("receptions")),
+        })
+    return result
+
+
+def _compact_preseason_books(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep auditable posted game prices while avoiding provider payload bloat."""
+    compact: list[dict[str, Any]] = []
+    for bookmaker in event.get("bookmakers", []) if isinstance(event, dict) else []:
+        if not isinstance(bookmaker, dict):
+            continue
+        markets: list[dict[str, Any]] = []
+        for market in bookmaker.get("markets", []):
+            if not isinstance(market, dict) or market.get("key") not in NFL_PRESEASON_GAME_MARKETS:
+                continue
+            outcomes = []
+            for outcome in market.get("outcomes", []):
+                if isinstance(outcome, dict):
+                    outcomes.append({"name": outcome.get("name"), "point": _number(outcome.get("point")), "price": _number(outcome.get("price"))})
+            if outcomes:
+                markets.append({"key": market.get("key"), "outcomes": outcomes})
+        if markets:
+            compact.append({"bookmaker": bookmaker.get("title") or bookmaker.get("key"), "markets": markets})
+    return compact
+
+
 def _mlb_stats_api(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     response = requests.get(f"https://statsapi.mlb.com/api/v1/{path.lstrip('/')}", params=params or {}, timeout=30)
     response.raise_for_status()
@@ -508,6 +583,73 @@ def snapshot_mlb_market_consensus():
                 _memory_backtests[record["id"]] = record
             stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book pregame market observations. No prediction or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/nfl/preseason")
+def snapshot_nfl_preseason():
+    """Persist current preseason projections and game markets for later grading.
+
+    NFL preseason player-prop pricing is not assumed to exist.  Tank01 player
+    projections and The Odds API featured game markets are stored separately
+    with an explicit preseason phase so they cannot alter regular-season
+    picks, subscription access, or model calibration.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    try:
+        max_events = min(20, max(1, int(request.args.get("max_events") or 20)))
+    except ValueError:
+        max_events = 20
+    taken_at = _now()
+    try:
+        events = _current_nfl_preseason_odds()[:max_events]
+        projections = _nfl_projection_snapshot_rows()
+    except requests.RequestException as error:
+        return jsonify({"error": f"NFL preseason source request failed ({error.response.status_code if error.response else 'request error'})."}), 502
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 503
+
+    store = _store()
+    market_stored = projection_stored = skipped = 0
+    for event in events:
+        event_id = str(event.get("id") or "")
+        commence_time = str(event.get("commence_time") or "")
+        books = _compact_preseason_books(event)
+        if not event_id or not books:
+            skipped += 1
+            continue
+        record = {
+            "id": hashlib.sha256(f"nfl-preseason-market|{taken_at}|{event_id}".encode()).hexdigest()[:32],
+            "sport": "nfl", "season_phase": "preseason", "record_type": "pregame_game_market_snapshot", "isolation": "nfl_preseason_research",
+            "eligible_for_live_calibration": False, "taken_at": taken_at, "event_id": event_id,
+            "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": commence_time[:10], "commence_time": commence_time,
+            "markets": ["h2h", "spreads", "totals"], "book_count": len(books), "bookmakers": books,
+            "source": "The Odds API current multi-book NFL preseason featured-market snapshot",
+        }
+        if store:
+            store.collection("prediction_nfl_preseason_snapshots").document(record["id"]).set(record)
+        else:
+            _memory_backtests[record["id"]] = record
+        market_stored += 1
+
+    season = os.getenv("TANK01_NFL_PROJECTION_SEASON", str(datetime.now().year))
+    week = os.getenv("TANK01_NFL_PROJECTION_WEEK", "1")
+    for player in projections:
+        if not player.get("player_key"):
+            skipped += 1
+            continue
+        record = {
+            "id": hashlib.sha256(f"nfl-preseason-projection|{taken_at}|{player['player_key']}".encode()).hexdigest()[:32],
+            "sport": "nfl", "season_phase": "preseason", "record_type": "pregame_player_projection_snapshot", "isolation": "nfl_preseason_research",
+            "eligible_for_live_calibration": False, "taken_at": taken_at, "season": season, "week": week,
+            **player, "source": "Tank01 configured NFL weekly projection feed",
+        }
+        if store:
+            store.collection("prediction_nfl_preseason_snapshots").document(record["id"]).set(record)
+        else:
+            _memory_backtests[record["id"]] = record
+        projection_stored += 1
+    return jsonify({"success": True, "isolated": True, "season_phase": "preseason", "eligible_for_live_calibration": False, "taken_at": taken_at, "events_checked": len(events), "market_snapshots": market_stored, "player_projection_snapshots": projection_stored, "skipped": skipped, "message": "Stored NFL preseason featured game markets and Tank01 player projections separately. No live picks or regular-season model changed."})
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/pregame-context")

@@ -1119,6 +1119,7 @@ def mobile_package_for_request():
         '/api/prediction-ledger/snapshots/mlb/market-consensus',
         '/api/prediction-ledger/snapshots/mlb/pregame-context',
         '/api/prediction-ledger/snapshots/mlb/grade-market-consensus',
+        '/api/prediction-ledger/snapshots/nfl/preseason',
     }:
         return None
     if any(path.startswith(prefix.rstrip('/')) for prefix in SUPERSTATS_PATHS):
