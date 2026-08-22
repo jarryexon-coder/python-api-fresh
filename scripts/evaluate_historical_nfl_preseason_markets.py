@@ -47,6 +47,9 @@ def main() -> int:
     observations: list[dict] = []
     skipped = 0
     for row in raw:
+        if row.get("excluded_from_evaluation"):
+            skipped += 1
+            continue
         final = row.get("final_score") if isinstance(row.get("final_score"), dict) else {}
         home_score, away_score = final.get("home_score"), final.get("away_score")
         if not isinstance(home_score, (int, float)) or not isinstance(away_score, (int, float)):
