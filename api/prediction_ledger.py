@@ -22,6 +22,7 @@ from flask import Blueprint, g, jsonify, request
 import requests
 
 from api.mlb_model_v2 import american_to_decimal, evaluate_calibrated_directional_prop, evaluate_calibrated_prop, evaluate_continuous_market_anchored_prop, evaluate_directional_projection_prop, evaluate_market_relative_prop, evaluate_projection_relative_prop, evaluate_prop as evaluate_mlb_v2, poisson_over_probability
+from api.live_props import _mlb_projections
 
 
 prediction_ledger_bp = Blueprint("prediction_ledger", __name__, url_prefix="/api/prediction-ledger")
@@ -599,6 +600,13 @@ def snapshot_mlb_market_consensus():
     stored = skipped = 0
     errors: list[str] = []
     store = _store()
+    # Capture the projection available at snapshot time beside every posted
+    # market.  Future grading can then measure forecasting accuracy without
+    # reconstructing a changed season-average after the game has finished.
+    try:
+        player_projections = _mlb_projections()
+    except Exception:
+        player_projections = {}
     for event in events:
         event_id = str(event.get("id") or "")
         if not event_id:
@@ -621,15 +629,18 @@ def snapshot_mlb_market_consensus():
                 skipped += 1
                 continue
             over, under, fair_over, reference_bookmaker = representative
+            player_projection = player_projections.get(_name_key(player), {})
             record = {
                 "id": hashlib.sha256(f"mlb-market-snapshot|{taken_at}|{event_id}|{market_key}|{player}|{line}".encode()).hexdigest()[:32],
                 "sport": "mlb", "record_type": "pregame_market_consensus", "taken_at": taken_at,
                 "event_id": event_id, "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time"),
                 "game_date": str(event.get("commence_time") or "")[:10], "player": player, "market_key": market_key,
                 "market": MLB_BACKTEST_MARKETS[market_key][0], "line": line, "over_odds": over, "under_odds": under,
+                "projection": _number(player_projection.get(market_key)), "projection_sample_games": _number(player_projection.get("_sample_games")),
                 "fair_probability_over": round(fair_over * 100, 2), "book_count": len(books),
                 "bookmakers": [book["bookmaker"] for book in books], "reference_bookmaker": reference_bookmaker,
-                "consensus_method": "median_devig_per_book_v2", "source": "The Odds API current multi-book player-prop snapshot",
+                "consensus_method": "median_devig_per_book_v2", "projection_source": "BallDontLie MLB season-context projection at snapshot time" if player_projection else None,
+                "source": "The Odds API current multi-book player-prop snapshot",
             }
             if store:
                 store.collection("prediction_market_snapshots").document(record["id"]).set(record)
