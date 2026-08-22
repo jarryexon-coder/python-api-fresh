@@ -404,25 +404,31 @@ def _nfl_final_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any
             # verification fallback, never for odds or player projections.
             pass
     try:
-        response = requests.get(
-            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
-            params={"dates": date.replace("-", ""), "limit": 100}, timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        events = payload.get("events", []) if isinstance(payload, dict) else []
-        for game in events if isinstance(events, list) else []:
-            if not isinstance(game, dict) or not bool(((game.get("status") or {}).get("type") or {}).get("completed")):
-                continue
-            competition = (game.get("competitions") or [{}])[0]
-            competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
-            teams = {str(item.get("homeAway") or "").lower(): item for item in competitors if isinstance(item, dict)}
-            away, home = teams.get("away", {}), teams.get("home", {})
-            away_name = _name_key(((away.get("team") or {}).get("displayName")))
-            home_name = _name_key(((home.get("team") or {}).get("displayName")))
-            away_score, home_score = _number(away.get("score")), _number(home.get("score"))
-            if away_name == away_key and home_name == home_key and away_score is not None and home_score is not None:
-                return {"home_score": home_score, "away_score": away_score, "status": ((game.get("status") or {}).get("type") or {}).get("name"), "game_id": game.get("id"), "provider": "ESPN public completed scoreboard"}
+        # The Odds API timestamps are UTC while ESPN's scoreboard is keyed to
+        # the local game date. Check adjacent dates so a Thursday-night game
+        # that starts after midnight UTC is never left permanently ungraded.
+        base_date = datetime.fromisoformat(date).date()
+        score_dates = {(base_date + timedelta(days=offset)).strftime("%Y%m%d") for offset in (-1, 0, 1)}
+        for score_date in sorted(score_dates):
+            response = requests.get(
+                "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+                params={"dates": score_date, "limit": 100}, timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            events = payload.get("events", []) if isinstance(payload, dict) else []
+            for game in events if isinstance(events, list) else []:
+                if not isinstance(game, dict) or not bool(((game.get("status") or {}).get("type") or {}).get("completed")):
+                    continue
+                competition = (game.get("competitions") or [{}])[0]
+                competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
+                teams = {str(item.get("homeAway") or "").lower(): item for item in competitors if isinstance(item, dict)}
+                away, home = teams.get("away", {}), teams.get("home", {})
+                away_name = _name_key(((away.get("team") or {}).get("displayName")))
+                home_name = _name_key(((home.get("team") or {}).get("displayName")))
+                away_score, home_score = _number(away.get("score")), _number(home.get("score"))
+                if away_name == away_key and home_name == home_key and away_score is not None and home_score is not None:
+                    return {"home_score": home_score, "away_score": away_score, "status": ((game.get("status") or {}).get("type") or {}).get("name"), "game_id": game.get("id"), "provider": "ESPN public completed scoreboard"}
     except requests.RequestException:
         return None
     return None

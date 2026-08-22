@@ -92,7 +92,7 @@ def main() -> int:
             if not values:
                 continue
             outcome = values[0]["outcome"]
-            observations.append({"date": row.get("game_date"), "market": market, "probability": float(median([item["probability"] for item in values])), "outcome": outcome, "books": len(values)})
+            observations.append({"event_id": row.get("event_id"), "date": row.get("game_date"), "market": market, "probability": float(median([item["probability"] for item in values])), "outcome": outcome, "books": len(values)})
 
     def metrics(rows: list[dict]) -> dict:
         if not rows:
@@ -117,7 +117,7 @@ def main() -> int:
         "season_phase": "preseason",
         "scope": "historical_nfl_game_markets_only",
         "records_found": len(raw),
-        "verified_games": len({str(row.get("game_date")) + str(row.get("market")) for row in observations}),
+        "verified_games": len({str(row.get("event_id")) for row in observations if row.get("event_id")}),
         "evaluated_game_market_observations": len(observations),
         "skipped_unverified_records": skipped,
         "date_range": {"first": dates[0] if dates else None, "last": dates[-1] if dates else None, "days": len(dates)},
