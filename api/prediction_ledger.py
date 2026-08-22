@@ -776,8 +776,9 @@ def snapshot_historical_nfl_preseason_markets():
     snapshot = str(request.args.get("snapshot") or f"{date}T13:00:00Z")
     try:
         max_events = min(3, max(1, int(request.args.get("max_events") or 3)))
+        offset = max(0, int(request.args.get("offset") or 0))
     except ValueError:
-        max_events = 3
+        max_events, offset = 3, 0
     commit = str(request.args.get("commit") or "").lower() == "true"
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not snapshot.startswith(f"{date}T"):
         return jsonify({"error": "Provide date=YYYY-MM-DD and a same-day pregame snapshot."}), 400
@@ -791,10 +792,11 @@ def snapshot_historical_nfl_preseason_markets():
     # games many days ahead of the requested snapshot. Keep only games that
     # begin within a true pregame window after the snapshot.
     future_events_skipped = sum(1 for item in events if not _valid_nfl_preseason_snapshot_event(item, snapshot))
-    events = [item for item in events if _valid_nfl_preseason_snapshot_event(item, snapshot)][:max_events]
+    eligible_events = [item for item in events if _valid_nfl_preseason_snapshot_event(item, snapshot)]
+    events = eligible_events[offset:offset + max_events]
     preview = [{"event_id": item.get("id"), "game": f"{item.get('away_team')} @ {item.get('home_team')}", "commence_time": item.get("commence_time")} for item in events]
     if not commit:
-        return jsonify({"success": True, "preview": True, "isolated": True, "date": date, "snapshot": snapshot, "events": preview, "future_events_skipped": future_events_skipped, "estimated_historical_credits": len(events) * 30, "message": "Review the historical preseason games and cost estimate, then rerun with commit=true. This imports featured game markets only."})
+        return jsonify({"success": True, "preview": True, "isolated": True, "date": date, "snapshot": snapshot, "offset": offset, "eligible_event_count": len(eligible_events), "next_offset": offset + len(events) if offset + len(events) < len(eligible_events) else None, "events": preview, "future_events_skipped": future_events_skipped, "estimated_historical_credits": len(events) * 30, "message": "Review the historical preseason games and cost estimate, then rerun with commit=true. This imports featured game markets only."})
     store = _store()
     stored = final_scores_verified = skipped = 0
     errors: list[str] = []
@@ -829,7 +831,7 @@ def snapshot_historical_nfl_preseason_markets():
             _memory_backtests[record["id"]] = record
         stored += 1
         final_scores_verified += int(final is not None)
-    return jsonify({"success": True, "preview": False, "isolated": True, "date": date, "snapshot": snapshot, "events_checked": len(events), "future_events_skipped": future_events_skipped, "stored": stored, "final_scores_verified": final_scores_verified, "skipped": skipped, "errors": errors[:10], "message": "Stored historical NFL preseason featured markets. Only provider-confirmed final scores were attached; no live model changed."})
+    return jsonify({"success": True, "preview": False, "isolated": True, "date": date, "snapshot": snapshot, "offset": offset, "eligible_event_count": len(eligible_events), "next_offset": offset + len(events) if offset + len(events) < len(eligible_events) else None, "events_checked": len(events), "future_events_skipped": future_events_skipped, "stored": stored, "final_scores_verified": final_scores_verified, "skipped": skipped, "errors": errors[:10], "message": "Stored historical NFL preseason featured markets. Only provider-confirmed final scores were attached; no live model changed."})
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/pregame-context")

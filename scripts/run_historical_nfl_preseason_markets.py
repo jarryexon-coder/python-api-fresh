@@ -15,6 +15,7 @@ def main() -> int:
     parser.add_argument("--date", required=True, help="Completed game date, YYYY-MM-DD.")
     parser.add_argument("--snapshot", help="Pregame timestamp in UTC; defaults to 13:00 UTC on --date.")
     parser.add_argument("--max-events", type=int, default=3, choices=range(1, 4), metavar="1..3")
+    parser.add_argument("--offset", type=int, default=0, help="Zero-based eligible-event offset for additional same-snapshot batches.")
     parser.add_argument("--commit", action="store_true", help="Write records after reviewing the default preview.")
     args = parser.parse_args()
     secret = os.getenv("PREDICTION_IMPORT_SECRET")
@@ -26,7 +27,7 @@ def main() -> int:
         sys.path.insert(0, root)
     from app import app as flask_app
     from api.prediction_ledger import snapshot_historical_nfl_preseason_markets
-    query = urlencode({"date": args.date, "snapshot": args.snapshot or f"{args.date}T13:00:00Z", "max_events": str(args.max_events), "commit": "true" if args.commit else "false"})
+    query = urlencode({"date": args.date, "snapshot": args.snapshot or f"{args.date}T13:00:00Z", "max_events": str(args.max_events), "offset": str(max(0, args.offset)), "commit": "true" if args.commit else "false"})
     with flask_app.test_request_context(
         "/api/prediction-ledger/snapshots/nfl/preseason/historical-markets?" + query,
         method="POST", headers={"X-Prediction-Import-Key": secret},
