@@ -39,8 +39,17 @@ def main() -> int:
             response.raise_for_status()
             payload = response.json()
             events = payload.get("data", payload) if isinstance(payload, dict) else []
-            allowed = {cursor.isoformat(), (cursor + timedelta(days=1)).isoformat()}
-            same_day = [item for item in events if isinstance(item, dict) and str(item.get("commence_time") or "")[:10] in allowed]
+            captured = datetime.fromisoformat(snapshot.replace("Z", "+00:00"))
+            same_day = []
+            for item in events:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    commence = datetime.fromisoformat(str(item.get("commence_time") or "").replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if 0 <= (commence - captured).total_seconds() / 3600 <= 16:
+                    same_day.append(item)
             if same_day:
                 eligible.append({
                     "date": cursor.isoformat(), "snapshot": snapshot, "event_count": len(same_day),
@@ -52,7 +61,7 @@ def main() -> int:
         cursor += timedelta(days=1)
     print(json.dumps({
         "success": True, "research_only": True, "checked_dates": checked, "eligible_dates": eligible,
-        "message": "These dates have same-day NFL preseason events at 13:00 UTC. Use them for preview-first historical imports only.", "errors": errors,
+        "message": "These dates have NFL preseason games starting within 16 hours of the 13:00 UTC snapshot. Use them for preview-first historical imports only.", "errors": errors,
     }, indent=2, sort_keys=True))
     return 0
 

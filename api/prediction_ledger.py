@@ -41,6 +41,7 @@ MLB_BACKTEST_MARKETS = {
     "pitcher_strikeouts": ("Strikeouts", "p_k"),
 }
 NFL_PRESEASON_GAME_MARKETS = {"h2h", "spreads", "totals"}
+NFL_PRESEASON_MAX_SNAPSHOT_LEAD_HOURS = 16
 MIN_BACKTEST_PROMOTION_SAMPLE = 500
 MIN_BACKTEST_HOLDOUT_SAMPLE = 150
 MIN_BACKTEST_SIDE_SAMPLE = 75
@@ -367,6 +368,17 @@ def _historical_nfl_preseason_odds(event_id: str, snapshot: str) -> dict[str, An
     payload = response.json()
     data = payload.get("data", payload) if isinstance(payload, dict) else {}
     return data if isinstance(data, dict) else {}
+
+
+def _valid_nfl_preseason_snapshot_event(event: dict[str, Any], snapshot: str) -> bool:
+    """Accept a true pregame observation, not a schedule posted days early."""
+    try:
+        captured = datetime.fromisoformat(snapshot.replace("Z", "+00:00"))
+        commence = datetime.fromisoformat(str(event.get("commence_time") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    lead_hours = (commence - captured).total_seconds() / 3600
+    return 0 <= lead_hours <= NFL_PRESEASON_MAX_SNAPSHOT_LEAD_HOURS
 
 
 def _nfl_team_name(value: Any) -> str:
@@ -776,12 +788,10 @@ def snapshot_historical_nfl_preseason_markets():
     except requests.RequestException as error:
         return jsonify({"error": f"Historical NFL preseason event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
     # The historical event list is a point-in-time schedule, so it can include
-    # games many days ahead of the requested snapshot.  Only retain games on
-    # the requested local date or the following UTC date (for night games).
-    target = datetime.fromisoformat(date).date()
-    allowed_utc_dates = {target.isoformat(), (target + timedelta(days=1)).isoformat()}
-    future_events_skipped = sum(1 for item in events if str(item.get("commence_time") or "")[:10] not in allowed_utc_dates)
-    events = [item for item in events if str(item.get("commence_time") or "")[:10] in allowed_utc_dates][:max_events]
+    # games many days ahead of the requested snapshot. Keep only games that
+    # begin within a true pregame window after the snapshot.
+    future_events_skipped = sum(1 for item in events if not _valid_nfl_preseason_snapshot_event(item, snapshot))
+    events = [item for item in events if _valid_nfl_preseason_snapshot_event(item, snapshot)][:max_events]
     preview = [{"event_id": item.get("id"), "game": f"{item.get('away_team')} @ {item.get('home_team')}", "commence_time": item.get("commence_time")} for item in events]
     if not commit:
         return jsonify({"success": True, "preview": True, "isolated": True, "date": date, "snapshot": snapshot, "events": preview, "future_events_skipped": future_events_skipped, "estimated_historical_credits": len(events) * 30, "message": "Review the historical preseason games and cost estimate, then rerun with commit=true. This imports featured game markets only."})
