@@ -45,19 +45,20 @@ def main() -> int:
         raw = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_nfl_preseason_snapshots").where("record_type", "==", "historical_pregame_game_market_snapshot").stream()]
 
     observations: list[dict] = []
-    skipped = 0
+    excluded_records = 0
+    unverified_records = 0
     for row in raw:
         if row.get("excluded_from_evaluation"):
-            skipped += 1
+            excluded_records += 1
             continue
         final = row.get("final_score") if isinstance(row.get("final_score"), dict) else {}
         home_score, away_score = final.get("home_score"), final.get("away_score")
         if not isinstance(home_score, (int, float)) or not isinstance(away_score, (int, float)):
-            skipped += 1
+            unverified_records += 1
             continue
         teams = [part.strip() for part in str(row.get("game") or "").split("@")]
         if len(teams) != 2:
-            skipped += 1
+            unverified_records += 1
             continue
         away_name, home_name = teams
         books = row.get("bookmakers") if isinstance(row.get("bookmakers"), list) else []
@@ -122,7 +123,8 @@ def main() -> int:
         "records_found": len(raw),
         "verified_games": len({str(row.get("event_id")) for row in observations if row.get("event_id")}),
         "evaluated_game_market_observations": len(observations),
-        "skipped_unverified_records": skipped,
+        "excluded_invalid_future_schedule_records": excluded_records,
+        "unverified_final_score_records": unverified_records,
         "date_range": {"first": dates[0] if dates else None, "last": dates[-1] if dates else None, "days": len(dates)},
         "overall": metrics(observations),
         "by_market": {market: metrics(rows) for market, rows in sorted(by_market.items())},
