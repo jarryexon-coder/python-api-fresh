@@ -308,7 +308,7 @@ def _current_moneyline_consensus() -> dict[tuple[str, str], dict[str, Any]]:
     cached = _cache.get(cache_key)
     if cached and time.time() - cached[0] < 60:
         return cached[1]  # type: ignore[return-value]
-    key = os.getenv("ODDS_API_KEY")
+    key = os.getenv("THE_ODDS_API_KEY") or os.getenv("ODDS_API_KEY") or os.getenv("THEODDS_API_KEY")
     if not key:
         return {}
     response = requests.get(
