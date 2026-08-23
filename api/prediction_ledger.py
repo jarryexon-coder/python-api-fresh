@@ -619,6 +619,59 @@ def _backtest_store(record: dict[str, Any]) -> None:
         _memory_backtests[record["id"]] = record
 
 
+@prediction_ledger_bp.get("/market-consensus/mlb")
+def latest_mlb_market_consensus():
+    """Return the newest saved MLB multi-book pregame board for the app.
+
+    This is intentionally an observational endpoint.  It exposes the stored
+    market and the provider projection captured beside it, but does not select
+    a side, calculate a model edge, or make a wagering recommendation.
+    """
+    try:
+        limit = min(300, max(1, int(request.args.get("limit") or 150)))
+    except ValueError:
+        limit = 150
+
+    store = _store()
+    if store:
+        rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots")
+                .where("record_type", "==", "pregame_market_consensus").limit(5000).stream()]
+    else:
+        rows = [row for row in _memory_backtests.values() if row.get("record_type") == "pregame_market_consensus"]
+
+    rows = [row for row in rows if row.get("sport") == "mlb" and row.get("taken_at")]
+    if not rows:
+        return jsonify({"success": True, "data": [], "message": "No saved MLB pregame market consensus is available yet."})
+
+    # Every run uses one exact timestamp, making this a coherent board rather
+    # than an accidental mixture of lines taken at different points in the day.
+    taken_at = max(str(row.get("taken_at")) for row in rows)
+    latest = [row for row in rows if str(row.get("taken_at")) == taken_at]
+    latest.sort(key=lambda row: (str(row.get("commence_time") or ""), str(row.get("market") or ""), str(row.get("player") or "")))
+
+    def public_row(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row.get("id"), "player": row.get("player"), "market": row.get("market"),
+            "market_key": row.get("market_key"), "line": row.get("line"),
+            "projection": row.get("projection"), "projection_sample_games": row.get("projection_sample_games"),
+            "game": row.get("game"), "commence_time": row.get("commence_time"),
+            "over_odds": row.get("over_odds"), "under_odds": row.get("under_odds"),
+            "fair_probability_over": row.get("fair_probability_over"), "book_count": row.get("book_count"),
+            "bookmakers": row.get("bookmakers", []), "reference_bookmaker": row.get("reference_bookmaker"),
+            "projection_source": row.get("projection_source"), "taken_at": row.get("taken_at"),
+            "consensus_method": row.get("consensus_method"),
+        }
+
+    return jsonify({
+        "success": True,
+        "research_only": True,
+        "data": [public_row(row) for row in latest[:limit]],
+        "taken_at": taken_at,
+        "total": len(latest),
+        "message": "Saved multi-book pregame market consensus. It is not a model edge or wagering recommendation.",
+    })
+
+
 @prediction_ledger_bp.post("/snapshots/mlb/market-consensus")
 def snapshot_mlb_market_consensus():
     """Persist a real multi-book MLB prop snapshot for future forward testing.

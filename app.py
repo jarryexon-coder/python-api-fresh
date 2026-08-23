@@ -1123,6 +1123,8 @@ def mobile_package_for_request():
         '/api/prediction-ledger/snapshots/nfl/preseason/historical-markets',
     }:
         return None
+    if path == '/api/prediction-ledger/market-consensus/mlb':
+        return 'mlb'
     if any(path.startswith(prefix.rstrip('/')) for prefix in SUPERSTATS_PATHS):
         return 'superstats'
     if path.startswith('/api/mlb/'):
