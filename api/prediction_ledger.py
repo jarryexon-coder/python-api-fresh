@@ -316,6 +316,17 @@ def _historical_mlb_props(event_id: str, snapshot: str, markets: list[str]) -> d
     return data if isinstance(data, dict) else {}
 
 
+def _historical_mlb_moneyline_odds(event_id: str, snapshot: str) -> dict[str, Any]:
+    response = requests.get(
+        f"https://api.the-odds-api.com/v4/historical/sports/baseball_mlb/events/{event_id}/odds",
+        params={"apiKey": _odds_key(), "date": snapshot, "regions": "us", "markets": "h2h", "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    return data if isinstance(data, dict) else {}
+
+
 def _current_mlb_events() -> list[dict[str, Any]]:
     response = requests.get("https://api.the-odds-api.com/v4/sports/baseball_mlb/events", params={"apiKey": _odds_key()}, timeout=30)
     response.raise_for_status()
@@ -374,9 +385,13 @@ def _pregame_moneyline_consensus(event: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _has_started(commence_time: Any) -> bool:
+    return _has_started_at(commence_time, datetime.now(timezone.utc))
+
+
+def _has_started_at(commence_time: Any, reference_time: datetime) -> bool:
     try:
         value = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
-        return value <= datetime.now(timezone.utc)
+        return value <= reference_time
     except ValueError:
         return True
 
@@ -1085,6 +1100,128 @@ def snapshot_mlb_moneyline_context():
             _memory_backtests[record["id"]] = record
         stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_moneyline_context", "taken_at": taken_at, "events_checked": len(events), "eligible_pregame_events": len(eligible), "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored pregame multi-book moneylines with available lineup, pitcher, venue, and weather context. Records are research-only and cannot change live recommendations."})
+
+
+def _mlb_verified_final_score(game_pk: Any, game_date: str) -> dict[str, Any] | None:
+    """Use the official MLB schedule result only when the game is final."""
+    try:
+        game = next((item for item in _mlb_schedule(game_date) if str(item.get("gamePk")) == str(game_pk)), None)
+    except requests.RequestException:
+        return None
+    if not game or str(((game.get("status") or {}).get("abstractGameState") or "")).casefold() != "final":
+        return None
+    teams = game.get("teams", {}) if isinstance(game.get("teams"), dict) else {}
+    away, home = teams.get("away", {}), teams.get("home", {})
+    away_score, home_score = _number(away.get("score") if isinstance(away, dict) else None), _number(home.get("score") if isinstance(home, dict) else None)
+    if away_score is None or home_score is None or away_score == home_score:
+        return None
+    return {"away_score": away_score, "home_score": home_score, "home_won": home_score > away_score, "status": "Final", "provider": "MLB Stats API final schedule"}
+
+
+@prediction_ledger_bp.post("/snapshots/mlb/grade-moneyline-context")
+def grade_mlb_moneyline_context():
+    """Attach verified final winners to forward moneyline-context observations."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    requested_date = str(request.args.get("date") or "")
+    if requested_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", requested_date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    store = _store()
+    if store:
+        rows = [(document.id, document.to_dict() or {}) for document in store.collection("prediction_mlb_moneyline_context_snapshots").stream()]
+    else:
+        rows = [(record_id, row) for record_id, row in _memory_backtests.items() if row.get("record_type") == "pregame_moneyline_context"]
+    checked = settled = pending = skipped = 0
+    errors: list[str] = []
+    for record_id, row in rows:
+        if row.get("record_type") != "pregame_moneyline_context" or row.get("result"):
+            continue
+        if requested_date and row.get("game_date") != requested_date:
+            continue
+        checked += 1
+        game_pk, game_date = row.get("game_pk"), str(row.get("game_date") or "")
+        if not game_pk or not game_date:
+            skipped += 1
+            continue
+        final = _mlb_verified_final_score(game_pk, game_date)
+        if final is None:
+            pending += 1
+            continue
+        update = {"result": final, "graded_at": _now(), "eligible_for_live_calibration": False}
+        if store:
+            store.collection("prediction_mlb_moneyline_context_snapshots").document(record_id).set(update, merge=True)
+        else:
+            _memory_backtests[record_id] = {**row, **update}
+        settled += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_moneyline_context", "date": requested_date or None, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached MLB Stats API verified final winners to forward moneyline-context observations. No live model changed."})
+
+
+@prediction_ledger_bp.post("/backtest/mlb/moneyline-baseline")
+def backfill_historical_mlb_moneyline_baseline():
+    """Import historical pregame h2h prices paired with verified final winners.
+
+    These rows establish only a market baseline.  They deliberately do not
+    claim historical lineup, weather, or bullpen context that was not captured
+    at the time, so they cannot train the future context-feature model.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date, snapshot = str(request.args.get("date") or ""), str(request.args.get("snapshot") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", snapshot):
+        return jsonify({"error": "Provide date=YYYY-MM-DD and snapshot=YYYY-MM-DDTHH:MM:SSZ."}), 400
+    try:
+        max_events = min(3, max(1, int(request.args.get("max_events") or 3)))
+    except ValueError:
+        max_events = 3
+    commit = str(request.args.get("commit") or "").lower() in {"1", "true", "yes"}
+    try:
+        captured = datetime.fromisoformat(snapshot.replace("Z", "+00:00"))
+        events = [event for event in _historical_events(snapshot) if not _has_started_at(event.get("commence_time"), captured)][:max_events]
+    except requests.RequestException as error:
+        return jsonify({"error": f"Historical MLB event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
+    preview = [{"event_id": event.get("id"), "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time")} for event in events]
+    if not commit:
+        return jsonify({"success": True, "preview": True, "date": date, "snapshot": snapshot, "events": preview, "estimated_historical_credits": len(events) * 30, "message": "Review the event list and estimate, then rerun with commit=true. Historical records are market-baseline research only."})
+    store = _store()
+    schedules: dict[str, list[dict[str, Any]]] = {}
+    stored = skipped = 0
+    errors: list[str] = []
+    for event in events:
+        event_id, game_date = str(event.get("id") or ""), str(event.get("commence_time") or "")[:10]
+        if not event_id or not game_date:
+            skipped += 1
+            continue
+        try:
+            odds = _historical_mlb_moneyline_odds(event_id, snapshot)
+            consensus = _pregame_moneyline_consensus({**event, **odds})
+            if game_date not in schedules:
+                schedules[game_date] = _mlb_schedule(game_date)
+        except requests.RequestException as error:
+            errors.append(f"{event_id}: {error.response.status_code if error.response else 'request error'}")
+            continue
+        if consensus is None:
+            skipped += 1
+            continue
+        away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+        game = next((item for item in schedules[game_date] if _name_key(((item.get("teams") or {}).get("away") or {}).get("team", {}).get("name")) == away_key and _name_key(((item.get("teams") or {}).get("home") or {}).get("team", {}).get("name")) == home_key), None)
+        final = _mlb_verified_final_score(game.get("gamePk"), game_date) if game else None
+        if not game or final is None:
+            skipped += 1
+            continue
+        record = {
+            "id": hashlib.sha256(f"historical-mlb-moneyline|{snapshot}|{event_id}".encode()).hexdigest()[:32],
+            "sport": "mlb", "record_type": "historical_pregame_moneyline_baseline", "isolation": "historical_market_baseline",
+            "eligible_for_live_calibration": False, "event_id": event_id, "game_pk": game.get("gamePk"),
+            "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": game_date, "commence_time": event.get("commence_time"),
+            "snapshot": snapshot, "market": consensus, "context_status": "not_historically_captured", "result": final,
+            "source": "The Odds API historical multi-book moneyline + MLB Stats API verified final",
+        }
+        if store:
+            store.collection("prediction_mlb_moneyline_context_snapshots").document(record["id"]).set(record)
+        else:
+            _memory_backtests[record["id"]] = record
+        stored += 1
+    return jsonify({"success": True, "preview": False, "isolated": True, "date": date, "snapshot": snapshot, "events": preview, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored historical pregame moneylines with verified final winners as a market-baseline dataset. No missing context was inferred."})
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/grade-market-consensus")
