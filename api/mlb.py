@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import statistics
 import time
 from datetime import datetime
 from typing import Any
@@ -286,12 +287,80 @@ def _team_projection(team_stats: dict[str, Any] | None, opponent_stats: dict[str
     return round(baseline * adjustment, 1)
 
 
+def _american_implied_probability(odds: Any) -> float | None:
+    try:
+        value = float(odds)
+    except (TypeError, ValueError):
+        return None
+    if value == 0:
+        return None
+    return (100 / (value + 100)) if value > 0 else (abs(value) / (abs(value) + 100))
+
+
+def _current_moneyline_consensus() -> dict[tuple[str, str], dict[str, Any]]:
+    """Return current no-vig MLB moneyline consensus keyed by away/home names.
+
+    This is intentionally a market observation, not a team-strength model. Each
+    bookmaker is de-vigged before taking the median, so a single stale book does
+    not dictate the displayed probability.
+    """
+    cache_key = "mlb-current-moneyline-consensus"
+    cached = _cache.get(cache_key)
+    if cached and time.time() - cached[0] < 60:
+        return cached[1]  # type: ignore[return-value]
+    key = os.getenv("ODDS_API_KEY")
+    if not key:
+        return {}
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds",
+        params={"apiKey": key, "regions": "us", "markets": "h2h", "oddsFormat": "american"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    consensus: dict[tuple[str, str], dict[str, Any]] = {}
+    for event in _rows(response.json()):
+        away_name, home_name = str(event.get("away_team") or ""), str(event.get("home_team") or "")
+        if not away_name or not home_name:
+            continue
+        home_probabilities: list[float] = []
+        home_odds: list[float] = []
+        away_odds: list[float] = []
+        bookmakers: list[str] = []
+        for bookmaker in _rows(event.get("bookmakers")):
+            market = next((item for item in _rows(bookmaker.get("markets")) if item.get("key") == "h2h"), None)
+            if not market:
+                continue
+            outcomes = {str(item.get("name")): item.get("price") for item in _rows(market.get("outcomes"))}
+            home_price, away_price = outcomes.get(home_name), outcomes.get(away_name)
+            home_implied, away_implied = _american_implied_probability(home_price), _american_implied_probability(away_price)
+            if home_implied is None or away_implied is None or home_implied + away_implied <= 0:
+                continue
+            home_probabilities.append(home_implied / (home_implied + away_implied))
+            home_odds.append(float(home_price))
+            away_odds.append(float(away_price))
+            bookmakers.append(str(bookmaker.get("title") or bookmaker.get("key") or "Sportsbook"))
+        if home_probabilities:
+            consensus[(away_name.casefold(), home_name.casefold())] = {
+                "market_type": "current_multi_book_moneyline_consensus",
+                "fair_home_win_probability": round(statistics.median(home_probabilities) * 100, 1),
+                "fair_away_win_probability": round((1 - statistics.median(home_probabilities)) * 100, 1),
+                "home_moneyline": round(statistics.median(home_odds)) if home_odds else None,
+                "away_moneyline": round(statistics.median(away_odds)) if away_odds else None,
+                "book_count": len(bookmakers), "bookmakers": bookmakers,
+                "taken_at": datetime.utcnow().isoformat() + "Z",
+                "source": "The Odds API current multi-book moneylines",
+            }
+    _cache[cache_key] = (time.time(), consensus)  # type: ignore[assignment]
+    return consensus
+
+
 @mlb_bp.get("/matchups")
 def matchups():
-    """Today's real MLB schedule with transparent team and player projections."""
+    """Today's schedule with market moneyline consensus and season context."""
     game_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
     try:
         games = _rows(_bdl_get("/mlb/v1/games", {"dates[]": game_date, "per_page": 100, "season_type": "regular"}))
+        moneylines = _current_moneyline_consensus()
         season = _season()
         active_players = _cached_rows("active-players", "/mlb/v1/players/active", {})
         active_by_team: dict[str, list[dict[str, Any]]] = {}
@@ -323,9 +392,11 @@ def matchups():
                 })
             data.append({
                 "id": str(game.get("id")), "date": game.get("date"), "status": game.get("status"), "venue": game.get("venue"),
-                "away": sides[0], "home": sides[1], "projection_method": "Team runs per game × bounded opponent ERA adjustment; player values are current-season per-game OPS/K/9 adjusted projections.",
+                "away": sides[0], "home": sides[1],
+                "moneyline_consensus": moneylines.get((str(away.get("display_name") or away.get("name") or "").casefold(), str(home.get("display_name") or home.get("name") or "").casefold())),
+                "season_context_method": "Team runs per game × bounded opponent ERA adjustment; player values are current-season per-game OPS/K/9 adjusted context values.",
             })
-        return jsonify({"success": True, "source": "BallDontLie MLB schedule and season statistics", "date": game_date, "data": data, "count": len(data)})
+        return jsonify({"success": True, "source": "BallDontLie schedule and season context; The Odds API current multi-book moneylines when available", "research_only": True, "date": game_date, "data": data, "count": len(data)})
     except RuntimeError as error:
         return jsonify({"success": False, "error": str(error)}), 503
     except requests.RequestException as error:
