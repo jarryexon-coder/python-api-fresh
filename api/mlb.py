@@ -354,6 +354,19 @@ def _current_moneyline_consensus() -> dict[tuple[str, str], dict[str, Any]]:
     return consensus
 
 
+def _is_final_game(game: dict[str, Any]) -> bool:
+    status = str(game.get("status") or "").casefold()
+    return "final" in status or "completed" in status
+
+
+def _final_score(game: dict[str, Any]) -> dict[str, float] | None:
+    away_score = _number(game, "visitor_score", "away_score", "visitor_team_score")
+    home_score = _number(game, "home_score", "home_team_score")
+    if away_score is None or home_score is None:
+        return None
+    return {"away": away_score, "home": home_score}
+
+
 @mlb_bp.get("/matchups")
 def matchups():
     """Today's schedule with market moneyline consensus and season context."""
@@ -390,10 +403,16 @@ def matchups():
                     "projected_runs": _team_projection(stats_by_team.get(team_id), stats_by_team.get(opponent_id)),
                     "players": roster,
                 })
+            final = _is_final_game(game)
             data.append({
                 "id": str(game.get("id")), "date": game.get("date"), "status": game.get("status"), "venue": game.get("venue"),
                 "away": sides[0], "home": sides[1],
-                "moneyline_consensus": moneylines.get((str(away.get("display_name") or away.get("name") or "").casefold(), str(home.get("display_name") or home.get("name") or "").casefold())),
+                # A current moneyline after a final is stale by definition. Keep
+                # it out of the response rather than letting the client imply it
+                # was a usable pregame market.
+                "moneyline_consensus": None if final else moneylines.get((str(away.get("display_name") or away.get("name") or "").casefold(), str(home.get("display_name") or home.get("name") or "").casefold())),
+                "game_state": "final" if final else "scheduled_or_live",
+                "final_score": _final_score(game) if final else None,
                 "season_context_method": "Team runs per game × bounded opponent ERA adjustment; player values are current-season per-game OPS/K/9 adjusted context values.",
             })
         return jsonify({"success": True, "source": "BallDontLie schedule and season context; The Odds API current multi-book moneylines when available", "research_only": True, "date": game_date, "data": data, "count": len(data)})
