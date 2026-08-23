@@ -333,6 +333,54 @@ def _current_mlb_props(event_id: str, markets: list[str]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _current_mlb_moneyline_events() -> list[dict[str, Any]]:
+    """Load the current MLB h2h board for an auditable pregame snapshot."""
+    key = _odds_key()
+    if not key:
+        raise RuntimeError("THE_ODDS_API_KEY is not configured")
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds",
+        params={"apiKey": key, "regions": "us", "markets": "h2h", "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def _pregame_moneyline_consensus(event: dict[str, Any]) -> dict[str, Any] | None:
+    """De-vig every complete h2h book, then use a median fair home probability."""
+    home, away = str(event.get("home_team") or ""), str(event.get("away_team") or "")
+    books: list[dict[str, Any]] = []
+    for bookmaker in event.get("bookmakers", []) if isinstance(event.get("bookmakers"), list) else []:
+        if not isinstance(bookmaker, dict):
+            continue
+        market = next((item for item in bookmaker.get("markets", []) if isinstance(item, dict) and item.get("key") == "h2h"), None)
+        outcomes = market.get("outcomes", []) if isinstance(market, dict) and isinstance(market.get("outcomes"), list) else []
+        prices = {str(item.get("name") or ""): _number(item.get("price")) for item in outcomes if isinstance(item, dict)}
+        if prices.get(home) is not None and prices.get(away) is not None:
+            books.append({"bookmaker": bookmaker.get("title") or bookmaker.get("key") or "Sportsbook", "over": prices[home], "under": prices[away]})
+    if len(books) < 2:
+        return None
+    representative = _representative_market_consensus(books)
+    if representative is None:
+        return None
+    home_odds, away_odds, fair_home, reference_bookmaker = representative
+    return {
+        "fair_home_win_probability": round(fair_home * 100, 2), "fair_away_win_probability": round((1 - fair_home) * 100, 2),
+        "home_moneyline": home_odds, "away_moneyline": away_odds, "book_count": len(books),
+        "bookmakers": [str(book["bookmaker"]) for book in books], "reference_bookmaker": reference_bookmaker,
+        "consensus_method": "median_devig_per_book_v2",
+    }
+
+
+def _has_started(commence_time: Any) -> bool:
+    try:
+        value = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        return value <= datetime.now(timezone.utc)
+    except ValueError:
+        return True
+
+
 def _current_nfl_preseason_odds() -> list[dict[str, Any]]:
     """Load only featured preseason game markets, never pretend props exist."""
     key = _odds_key()
@@ -960,6 +1008,83 @@ def snapshot_mlb_pregame_context():
             _memory_backtests[record["id"]] = record
         stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_context", "taken_at": taken_at, "events_checked": len(events), "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored timestamped MLB pregame context. No prediction or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/mlb/moneyline-context")
+def snapshot_mlb_moneyline_context():
+    """Persist an auditable pregame moneyline + available game-context record.
+
+    This is the training data collection step for a future moneyline model. It
+    makes no prediction and skips games at or after first pitch, so later model
+    work cannot accidentally use postgame prices or information.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    try:
+        max_events = min(15, max(1, int(request.args.get("max_events") or 15)))
+    except ValueError:
+        max_events = 15
+    taken_at, stored, skipped = _now(), 0, 0
+    errors: list[str] = []
+    store = _store()
+    schedules: dict[str, list[dict[str, Any]]] = {}
+    try:
+        events = _current_mlb_moneyline_events()
+    except requests.RequestException as error:
+        return jsonify({"error": f"Current MLB moneyline lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
+    eligible = [event for event in events if not _has_started(event.get("commence_time"))][:max_events]
+    for event in eligible:
+        event_id, commence_time = str(event.get("id") or ""), str(event.get("commence_time") or "")
+        game_date = commence_time[:10]
+        if not event_id or not game_date:
+            skipped += 1
+            continue
+        consensus = _pregame_moneyline_consensus(event)
+        if consensus is None:
+            skipped += 1
+            continue
+        try:
+            if game_date not in schedules:
+                schedules[game_date] = _mlb_schedule(game_date)
+        except requests.RequestException as error:
+            errors.append(f"{event_id}: schedule {error.response.status_code if error.response else 'request error'}")
+            continue
+        away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+        game = next((item for item in schedules[game_date] if _name_key(((item.get("teams") or {}).get("away") or {}).get("team", {}).get("name")) == away_key and _name_key(((item.get("teams") or {}).get("home") or {}).get("team", {}).get("name")) == home_key), None)
+        context_status = "available" if game else "unavailable"
+        lineups, lineup_status = {"away": [], "home": []}, "unavailable"
+        venue: dict[str, Any] = {}
+        weather: dict[str, Any] = {}
+        away_pitcher = home_pitcher = None
+        game_pk = None
+        if game:
+            game_pk = game.get("gamePk")
+            teams = game.get("teams", {}) if isinstance(game.get("teams"), dict) else {}
+            away = teams.get("away", {}) if isinstance(teams.get("away"), dict) else {}
+            home = teams.get("home", {}) if isinstance(teams.get("home"), dict) else {}
+            venue = game.get("venue", {}) if isinstance(game.get("venue"), dict) else {}
+            weather = game.get("weather", {}) if isinstance(game.get("weather"), dict) else {}
+            away_pitcher, home_pitcher = _mlb_pitcher_context(away.get("probablePitcher")), _mlb_pitcher_context(home.get("probablePitcher"))
+            try:
+                lineups, lineup_status = _mlb_lineup(game_pk)
+            except requests.RequestException as error:
+                errors.append(f"{event_id}: lineup {error.response.status_code if error.response else 'request error'}")
+        record = {
+            "id": hashlib.sha256(f"mlb-moneyline-context|{taken_at}|{event_id}".encode()).hexdigest()[:32],
+            "sport": "mlb", "record_type": "pregame_moneyline_context", "isolation": "forward_moneyline_research",
+            "eligible_for_live_calibration": False, "taken_at": taken_at, "event_id": event_id, "game_pk": game_pk,
+            "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": game_date, "commence_time": commence_time,
+            "market": consensus, "context_status": context_status, "venue": {"id": venue.get("id"), "name": venue.get("name")},
+            "weather": weather, "away_probable_pitcher": away_pitcher, "home_probable_pitcher": home_pitcher,
+            "lineup_status": lineup_status, "lineups": lineups, "bullpen_context_status": "not_collected_yet",
+            "source": "The Odds API current multi-book moneyline + MLB Stats API pregame context",
+        }
+        if store:
+            store.collection("prediction_mlb_moneyline_context_snapshots").document(record["id"]).set(record)
+        else:
+            _memory_backtests[record["id"]] = record
+        stored += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_moneyline_context", "taken_at": taken_at, "events_checked": len(events), "eligible_pregame_events": len(eligible), "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored pregame multi-book moneylines with available lineup, pitcher, venue, and weather context. Records are research-only and cannot change live recommendations."})
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/grade-market-consensus")
