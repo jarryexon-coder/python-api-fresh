@@ -1224,6 +1224,56 @@ def backfill_historical_mlb_moneyline_baseline():
     return jsonify({"success": True, "preview": False, "isolated": True, "date": date, "snapshot": snapshot, "events": preview, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored historical pregame moneylines with verified final winners as a market-baseline dataset. No missing context was inferred."})
 
 
+@prediction_ledger_bp.get("/backtest/mlb/moneyline-baseline/report")
+def report_historical_mlb_moneyline_baseline():
+    """Read-only calibration report for historical pregame moneyline baselines."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    store = _store()
+    if store:
+        rows = [document.to_dict() or {} for document in store.collection("prediction_mlb_moneyline_context_snapshots").where("record_type", "==", "historical_pregame_moneyline_baseline").stream()]
+    else:
+        rows = [row for row in _memory_backtests.values() if row.get("record_type") == "historical_pregame_moneyline_baseline"]
+    evaluated: list[tuple[dict[str, Any], float, bool]] = []
+    for row in rows:
+        market, result = row.get("market"), row.get("result")
+        probability = _number(market.get("fair_home_win_probability")) if isinstance(market, dict) else None
+        home_won = result.get("home_won") if isinstance(result, dict) else None
+        if probability is None or not isinstance(home_won, bool):
+            continue
+        evaluated.append((row, probability / 100, home_won))
+    if not evaluated:
+        return jsonify({"success": True, "isolated": True, "records_found": len(rows), "samples": 0, "message": "No settled historical moneyline-baseline records are available yet."})
+    buckets: dict[str, list[tuple[float, bool]]] = defaultdict(list)
+    for _, probability, home_won in evaluated:
+        lower = min(90, int(probability * 100) // 10 * 10)
+        buckets[f"{lower}-{lower + 9}%"].append((probability, home_won))
+    by_probability_band = {
+        label: {
+            "samples": len(values), "average_fair_home_win_probability": round(sum(probability for probability, _ in values) / len(values) * 100, 1),
+            "actual_home_win_rate": round(sum(home_won for _, home_won in values) / len(values) * 100, 1),
+            "brier_score": round(sum((probability - int(home_won)) ** 2 for probability, home_won in values) / len(values), 4),
+        }
+        for label, values in sorted(buckets.items())
+    }
+    samples = len(evaluated)
+    favorite_correct = sum((home_won if probability >= .5 else not home_won) for _, probability, home_won in evaluated)
+    dates = sorted(str(row.get("game_date") or "") for row, _, _ in evaluated if row.get("game_date"))
+    return jsonify({
+        "success": True, "isolated": True, "record_type": "historical_pregame_moneyline_baseline", "records_found": len(rows),
+        "samples": samples, "date_range": {"first": dates[0] if dates else None, "last": dates[-1] if dates else None, "days": len(set(dates))},
+        "overall": {
+            "average_fair_home_win_probability": round(sum(probability for _, probability, _ in evaluated) / samples * 100, 1),
+            "actual_home_win_rate": round(sum(home_won for _, _, home_won in evaluated) / samples * 100, 1),
+            "brier_score": round(sum((probability - int(home_won)) ** 2 for _, probability, home_won in evaluated) / samples, 4),
+            "favorite_accuracy": round(favorite_correct / samples * 100, 1),
+        },
+        "by_home_probability_band": by_probability_band,
+        "minimums": {"market_baseline_samples": 200, "context_model_training_samples": 500},
+        "message": "Historical market-baseline calibration only. These rows lack historical lineup, weather, pitcher, and bullpen snapshots, so they cannot validate a context model or create a recommendation.",
+    })
+
+
 @prediction_ledger_bp.post("/snapshots/mlb/grade-market-consensus")
 def grade_mlb_market_consensus():
     """Attach verified final results to forward MLB consensus observations."""
