@@ -26,7 +26,7 @@ from api.live_props import _mlb_projections
 
 
 prediction_ledger_bp = Blueprint("prediction_ledger", __name__, url_prefix="/api/prediction-ledger")
-VALID_SPORTS = {"mlb", "nfl", "nba"}
+VALID_SPORTS = {"mlb", "nfl", "nba", "wnba"}
 MIN_CALIBRATION_SAMPLE = 30
 _memory_ledger: dict[str, dict[str, Any]] = {}
 _memory_backtests: dict[str, dict[str, Any]] = {}
@@ -39,6 +39,13 @@ MLB_BACKTEST_MARKETS = {
     "batter_home_runs": ("Home Runs", "hr"),
     "batter_total_bases": ("Total Bases", "total_bases"),
     "pitcher_strikeouts": ("Strikeouts", "p_k"),
+}
+WNBA_MARKETS = {
+    "player_points": ("Points", "points"),
+    "player_rebounds": ("Rebounds", "rebounds"),
+    "player_assists": ("Assists", "assists"),
+    "player_threes": ("3-Pointers Made", "threes"),
+    "player_points_rebounds_assists": ("Points + Rebounds + Assists", "points_rebounds_assists"),
 }
 NFL_PRESEASON_GAME_MARKETS = {"h2h", "spreads", "totals"}
 NFL_PRESEASON_MAX_SNAPSHOT_LEAD_HOURS = 16
@@ -342,6 +349,92 @@ def _current_mlb_props(event_id: str, markets: list[str]) -> dict[str, Any]:
     response.raise_for_status()
     payload = response.json()
     return payload if isinstance(payload, dict) else {}
+
+
+def _current_wnba_events() -> list[dict[str, Any]]:
+    key = _odds_key()
+    if not key:
+        raise RuntimeError("THE_ODDS_API_KEY is not configured")
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/sports/basketball_wnba/events",
+        params={"apiKey": key}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def _current_wnba_props(event_id: str, markets: list[str]) -> dict[str, Any]:
+    response = requests.get(
+        f"https://api.the-odds-api.com/v4/sports/basketball_wnba/events/{event_id}/odds",
+        params={"apiKey": _odds_key(), "regions": "us", "markets": ",".join(markets), "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _espn_wnba_scoreboard(date: str) -> list[dict[str, Any]]:
+    response = requests.get(
+        "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard",
+        params={"dates": date.replace("-", ""), "limit": 100}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    events = payload.get("events", []) if isinstance(payload, dict) else []
+    return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+
+
+def _espn_wnba_final_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+    for candidate in _espn_wnba_scoreboard(date):
+        competition = ((candidate.get("competitions") or [{}])[0] if isinstance(candidate.get("competitions"), list) else {})
+        competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
+        teams = {
+            str(item.get("homeAway") or ""): _name_key(((item.get("team") or {}).get("displayName") or ((item.get("team") or {}).get("name"))))
+            for item in competitors if isinstance(item, dict)
+        }
+        status = ((candidate.get("status") or {}).get("type") or {}) if isinstance(candidate.get("status"), dict) else {}
+        if teams.get("away") == away_key and teams.get("home") == home_key and status.get("completed") is True:
+            return candidate
+    return None
+
+
+def _espn_wnba_box_stats(event_id: Any) -> dict[str, dict[str, float]]:
+    response = requests.get(
+        "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary",
+        params={"event": event_id}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    status = ((((payload.get("header") or {}).get("competitions") or [{}])[0].get("status") or {}).get("type") or {}) if isinstance(payload, dict) else {}
+    if status.get("completed") is not True:
+        return {}
+    result: dict[str, dict[str, float]] = {}
+    groups = ((payload.get("boxscore") or {}).get("players") or []) if isinstance(payload, dict) else []
+    for group in groups if isinstance(groups, list) else []:
+        for statistics in group.get("statistics", []) if isinstance(group, dict) else []:
+            names = statistics.get("names", []) if isinstance(statistics, dict) else []
+            athletes = statistics.get("athletes", []) if isinstance(statistics, dict) else []
+            if not isinstance(names, list) or not isinstance(athletes, list):
+                continue
+            for row in athletes:
+                athlete = row.get("athlete", {}) if isinstance(row, dict) else {}
+                name = athlete.get("displayName") if isinstance(athlete, dict) else None
+                values = row.get("stats", []) if isinstance(row, dict) else []
+                if not name or row.get("didNotPlay") is True or not isinstance(values, list):
+                    continue
+                columns = {str(column): values[index] for index, column in enumerate(names) if index < len(values)}
+                points, rebounds, assists = _number(columns.get("PTS")), _number(columns.get("REB")), _number(columns.get("AST"))
+                threes_text = str(columns.get("3PT") or "").split("-", 1)[0]
+                threes = _number(threes_text)
+                if points is None or rebounds is None or assists is None or threes is None:
+                    continue
+                result[_name_key(name)] = {
+                    "points": points, "rebounds": rebounds, "assists": assists, "threes": threes,
+                    "points_rebounds_assists": points + rebounds + assists,
+                }
+    return result
 
 
 def _current_mlb_moneyline_events() -> list[dict[str, Any]]:
@@ -809,6 +902,68 @@ def snapshot_mlb_market_consensus():
                 _memory_backtests[record["id"]] = record
             stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book pregame market observations. No prediction or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/wnba/market-consensus")
+def snapshot_wnba_market_consensus():
+    """Persist a research-only WNBA player-prop market snapshot before games."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    requested = [value.strip() for value in str(request.args.get("markets") or "player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists").split(",") if value.strip()]
+    markets = [market for market in requested if market in WNBA_MARKETS]
+    if not markets:
+        return jsonify({"error": "Provide one or more supported WNBA player-prop markets."}), 400
+    try:
+        max_events = min(12, max(1, int(request.args.get("max_events") or 6)))
+    except ValueError:
+        max_events = 6
+    taken_at = _now()
+    try:
+        events = [event for event in _current_wnba_events() if not _has_started(event.get("commence_time"))][:max_events]
+    except (requests.RequestException, RuntimeError) as error:
+        return jsonify({"error": f"Current WNBA event lookup failed ({error.response.status_code if isinstance(error, requests.RequestException) and error.response else str(error)})."}), 502
+    stored = skipped = 0
+    errors: list[str] = []
+    store = _store()
+    for event in events:
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            skipped += 1
+            continue
+        try:
+            odds = _current_wnba_props(event_id, markets)
+        except requests.RequestException as error:
+            errors.append(f"{event_id}: {error.response.status_code if error.response else 'request error'}")
+            continue
+        consensus, incomplete_pairs = _multi_book_prop_consensus(odds, markets)
+        skipped += incomplete_pairs
+        for (market_key, player, line), books in consensus.items():
+            if len(books) < 2:
+                skipped += 1
+                continue
+            representative = _representative_market_consensus(books)
+            if representative is None:
+                skipped += 1
+                continue
+            over, under, fair_over, reference_bookmaker = representative
+            record = {
+                "id": hashlib.sha256(f"wnba-market-snapshot|{taken_at}|{event_id}|{market_key}|{player}|{line}".encode()).hexdigest()[:32],
+                "sport": "wnba", "record_type": "pregame_wnba_market_consensus", "isolation": "wnba_research",
+                "eligible_for_live_calibration": False, "taken_at": taken_at, "event_id": event_id,
+                "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time"),
+                "game_date": str(event.get("commence_time") or "")[:10], "player": player, "market_key": market_key,
+                "market": WNBA_MARKETS[market_key][0], "line": line, "over_odds": over, "under_odds": under,
+                "fair_probability_over": round(fair_over * 100, 2), "book_count": len(books),
+                "bookmakers": [book["bookmaker"] for book in books], "reference_bookmaker": reference_bookmaker,
+                "consensus_method": "median_devig_per_book_v2", "projection": None,
+                "projection_source": None, "source": "The Odds API current multi-book WNBA player-prop snapshot",
+            }
+            if store:
+                store.collection("prediction_market_snapshots").document(record["id"]).set(record)
+            else:
+                _memory_backtests[record["id"]] = record
+            stored += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_wnba_market_consensus", "season_phase": "regular_season", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book WNBA pregame market observations. No player projection, recommendation, or live-model change was made."})
 
 
 @prediction_ledger_bp.post("/snapshots/nfl/preseason")
@@ -1324,6 +1479,94 @@ def grade_mlb_market_consensus():
             _memory_backtests[str(row.get("id"))] = {**row, **update}
         settled += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "date": date, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached verified final results to forward consensus observations. No live prediction change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/wnba/grade-market-consensus")
+def grade_wnba_market_consensus():
+    """Attach final WNBA player statistics to forward research snapshots."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat())
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    store = _store()
+    if store:
+        rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots").where("record_type", "==", "pregame_wnba_market_consensus").stream()]
+    else:
+        rows = [row for row in _memory_backtests.values() if row.get("record_type") == "pregame_wnba_market_consensus"]
+    rows = [row for row in rows if row.get("game_date") == date and not row.get("settled_at")]
+    game_cache: dict[str, tuple[dict[str, Any] | None, dict[str, dict[str, float]]]] = {}
+    checked = settled = pending = skipped = 0
+    errors: list[str] = []
+    for row in rows:
+        checked += 1
+        game_label = str(row.get("game") or "")
+        if game_label not in game_cache:
+            teams = [team.strip() for team in game_label.split("@")]
+            if len(teams) != 2:
+                game_cache[game_label] = (None, {})
+            else:
+                try:
+                    game = _espn_wnba_final_game_for_event(date, {"away_team": teams[0], "home_team": teams[1]})
+                    game_cache[game_label] = (game, _espn_wnba_box_stats(game.get("id")) if game else {})
+                except requests.RequestException as error:
+                    errors.append(f"{game_label}: {error.response.status_code if error.response else 'request error'}")
+                    game_cache[game_label] = (None, {})
+        game, stats = game_cache[game_label]
+        if not game or not stats:
+            pending += 1
+            continue
+        market_key = str(row.get("market_key") or "")
+        field = WNBA_MARKETS.get(market_key, ("", ""))[1]
+        actual, line = stats.get(_name_key(row.get("player")), {}).get(field), _number(row.get("line"))
+        if actual is None or line is None:
+            skipped += 1
+            continue
+        outcome = "push" if actual == line else "over" if actual > line else "under"
+        update = {"actual_value": actual, "outcome": outcome, "settled_at": _now(), "result_source": "ESPN WNBA finalized box score"}
+        if store:
+            store.collection("prediction_market_snapshots").document(str(row.get("id"))).set(update, merge=True)
+        else:
+            _memory_backtests[str(row.get("id"))] = {**row, **update}
+        settled += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_wnba_market_consensus", "season_phase": "regular_season", "date": date, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached ESPN final WNBA player statistics to forward research observations. No player projection or live-model change was made."})
+
+
+@prediction_ledger_bp.get("/snapshots/wnba/market-consensus/report")
+def report_wnba_market_consensus():
+    """Read-only calibration report for settled, forward WNBA market snapshots."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    store = _store()
+    if store:
+        rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots").where("record_type", "==", "pregame_wnba_market_consensus").stream()]
+    else:
+        rows = [row for row in _memory_backtests.values() if row.get("record_type") == "pregame_wnba_market_consensus"]
+    settled = [row for row in rows if _number(row.get("line")) is not None and _number(row.get("actual_value")) is not None and _number(row.get("fair_probability_over")) is not None and _number(row.get("actual_value")) != _number(row.get("line"))]
+    by_market: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in settled:
+        by_market[str(row.get("market") or "Other")].append(row)
+
+    def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+        samples = len(items)
+        outcomes = [float(item["actual_value"]) > float(item["line"]) for item in items]
+        probabilities = [float(item["fair_probability_over"]) / 100 for item in items]
+        return {
+            "samples": samples,
+            "actual_over_rate": round(sum(outcomes) / samples * 100, 1) if samples else None,
+            "average_fair_over_probability": round(sum(probabilities) / samples * 100, 1) if samples else None,
+            "brier_score": round(sum((probability - int(outcome)) ** 2 for probability, outcome in zip(probabilities, outcomes)) / samples, 4) if samples else None,
+        }
+
+    dates = sorted({str(row.get("game_date") or "") for row in settled if row.get("game_date")})
+    return jsonify({
+        "success": True, "isolated": True, "season_phase": "regular_season", "record_type": "pregame_wnba_market_consensus",
+        "records_found": len(rows), "settled_two_sided_records": len(settled),
+        "date_range": {"first": dates[0] if dates else None, "last": dates[-1] if dates else None, "days": len(dates)},
+        "overall": metrics(settled), "by_market": {market: metrics(items) for market, items in sorted(by_market.items())},
+        "minimums": {"research_audit_samples": 200, "future_model_training_samples": 500},
+        "message": "Forward WNBA market-observation report only. It does not produce a player projection, recommendation, or live-model change.",
+    })
 
 
 @prediction_ledger_bp.post("/snapshots/mlb/historical-market-consensus")
