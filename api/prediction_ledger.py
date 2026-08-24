@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import firebase_admin
 from firebase_admin import firestore
@@ -75,6 +76,15 @@ def _store():
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _eastern_sports_date(value: Any) -> str:
+    """Use the league's calendar date, not a late game's following UTC date."""
+    try:
+        instant = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return instant.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except ValueError:
+        return str(value or "")[:10]
 
 
 def _admin() -> bool:
@@ -951,7 +961,7 @@ def snapshot_wnba_market_consensus():
                 "sport": "wnba", "record_type": "pregame_wnba_market_consensus", "isolation": "wnba_research",
                 "eligible_for_live_calibration": False, "taken_at": taken_at, "event_id": event_id,
                 "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time"),
-                "game_date": str(event.get("commence_time") or "")[:10], "player": player, "market_key": market_key,
+                "game_date": _eastern_sports_date(event.get("commence_time")), "player": player, "market_key": market_key,
                 "market": WNBA_MARKETS[market_key][0], "line": line, "over_odds": over, "under_odds": under,
                 "fair_probability_over": round(fair_over * 100, 2), "book_count": len(books),
                 "bookmakers": [book["bookmaker"] for book in books], "reference_bookmaker": reference_bookmaker,
