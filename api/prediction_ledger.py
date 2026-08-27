@@ -1258,6 +1258,62 @@ def snapshot_nfl_preseason():
     return jsonify({"success": True, "isolated": True, "season_phase": "preseason", "eligible_for_live_calibration": False, "taken_at": taken_at, "events_checked": len(events), "market_snapshots": market_stored, "player_projection_snapshots": projection_stored, "skipped": skipped, "message": "Stored NFL preseason featured game markets and Tank01 player projections separately. No live picks or regular-season model changed."})
 
 
+@prediction_ledger_bp.post("/snapshots/nfl/preseason/grade")
+def grade_nfl_preseason():
+    """Attach provider-confirmed final scores to current preseason market snapshots.
+
+    The score is deliberately stored separately from the pregame market and
+    projection rows. It never promotes a preseason result into the regular
+    season model or changes any live customer-facing recommendation.
+    """
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or "")
+    if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    store = _store()
+    if store:
+        rows = [(document.id, document.to_dict() or {}) for document in store.collection("prediction_nfl_preseason_snapshots").where("record_type", "==", "pregame_game_market_snapshot").stream()]
+    else:
+        rows = [(record_id, row) for record_id, row in _memory_backtests.items() if row.get("record_type") == "pregame_game_market_snapshot" and row.get("season_phase") == "preseason"]
+    checked = settled = pending = skipped = 0
+    errors: list[str] = []
+    for record_id, row in rows:
+        if row.get("season_phase") != "preseason" or row.get("result"):
+            continue
+        if date and row.get("game_date") != date:
+            continue
+        checked += 1
+        teams = [team.strip() for team in str(row.get("game") or "").split("@")]
+        game_date = str(row.get("game_date") or "")
+        if len(teams) != 2 or not game_date:
+            skipped += 1
+            continue
+        try:
+            final = _nfl_final_game_for_event(game_date, {"away_team": teams[0], "home_team": teams[1]})
+        except requests.RequestException as error:
+            errors.append(f"{row.get('game')}: {error.response.status_code if error.response else 'request error'}")
+            continue
+        if final is None:
+            pending += 1
+            continue
+        away_score, home_score = _number(final.get("away_score")), _number(final.get("home_score"))
+        if away_score is None or home_score is None or away_score == home_score:
+            skipped += 1
+            continue
+        update = {
+            "result": {**final, "home_won": home_score > away_score},
+            "graded_at": _now(),
+            "eligible_for_live_calibration": False,
+        }
+        if store:
+            store.collection("prediction_nfl_preseason_snapshots").document(record_id).set(update, merge=True)
+        else:
+            _memory_backtests[record_id] = {**row, **update}
+        settled += 1
+    return jsonify({"success": True, "isolated": True, "season_phase": "preseason", "record_type": "pregame_game_market_snapshot", "date": date or None, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached provider-confirmed NFL preseason final scores to saved game-market records. No regular-season or live model changed."})
+
+
 @prediction_ledger_bp.post("/snapshots/nfl/preseason/historical-markets")
 def snapshot_historical_nfl_preseason_markets():
     """Backfill point-in-time preseason featured markets, preview first.

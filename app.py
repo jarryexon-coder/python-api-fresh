@@ -1122,6 +1122,7 @@ def mobile_package_for_request():
         '/api/prediction-ledger/snapshots/mlb/pregame-context',
         '/api/prediction-ledger/snapshots/mlb/grade-market-consensus',
         '/api/prediction-ledger/snapshots/nfl/preseason',
+        '/api/prediction-ledger/snapshots/nfl/preseason/grade',
         '/api/prediction-ledger/snapshots/nfl/preseason/historical-markets',
         '/api/prediction-ledger/snapshots/ncaaf/market-consensus',
         '/api/prediction-ledger/snapshots/ncaaf/moneyline-context',
