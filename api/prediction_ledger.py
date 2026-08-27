@@ -869,6 +869,47 @@ def _multi_book_prop_consensus(odds: dict[str, Any], markets: list[str]) -> tupl
     return consensus, sum(1 for books in consensus.values() if len(books) < 2)
 
 
+def _prop_market_coverage(odds: dict[str, Any], markets: list[str]) -> dict[str, dict[str, int]]:
+    """Describe raw provider availability before the two-book consensus gate.
+
+    This makes a missing market distinguishable from a market that is offered
+    by only one book or has incomplete pricing.  The result contains no model
+    output and is returned only as snapshot diagnostics.
+    """
+    coverage = {
+        market: {"books_with_market": 0, "complete_one_book_pairs": 0, "unique_pairs": 0, "two_book_pairs": 0}
+        for market in markets
+    }
+    pairs_by_market: dict[str, dict[tuple[str, float], int]] = {market: defaultdict(int) for market in markets}
+    for bookmaker in odds.get("bookmakers", []) if isinstance(odds, dict) else []:
+        if not isinstance(bookmaker, dict):
+            continue
+        for market in bookmaker.get("markets", []):
+            if not isinstance(market, dict):
+                continue
+            market_key = str(market.get("key") or "")
+            if market_key not in coverage:
+                continue
+            coverage[market_key]["books_with_market"] += 1
+            paired: dict[tuple[str, float], dict[str, float | None]] = {}
+            for outcome in market.get("outcomes", []):
+                if not isinstance(outcome, dict):
+                    continue
+                side = str(outcome.get("name") or "").lower()
+                player = str(outcome.get("description") or outcome.get("player") or "").strip()
+                line = _number(outcome.get("point"))
+                if player and line is not None and side in {"over", "under"}:
+                    paired.setdefault((player, line), {"over": None, "under": None})[side] = _number(outcome.get("price"))
+            for key, prices in paired.items():
+                if prices.get("over") is not None and prices.get("under") is not None:
+                    coverage[market_key]["complete_one_book_pairs"] += 1
+                    pairs_by_market[market_key][key] += 1
+    for market_key, pairs in pairs_by_market.items():
+        coverage[market_key]["unique_pairs"] = len(pairs)
+        coverage[market_key]["two_book_pairs"] = sum(count >= 2 for count in pairs.values())
+    return coverage
+
+
 def _representative_market_consensus(books: list[dict[str, Any]]) -> tuple[float, float, float, str] | None:
     """De-vig each book before finding a consensus; never median American odds.
 
@@ -977,6 +1018,13 @@ def snapshot_mlb_market_consensus():
     except requests.RequestException as error:
         return jsonify({"error": f"Current MLB event lookup failed ({error.response.status_code if error.response else 'request error'})."}), 502
     stored = skipped = 0
+    # Surface coverage by market.  The snapshot deliberately requires a
+    # complete Over/Under pair from at least two books; without this detail a
+    # sparse market can look like a model or grading failure.
+    coverage: dict[str, dict[str, int]] = {
+        market: {"books_with_market": 0, "complete_one_book_pairs": 0, "unique_pairs": 0, "two_book_pairs": 0, "stored": 0}
+        for market in markets
+    }
     errors: list[str] = []
     store = _store()
     # Capture the projection available at snapshot time beside every posted
@@ -995,6 +1043,10 @@ def snapshot_mlb_market_consensus():
         except requests.RequestException as error:
             errors.append(f"{event_id}: {error.response.status_code if error.response else 'request error'}")
             continue
+        event_coverage = _prop_market_coverage(odds, markets)
+        for market_key, values in event_coverage.items():
+            for field, value in values.items():
+                coverage[market_key][field] += value
         consensus, incomplete_pairs = _multi_book_prop_consensus(odds, markets)
         skipped += incomplete_pairs
         for (market_key, player, line), books in consensus.items():
@@ -1026,7 +1078,8 @@ def snapshot_mlb_market_consensus():
             else:
                 _memory_backtests[record["id"]] = record
             stored += 1
-    return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book pregame market observations. No prediction or live-model change was made."})
+            coverage[market_key]["stored"] += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "market_coverage": coverage, "errors": errors[:10], "message": "Stored real multi-book pregame market observations. No prediction or live-model change was made."})
 
 
 @prediction_ledger_bp.post("/snapshots/wnba/market-consensus")
