@@ -48,6 +48,16 @@ WNBA_MARKETS = {
     "player_threes": ("3-Pointers Made", "threes"),
     "player_points_rebounds_assists": ("Points + Rebounds + Assists", "points_rebounds_assists"),
 }
+NCAAF_PROP_MARKETS = {
+    "player_pass_yds": ("Passing Yards", "passing_yards"),
+    "player_pass_tds": ("Passing Touchdowns", "passing_touchdowns"),
+    "player_pass_interceptions": ("Passing Interceptions", "passing_interceptions"),
+    "player_rush_yds": ("Rushing Yards", "rushing_yards"),
+    "player_rush_tds": ("Rushing Touchdowns", "rushing_touchdowns"),
+    "player_reception_yds": ("Receiving Yards", "receiving_yards"),
+    "player_receptions": ("Receptions", "receptions"),
+    "player_reception_tds": ("Receiving Touchdowns", "receiving_touchdowns"),
+}
 NFL_PRESEASON_GAME_MARKETS = {"h2h", "spreads", "totals"}
 NFL_PRESEASON_MAX_SNAPSHOT_LEAD_HOURS = 16
 MIN_BACKTEST_PROMOTION_SAMPLE = 500
@@ -384,6 +394,44 @@ def _current_wnba_props(event_id: str, markets: list[str]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _current_ncaaf_events() -> list[dict[str, Any]]:
+    """Load current NCAAF events for event-level player-prop requests."""
+    key = _odds_key()
+    if not key:
+        raise RuntimeError("THE_ODDS_API_KEY is not configured")
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/sports/americanfootball_ncaaf/events",
+        params={"apiKey": key}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
+def _current_ncaaf_props(event_id: str, markets: list[str]) -> dict[str, Any]:
+    response = requests.get(
+        f"https://api.the-odds-api.com/v4/sports/americanfootball_ncaaf/events/{event_id}/odds",
+        params={"apiKey": _odds_key(), "regions": "us", "markets": ",".join(markets), "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _current_ncaaf_moneyline_events() -> list[dict[str, Any]]:
+    """Load current NCAAF moneylines; individual props remain event-level."""
+    key = _odds_key()
+    if not key:
+        raise RuntimeError("THE_ODDS_API_KEY is not configured")
+    response = requests.get(
+        "https://api.the-odds-api.com/v4/sports/americanfootball_ncaaf/odds",
+        params={"apiKey": key, "regions": "us", "markets": "h2h", "oddsFormat": "american"}, timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+
 def _espn_wnba_scoreboard(date: str) -> list[dict[str, Any]]:
     response = requests.get(
         "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard",
@@ -444,6 +492,73 @@ def _espn_wnba_box_stats(event_id: Any) -> dict[str, dict[str, float]]:
                     "points": points, "rebounds": rebounds, "assists": assists, "threes": threes,
                     "points_rebounds_assists": points + rebounds + assists,
                 }
+    return result
+
+
+def _espn_ncaaf_scoreboard(date: str) -> list[dict[str, Any]]:
+    response = requests.get(
+        "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard",
+        params={"dates": date.replace("-", ""), "limit": 500}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    events = payload.get("events", []) if isinstance(payload, dict) else []
+    return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+
+
+def _espn_ncaaf_final_game_for_event(date: str, event: dict[str, Any]) -> dict[str, Any] | None:
+    away_key, home_key = _name_key(event.get("away_team")), _name_key(event.get("home_team"))
+    for candidate in _espn_ncaaf_scoreboard(date):
+        competition = ((candidate.get("competitions") or [{}])[0] if isinstance(candidate.get("competitions"), list) else {})
+        competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
+        teams = {
+            str(item.get("homeAway") or ""): _name_key(((item.get("team") or {}).get("displayName") or ((item.get("team") or {}).get("name"))))
+            for item in competitors if isinstance(item, dict)
+        }
+        status = ((candidate.get("status") or {}).get("type") or {}) if isinstance(candidate.get("status"), dict) else {}
+        if teams.get("away") == away_key and teams.get("home") == home_key and status.get("completed") is True:
+            return candidate
+    return None
+
+
+def _espn_ncaaf_box_stats(event_id: Any) -> dict[str, dict[str, float]]:
+    """Normalize only final, observable NCAAF box-score statistics."""
+    response = requests.get(
+        "https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary",
+        params={"event": event_id}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    status = ((((payload.get("header") or {}).get("competitions") or [{}])[0].get("status") or {}).get("type") or {}) if isinstance(payload, dict) else {}
+    if status.get("completed") is not True:
+        return {}
+    result: dict[str, dict[str, float]] = {}
+    groups = ((payload.get("boxscore") or {}).get("players") or []) if isinstance(payload, dict) else []
+    category_fields = {
+        "passing": {"YDS": "passing_yards", "TD": "passing_touchdowns", "INT": "passing_interceptions"},
+        "rushing": {"YDS": "rushing_yards", "TD": "rushing_touchdowns"},
+        "receiving": {"REC": "receptions", "YDS": "receiving_yards", "TD": "receiving_touchdowns"},
+    }
+    for group in groups if isinstance(groups, list) else []:
+        for statistics in group.get("statistics", []) if isinstance(group, dict) else []:
+            category = str(statistics.get("name") or statistics.get("displayName") or "").lower()
+            fields = category_fields.get(category)
+            names = statistics.get("names", []) if isinstance(statistics, dict) else []
+            athletes = statistics.get("athletes", []) if isinstance(statistics, dict) else []
+            if not fields or not isinstance(names, list) or not isinstance(athletes, list):
+                continue
+            for row in athletes:
+                athlete = row.get("athlete", {}) if isinstance(row, dict) else {}
+                name = athlete.get("displayName") if isinstance(athlete, dict) else None
+                values = row.get("stats", []) if isinstance(row, dict) else []
+                if not name or row.get("didNotPlay") is True or not isinstance(values, list):
+                    continue
+                columns = {str(column).upper(): values[index] for index, column in enumerate(names) if index < len(values)}
+                stats = result.setdefault(_name_key(name), {})
+                for column, field in fields.items():
+                    value = _number(columns.get(column))
+                    if value is not None:
+                        stats[field] = value
     return result
 
 
@@ -974,6 +1089,106 @@ def snapshot_wnba_market_consensus():
                 _memory_backtests[record["id"]] = record
             stored += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_wnba_market_consensus", "season_phase": "regular_season", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book WNBA pregame market observations. No player projection, recommendation, or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/ncaaf/market-consensus")
+def snapshot_ncaaf_market_consensus():
+    """Persist current NCAAF player-prop observations for later research grading."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    requested = [value.strip() for value in str(request.args.get("markets") or ",".join(NCAAF_PROP_MARKETS)).split(",") if value.strip()]
+    markets = [market for market in requested if market in NCAAF_PROP_MARKETS]
+    if not markets:
+        return jsonify({"error": "Provide one or more supported NCAAF player-prop markets."}), 400
+    try:
+        max_events = min(12, max(1, int(request.args.get("max_events") or 6)))
+    except ValueError:
+        max_events = 6
+    taken_at = _now()
+    try:
+        events = [event for event in _current_ncaaf_events() if not _has_started(event.get("commence_time"))][:max_events]
+    except (requests.RequestException, RuntimeError) as error:
+        detail = error.response.status_code if isinstance(error, requests.RequestException) and error.response else str(error)
+        return jsonify({"error": f"Current NCAAF event lookup failed ({detail})."}), 502
+    stored = skipped = 0
+    errors: list[str] = []
+    store = _store()
+    for event in events:
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            skipped += 1
+            continue
+        try:
+            odds = _current_ncaaf_props(event_id, markets)
+        except requests.RequestException as error:
+            errors.append(f"{event_id}: {error.response.status_code if error.response else 'request error'}")
+            continue
+        consensus, incomplete_pairs = _multi_book_prop_consensus(odds, markets)
+        skipped += incomplete_pairs
+        for (market_key, player, line), books in consensus.items():
+            if len(books) < 2:
+                skipped += 1
+                continue
+            representative = _representative_market_consensus(books)
+            if representative is None:
+                skipped += 1
+                continue
+            over, under, fair_over, reference_bookmaker = representative
+            record = {
+                "id": hashlib.sha256(f"ncaaf-market-snapshot|{taken_at}|{event_id}|{market_key}|{player}|{line}".encode()).hexdigest()[:32],
+                "sport": "ncaaf", "record_type": "pregame_ncaaf_market_consensus", "isolation": "ncaaf_research",
+                "eligible_for_live_calibration": False, "taken_at": taken_at, "event_id": event_id,
+                "game": f"{event.get('away_team')} @ {event.get('home_team')}", "commence_time": event.get("commence_time"),
+                "game_date": _eastern_sports_date(event.get("commence_time")), "player": player, "market_key": market_key,
+                "market": NCAAF_PROP_MARKETS[market_key][0], "line": line, "over_odds": over, "under_odds": under,
+                "fair_probability_over": round(fair_over * 100, 2), "book_count": len(books),
+                "bookmakers": [book["bookmaker"] for book in books], "reference_bookmaker": reference_bookmaker,
+                "consensus_method": "median_devig_per_book_v2", "projection": None, "projection_source": None,
+                "source": "The Odds API current multi-book NCAAF player-prop snapshot",
+            }
+            if store:
+                store.collection("prediction_market_snapshots").document(record["id"]).set(record)
+            else:
+                _memory_backtests[record["id"]] = record
+            stored += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_ncaaf_market_consensus", "taken_at": taken_at, "events_checked": len(events), "markets": markets, "stored": stored, "skipped": skipped, "errors": errors[:10], "message": "Stored real multi-book NCAAF pregame player-prop observations. No prediction, recommendation, or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/ncaaf/moneyline-context")
+def snapshot_ncaaf_moneyline_context():
+    """Persist auditable NCAAF pregame moneylines before kickoff."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    try:
+        max_events = min(20, max(1, int(request.args.get("max_events") or 12)))
+    except ValueError:
+        max_events = 12
+    try:
+        events = [event for event in _current_ncaaf_moneyline_events() if not _has_started(event.get("commence_time"))][:max_events]
+    except (requests.RequestException, RuntimeError) as error:
+        detail = error.response.status_code if isinstance(error, requests.RequestException) and error.response else str(error)
+        return jsonify({"error": f"Current NCAAF moneyline lookup failed ({detail})."}), 502
+    taken_at, stored, skipped = _now(), 0, 0
+    store = _store()
+    for event in events:
+        event_id, commence_time = str(event.get("id") or ""), str(event.get("commence_time") or "")
+        consensus = _pregame_moneyline_consensus(event) if event_id else None
+        if not event_id or consensus is None:
+            skipped += 1
+            continue
+        record = {
+            "id": hashlib.sha256(f"ncaaf-moneyline-context|{taken_at}|{event_id}".encode()).hexdigest()[:32],
+            "sport": "ncaaf", "record_type": "pregame_ncaaf_moneyline_context", "isolation": "forward_moneyline_research",
+            "eligible_for_live_calibration": False, "taken_at": taken_at, "event_id": event_id,
+            "game": f"{event.get('away_team')} @ {event.get('home_team')}", "game_date": _eastern_sports_date(commence_time), "commence_time": commence_time,
+            "market": consensus, "context_status": "market_only", "source": "The Odds API current multi-book NCAAF moneyline snapshot",
+        }
+        if store:
+            store.collection("prediction_ncaaf_moneyline_context_snapshots").document(record["id"]).set(record)
+        else:
+            _memory_backtests[record["id"]] = record
+        stored += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_ncaaf_moneyline_context", "taken_at": taken_at, "events_checked": len(events), "stored": stored, "skipped": skipped, "message": "Stored pregame multi-book NCAAF moneylines. These research records cannot change live recommendations."})
 
 
 @prediction_ledger_bp.post("/snapshots/nfl/preseason")
@@ -1540,6 +1755,106 @@ def grade_wnba_market_consensus():
             _memory_backtests[str(row.get("id"))] = {**row, **update}
         settled += 1
     return jsonify({"success": True, "isolated": True, "record_type": "pregame_wnba_market_consensus", "season_phase": "regular_season", "date": date, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached ESPN final WNBA player statistics to forward research observations. No player projection or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/ncaaf/grade-market-consensus")
+def grade_ncaaf_market_consensus():
+    """Attach final NCAAF player statistics to saved forward prop observations."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or (datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)).isoformat())
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    store = _store()
+    if store:
+        rows = [snapshot.to_dict() or {} for snapshot in store.collection("prediction_market_snapshots").where("record_type", "==", "pregame_ncaaf_market_consensus").stream()]
+    else:
+        rows = [row for row in _memory_backtests.values() if row.get("record_type") == "pregame_ncaaf_market_consensus"]
+    rows = [row for row in rows if row.get("game_date") == date and not row.get("settled_at")]
+    game_cache: dict[str, tuple[dict[str, Any] | None, dict[str, dict[str, float]]]] = {}
+    checked = settled = pending = skipped = 0
+    errors: list[str] = []
+    for row in rows:
+        checked += 1
+        game_label = str(row.get("game") or "")
+        if game_label not in game_cache:
+            teams = [team.strip() for team in game_label.split("@")]
+            if len(teams) != 2:
+                game_cache[game_label] = (None, {})
+            else:
+                try:
+                    game = _espn_ncaaf_final_game_for_event(date, {"away_team": teams[0], "home_team": teams[1]})
+                    game_cache[game_label] = (game, _espn_ncaaf_box_stats(game.get("id")) if game else {})
+                except requests.RequestException as error:
+                    errors.append(f"{game_label}: {error.response.status_code if error.response else 'request error'}")
+                    game_cache[game_label] = (None, {})
+        game, stats = game_cache[game_label]
+        if not game or not stats:
+            pending += 1
+            continue
+        field = NCAAF_PROP_MARKETS.get(str(row.get("market_key") or ""), ("", ""))[1]
+        actual, line = stats.get(_name_key(row.get("player")), {}).get(field), _number(row.get("line"))
+        if actual is None or line is None:
+            skipped += 1
+            continue
+        outcome = "push" if actual == line else "over" if actual > line else "under"
+        update = {"actual_value": actual, "outcome": outcome, "settled_at": _now(), "result_source": "ESPN NCAAF finalized box score"}
+        if store:
+            store.collection("prediction_market_snapshots").document(str(row.get("id"))).set(update, merge=True)
+        else:
+            _memory_backtests[str(row.get("id"))] = {**row, **update}
+        settled += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_ncaaf_market_consensus", "date": date, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached ESPN final NCAAF player statistics to forward research observations. No player projection or live-model change was made."})
+
+
+@prediction_ledger_bp.post("/snapshots/ncaaf/grade-moneyline-context")
+def grade_ncaaf_moneyline_context():
+    """Attach provider-confirmed final scores to saved NCAAF moneyline records."""
+    if not _import_authorized():
+        return jsonify({"error": "A valid import key or administrator session is required."}), 403
+    date = str(request.args.get("date") or "")
+    if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return jsonify({"error": "date must use YYYY-MM-DD."}), 400
+    store = _store()
+    if store:
+        rows = [(document.id, document.to_dict() or {}) for document in store.collection("prediction_ncaaf_moneyline_context_snapshots").stream()]
+    else:
+        rows = [(record_id, row) for record_id, row in _memory_backtests.items() if row.get("record_type") == "pregame_ncaaf_moneyline_context"]
+    checked = settled = pending = skipped = 0
+    errors: list[str] = []
+    for record_id, row in rows:
+        if row.get("record_type") != "pregame_ncaaf_moneyline_context" or row.get("result"):
+            continue
+        if date and row.get("game_date") != date:
+            continue
+        checked += 1
+        teams = [team.strip() for team in str(row.get("game") or "").split("@")]
+        game_date = str(row.get("game_date") or "")
+        if len(teams) != 2 or not game_date:
+            skipped += 1
+            continue
+        try:
+            game = _espn_ncaaf_final_game_for_event(game_date, {"away_team": teams[0], "home_team": teams[1]})
+        except requests.RequestException as error:
+            errors.append(f"{row.get('game')}: {error.response.status_code if error.response else 'request error'}")
+            continue
+        if not game:
+            pending += 1
+            continue
+        competition = (game.get("competitions") or [{}])[0]
+        competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
+        sides = {str(item.get("homeAway") or "").lower(): item for item in competitors if isinstance(item, dict)}
+        away_score, home_score = _number((sides.get("away") or {}).get("score")), _number((sides.get("home") or {}).get("score"))
+        if away_score is None or home_score is None or away_score == home_score:
+            skipped += 1
+            continue
+        update = {"result": {"away_score": away_score, "home_score": home_score, "home_won": home_score > away_score, "status": "Final", "provider": "ESPN public completed scoreboard"}, "graded_at": _now(), "eligible_for_live_calibration": False}
+        if store:
+            store.collection("prediction_ncaaf_moneyline_context_snapshots").document(record_id).set(update, merge=True)
+        else:
+            _memory_backtests[record_id] = {**row, **update}
+        settled += 1
+    return jsonify({"success": True, "isolated": True, "record_type": "pregame_ncaaf_moneyline_context", "date": date or None, "checked": checked, "settled": settled, "pending": pending, "skipped": skipped, "errors": errors[:10], "message": "Attached ESPN provider-confirmed NCAAF final scores to forward moneyline observations. No live model changed."})
 
 
 @prediction_ledger_bp.get("/snapshots/wnba/market-consensus/report")

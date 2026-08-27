@@ -1034,6 +1034,8 @@ request_log = defaultdict(list)
 route_cache = {}
 roster_cache = {}
 _player_name_cache = {}
+live_scoreboard_cache: Dict[str, Any] = {"timestamp": 0.0, "games": []}
+live_chat_post_log: Dict[str, List[float]] = defaultdict(list)
 
 # Cache TTLs
 ODDS_API_CACHE_MINUTES = 10
@@ -1121,6 +1123,10 @@ def mobile_package_for_request():
         '/api/prediction-ledger/snapshots/mlb/grade-market-consensus',
         '/api/prediction-ledger/snapshots/nfl/preseason',
         '/api/prediction-ledger/snapshots/nfl/preseason/historical-markets',
+        '/api/prediction-ledger/snapshots/ncaaf/market-consensus',
+        '/api/prediction-ledger/snapshots/ncaaf/moneyline-context',
+        '/api/prediction-ledger/snapshots/ncaaf/grade-market-consensus',
+        '/api/prediction-ledger/snapshots/ncaaf/grade-moneyline-context',
     }:
         return None
     if path == '/api/prediction-ledger/market-consensus/mlb':
@@ -1189,6 +1195,44 @@ def require_mobile_package_access():
         }), 403
     g.user_id, g.user_email = user_id, email
     return None
+
+
+def live_chat_member_required(handler):
+    """Require a real Firebase user with at least one active mobile package."""
+    @wraps(handler)
+    def decorated(*args, **kwargs):
+        token = flask_request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+        if not token:
+            return jsonify({'success': False, 'error': 'Sign in is required for member chat.'}), 401
+        verified = verify_firebase_token(token)
+        if not verified.get('valid'):
+            return jsonify({'success': False, 'error': 'Your sign-in session is invalid. Please sign in again.'}), 401
+        payload = verified['payload']
+        user_id = str(payload.get('uid') or '')
+        email = str(payload.get('email') or '').strip().lower()
+        if not user_id:
+            return jsonify({'success': False, 'error': 'Your sign-in session is missing an account ID.'}), 401
+        if not db:
+            return jsonify({'success': False, 'error': 'Member chat is temporarily unavailable.'}), 503
+        try:
+            user_doc = db.collection('users').document(user_id).get()
+            user_data = user_doc.to_dict() if user_doc.exists else {}
+        except Exception as exc:
+            print(f'Live chat access lookup failed: {exc}', flush=True)
+            return jsonify({'success': False, 'error': 'Member chat is temporarily unavailable.'}), 503
+        admins = {item.strip().lower() for item in os.getenv('ADMIN_EMAILS', '').split(',') if item.strip()}
+        active_packages = {
+            str(item).strip().lower()
+            for item in user_data.get('active_packages', [])
+            if str(item).strip().lower() in PACKAGE_NAMES
+        }
+        if email not in admins and user_data.get('role') != 'admin' and not active_packages:
+            return jsonify({'success': False, 'error': 'An active subscription is required for Live Member Chat.'}), 403
+        g.user_id = user_id
+        g.user_email = email
+        g.user_display_name = str(user_data.get('displayName') or email.split('@')[0] or 'Member').strip()[:40]
+        return handler(*args, **kwargs)
+    return decorated
 
 # ============================================
 # GLOBAL OPTIONS HANDLER - Catches all preflight requests
@@ -3617,6 +3661,31 @@ REVENUECAT_PRODUCT_PLANS = {
     "com.jerryjiya.myapp_new.superstats.weekly": "superstats",
     "com.jerryjiya.myapp_new.superstats.monthly": "superstats",
 }
+REVENUECAT_LIVE_CHAT_HIGHLIGHT_PRODUCT = "com.jerryjiya.myapp_new.live_chat_highlight"
+
+
+def grant_live_chat_highlight_credit(user_id, event):
+    """Grant exactly one server-side credit for a confirmed consumable purchase."""
+    transaction_id = str(event.get('transaction_id') or event.get('original_transaction_id') or '')
+    if not transaction_id:
+        return {'success': True, 'ignored': True, 'reason': 'Missing transaction ID'}
+    purchase_ref = db.collection('live_chat_highlight_purchases').document(hashlib.sha256(transaction_id.encode()).hexdigest())
+    try:
+        # `create` makes the webhook idempotent: retried RevenueCat events cannot
+        # result in a second highlight credit.
+        purchase_ref.create({
+            'user_id': str(user_id),
+            'transaction_id': transaction_id,
+            'product_id': REVENUECAT_LIVE_CHAT_HIGHLIGHT_PRODUCT,
+            'created_at': datetime.now(timezone.utc),
+        })
+    except Exception:
+        return {'success': True, 'ignored': True, 'reason': 'Purchase already processed'}
+    db.collection('users').document(str(user_id)).set({
+        'live_chat_highlight_credits': firestore.Increment(1),
+        'updated_at': firestore.SERVER_TIMESTAMP,
+    }, merge=True)
+    return {'success': True, 'granted': True}
 
 
 def update_revenuecat_access(user_id, plan, event_type, product_id, expires_at, store):
@@ -3696,6 +3765,10 @@ def revenuecat_webhook():
 
     event_type = str(event.get("type") or "").upper()
     product_id = str(event.get("product_id") or "")
+    if product_id == REVENUECAT_LIVE_CHAT_HIGHLIGHT_PRODUCT:
+        if event_type in {"INITIAL_PURCHASE", "NON_RENEWING_PURCHASE"}:
+            return jsonify(grant_live_chat_highlight_credit(user_id, event)), 200
+        return jsonify({"success": True, "ignored": True, "reason": f"Unhandled event {event_type}"}), 200
     plan = REVENUECAT_PRODUCT_PLANS.get(product_id)
     if not plan:
         return jsonify({"success": True, "ignored": True, "reason": "Unknown product"}), 200
@@ -8382,6 +8455,241 @@ def get_analytics():
 # ------------------------------------------------------------------------------
 # Odds endpoints
 # ------------------------------------------------------------------------------
+@app.route("/api/live-chat/messages", methods=["GET"])
+@live_chat_member_required
+def get_live_chat_messages():
+    """Fetch the latest messages from the subscriber-only live-game room."""
+    try:
+        limit = min(max(int(flask_request.args.get('limit', 50)), 1), 100)
+        docs = (
+            db.collection('live_game_chat_messages')
+            .order_by('created_at', direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        messages = []
+        for doc in docs:
+            item = doc.to_dict() or {}
+            created_at = item.get('created_at')
+            messages.append({
+                'id': doc.id,
+                'text': str(item.get('text') or ''),
+                'author_name': str(item.get('author_name') or 'Member'),
+                'author_id': str(item.get('author_id') or ''),
+                'created_at': created_at.isoformat() if hasattr(created_at, 'isoformat') else None,
+            })
+        messages.reverse()
+        now = datetime.now(timezone.utc)
+        highlights = []
+        for doc in db.collection('live_game_chat_highlights').order_by('expires_at', direction=firestore.Query.DESCENDING).limit(10).stream():
+            item = doc.to_dict() or {}
+            expires_at = item.get('expires_at')
+            if not hasattr(expires_at, 'isoformat') or expires_at <= now:
+                continue
+            highlights.append({
+                'id': doc.id,
+                'text': str(item.get('text') or ''),
+                'author_name': str(item.get('author_name') or 'Member'),
+                'expires_at': expires_at.isoformat(),
+            })
+        return jsonify({'success': True, 'messages': messages, 'highlights': highlights})
+    except Exception as exc:
+        print(f'❌ Error reading live chat: {exc}', flush=True)
+        return jsonify({'success': False, 'error': 'Unable to load member chat.'}), 500
+
+
+@app.route("/api/live-chat/messages", methods=["POST"])
+@live_chat_member_required
+def post_live_chat_message():
+    """Publish a short message. Identity and display name are server-derived."""
+    try:
+        body = flask_request.get_json(silent=True) or {}
+        text = ' '.join(str(body.get('text') or '').split())
+        if not text:
+            return jsonify({'success': False, 'error': 'Write a message before sending.'}), 400
+        if len(text) > 280:
+            return jsonify({'success': False, 'error': 'Messages must be 280 characters or fewer.'}), 400
+        if 'http://' in text.lower() or 'https://' in text.lower() or 'www.' in text.lower():
+            return jsonify({'success': False, 'error': 'Links are not allowed in member chat.'}), 400
+        now = time.time()
+        recent_posts = [stamp for stamp in live_chat_post_log[g.user_id] if now - stamp < 60]
+        if len(recent_posts) >= 8:
+            return jsonify({'success': False, 'error': 'Please wait a moment before sending another message.'}), 429
+        recent_posts.append(now)
+        live_chat_post_log[g.user_id] = recent_posts
+        created_at = datetime.now(timezone.utc)
+        doc_ref = db.collection('live_game_chat_messages').document()
+        doc_ref.set({
+            'text': text,
+            'author_id': g.user_id,
+            'author_name': g.user_display_name,
+            'created_at': created_at,
+        })
+        return jsonify({'success': True, 'message': {
+            'id': doc_ref.id,
+            'text': text,
+            'author_id': g.user_id,
+            'author_name': g.user_display_name,
+            'created_at': created_at.isoformat(),
+        }}), 201
+    except Exception as exc:
+        print(f'❌ Error posting live chat: {exc}', flush=True)
+        return jsonify({'success': False, 'error': 'Unable to send your message.'}), 500
+
+
+@app.route("/api/live-chat/highlight-credits", methods=["GET"])
+@live_chat_member_required
+def get_live_chat_highlight_credits():
+    try:
+        user_doc = db.collection('users').document(g.user_id).get()
+        user_data = user_doc.to_dict() if user_doc.exists else {}
+        credits = max(int(user_data.get('live_chat_highlight_credits') or 0), 0)
+        return jsonify({'success': True, 'credits': credits})
+    except Exception as exc:
+        print(f'❌ Error reading live chat highlight credits: {exc}', flush=True)
+        return jsonify({'success': False, 'error': 'Unable to check highlight credits.'}), 500
+
+
+@app.route("/api/live-chat/highlights", methods=["POST"])
+@live_chat_member_required
+def post_live_chat_highlight():
+    """Spend one verified consumable credit to pin a member message for 10 seconds."""
+    try:
+        body = flask_request.get_json(silent=True) or {}
+        text = ' '.join(str(body.get('text') or '').split())
+        if not text:
+            return jsonify({'success': False, 'error': 'Write a message before highlighting it.'}), 400
+        if len(text) > 280:
+            return jsonify({'success': False, 'error': 'Messages must be 280 characters or fewer.'}), 400
+        if 'http://' in text.lower() or 'https://' in text.lower() or 'www.' in text.lower():
+            return jsonify({'success': False, 'error': 'Links are not allowed in member chat.'}), 400
+
+        user_ref = db.collection('users').document(g.user_id)
+        highlight_ref = db.collection('live_game_chat_highlights').document()
+        created_at = datetime.now(timezone.utc)
+
+        @firestore.transactional
+        def spend_credit(transaction):
+            user_doc = user_ref.get(transaction=transaction)
+            user_data = user_doc.to_dict() if user_doc.exists else {}
+            credits = int(user_data.get('live_chat_highlight_credits') or 0)
+            if credits < 1:
+                raise ValueError('No highlight credits are available yet.')
+            transaction.update(user_ref, {'live_chat_highlight_credits': credits - 1, 'updated_at': firestore.SERVER_TIMESTAMP})
+            transaction.set(highlight_ref, {
+                'text': text,
+                'author_id': g.user_id,
+                'author_name': g.user_display_name,
+                'created_at': created_at,
+                'expires_at': created_at + timedelta(seconds=10),
+            })
+
+        spend_credit(db.transaction())
+        return jsonify({'success': True, 'highlight': {
+            'id': highlight_ref.id,
+            'text': text,
+            'author_name': g.user_display_name,
+            'expires_at': (created_at + timedelta(seconds=10)).isoformat(),
+        }}), 201
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 409
+    except Exception as exc:
+        print(f'❌ Error creating live chat highlight: {exc}', flush=True)
+        return jsonify({'success': False, 'error': 'Unable to create the highlighted message.'}), 500
+
+
+@app.route("/api/live-chat/reports", methods=["POST"])
+@live_chat_member_required
+def report_live_chat_message():
+    """Store a private moderation report and hide the reported item for the reporter."""
+    try:
+        body = flask_request.get_json(silent=True) or {}
+        message_id = str(body.get('message_id') or '').strip()
+        if not message_id:
+            return jsonify({'success': False, 'error': 'Select a message to report.'}), 400
+        db.collection('live_game_chat_reports').add({
+            'message_id': message_id,
+            'reporter_id': g.user_id,
+            'reason': 'Member report',
+            'created_at': datetime.now(timezone.utc),
+            'status': 'open',
+        })
+        return jsonify({'success': True}), 201
+    except Exception as exc:
+        print(f'❌ Error reporting live chat message: {exc}', flush=True)
+        return jsonify({'success': False, 'error': 'Unable to submit the report.'}), 500
+
+
+@app.route("/api/live-games", methods=["GET"])
+def get_live_games():
+    """Return score-only games for the shared, package-independent home screen.
+
+    This deliberately uses The Odds API scores endpoint instead of its odds
+    endpoint. The short cache prevents a home-screen refresh from producing a
+    separate provider request for every signed-in user.
+    """
+    try:
+        requested_sports = flask_request.args.get("sports", "").strip().lower()
+        sports = [item.strip() for item in requested_sports.split(",") if item.strip()] if requested_sports else [
+            "nba", "wnba", "nfl", "mlb", "nhl", "ncaaf", "ncaab"
+        ]
+        sport_config = {
+            "nba": ("basketball_nba", "NBA"),
+            "wnba": ("basketball_wnba", "WNBA"),
+            "nfl": ("americanfootball_nfl", "NFL"),
+            "mlb": ("baseball_mlb", "MLB"),
+            "nhl": ("icehockey_nhl", "NHL"),
+            "ncaaf": ("americanfootball_ncaaf", "NCAAF"),
+            "ncaab": ("basketball_ncaab", "NCAAB"),
+        }
+        sports = [sport for sport in sports if sport in sport_config]
+        cache_key = ",".join(sports)
+        now = time.time()
+        cached = live_scoreboard_cache.get(cache_key)
+        if cached and now - cached["timestamp"] < 60:
+            games = cached["games"]
+            source = "cache"
+        else:
+            games = []
+            for sport in sports:
+                sport_key, label = sport_config[sport]
+                for game_id, game in fetch_game_scores(sport_key).items():
+                    status = game.get("status", "scheduled")
+                    # Scheduled games should not look like a real 0-0 result.
+                    has_score = status in {"live", "final"}
+                    games.append({
+                        "id": game_id,
+                        "sport": sport,
+                        "league": label,
+                        "home_team": game.get("home_team"),
+                        "away_team": game.get("away_team"),
+                        "home_score": game.get("home_score") if has_score else None,
+                        "away_score": game.get("away_score") if has_score else None,
+                        "status": status,
+                        "period": game.get("period"),
+                        "clock": game.get("clock"),
+                        "commence_time": game.get("commence_time"),
+                    })
+            games.sort(key=lambda game: (
+                {"live": 0, "scheduled": 1, "final": 2}.get(game["status"], 3),
+                game.get("commence_time") or "",
+            ))
+            live_scoreboard_cache[cache_key] = {"timestamp": now, "games": games}
+            source = "the-odds-api"
+
+        return jsonify({
+            "success": True,
+            "games": games,
+            "count": len(games),
+            "sports": sports,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+        })
+    except Exception as exc:
+        print(f"❌ Error in /api/live-games: {exc}", flush=True)
+        traceback.print_exc()
+        return jsonify({"success": False, "games": [], "error": str(exc)}), 500
+
 @app.route("/api/odds/games")
 def get_odds_games():
     """
@@ -8397,13 +8705,19 @@ def get_odds_games():
         # Map common frontend sport names to backend format
         sport_mapping = {
             'basketball_nba': 'nba',
+            'basketball_wnba': 'wnba',
             'americanfootball_nfl': 'nfl',
+            'americanfootball_ncaaf': 'ncaaf',
+            'basketball_ncaab': 'ncaab',
             'baseball_mlb': 'mlb',
             'icehockey_nhl': 'nhl',
             'nba': 'nba',
             'nfl': 'nfl',
             'mlb': 'mlb',
-            'nhl': 'nhl'
+            'nhl': 'nhl',
+            'wnba': 'wnba',
+            'ncaaf': 'ncaaf',
+            'ncaab': 'ncaab',
         }
 
         sport = sport_mapping.get(sport_param, sport_param)
